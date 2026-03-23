@@ -148,6 +148,7 @@ class DummyLLMClient(LLMClient):
                     "step_id": 1,
                     "action": "open_url",
                     "args": {"url": target_url},
+                    "args": {"url": "https://example.com"},
                 },
                 {
                     "step_id": 2,
