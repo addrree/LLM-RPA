@@ -16,8 +16,28 @@ class PlaywrightExecutor:
         screenshot_path = None
 
         async with async_playwright() as p:
-            browser = await p.chromium.launch(headless=True)
-            page = await browser.new_page()
+            try:
+                browser = await p.chromium.launch(headless=True)
+                page = await browser.new_page()
+            except Exception as launch_error:
+                logs.append(
+                    StepLog(
+                        step_id=0,
+                        action="launch_browser",
+                        status="failed",
+                        message=str(launch_error),
+                    )
+                )
+                return ExecutionResult(
+                    status="failed",
+                    extracted_data=extracted_data,
+                    final_url=None,
+                    page_title=None,
+                    page_text_excerpt=None,
+                    screenshot_path=None,
+                    logs=logs,
+                    error_message=str(launch_error),
+                )
 
             try:
                 for step in plan.steps:
