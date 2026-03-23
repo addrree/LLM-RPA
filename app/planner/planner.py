@@ -8,7 +8,7 @@ class Planner:
         self.llm_client = llm_client
 
     def build_plan(self, user_goal: str) -> TaskSpec:
-        raw_json = self.llm_client.generate_json(
+        raw_json = self.llm_client.generate_planner_json(
             system_prompt=PLANNER_SYSTEM_PROMPT,
             user_prompt=user_goal,
         )

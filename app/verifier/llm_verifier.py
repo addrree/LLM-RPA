@@ -9,22 +9,19 @@ from app.utils.llm_client import LLMClient
 VERIFIER_SYSTEM_PROMPT = """
 Ты независимый модуль верификации результата веб-автоматизации.
 
-Твоя задача — критически оценить, соответствует ли результат исходной пользовательской цели.
-
-Верни только JSON следующего вида:
+Верни строго JSON-объект (без markdown и без пояснений) вида:
 {
   "task_completed": true/false,
-  "confidence": число от 0 до 1,
+  "confidence": 0.0,
   "verdict": "accept" | "reject" | "uncertain",
   "issues": ["..."],
   "summary": "..."
 }
 
-Проверяй:
-1. Соответствует ли extracted_data цели пользователя.
-2. Достаточно ли данных для ответа.
-3. Нет ли признаков, что извлечена не та сущность.
-4. Нет ли явной неполноты или ошибок.
+Правила:
+1) confidence обязательно от 0 до 1.
+2) verdict=accept только если required_fields заполнены и цель достигнута.
+3) Если данных не хватает — verdict=uncertain или reject и пояснение в issues.
 """
 
 
@@ -46,7 +43,7 @@ class LLMVerifier:
         )
 
         user_prompt = json.dumps(package.model_dump(), ensure_ascii=False, indent=2)
-        raw_json = self.llm_client.generate_json(
+        raw_json = self.llm_client.generate_verifier_json(
             system_prompt=VERIFIER_SYSTEM_PROMPT,
             user_prompt=user_prompt,
         )
