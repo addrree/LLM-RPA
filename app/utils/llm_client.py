@@ -122,10 +122,6 @@ class DummyLLMClient(LLMClient):
         pass
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        """
-        Backward-compatible router for older call-sites.
-        Prefer explicit generate_planner_json/generate_verifier_json.
-        """
         if "модуль верификации" in system_prompt.lower() or "verification" in system_prompt.lower():
             return self._build_dummy_verdict(user_prompt)
         return self._build_dummy_plan(user_prompt)
@@ -152,6 +148,7 @@ class DummyLLMClient(LLMClient):
                     "step_id": 1,
                     "action": "open_url",
                     "args": {"url": target_url},
+                    "args": {"url": "https://example.com"},
                 },
                 {
                     "step_id": 2,
@@ -225,7 +222,7 @@ class DummyLLMClient(LLMClient):
         return match.group(0).rstrip(".,)")
 
     def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return self._build_dummy_plan(user_prompt)
+        return self.generate_json(system_prompt, user_prompt)
 
     def generate_verifier_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return self._build_dummy_verdict(user_prompt)
+        return self.generate_json(system_prompt, user_prompt)

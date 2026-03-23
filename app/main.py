@@ -55,9 +55,6 @@ def save_artifacts(result: dict) -> None:
 
 async def run(user_goal: str, force_dummy: bool = False):
     llm_client = build_llm_client(force_dummy=force_dummy)
-    mode = "dummy" if isinstance(llm_client, DummyLLMClient) else "gemini"
-    print(f"[INFO] LLM mode: {mode}")
-    print(f"[INFO] User goal: {user_goal}")
 
     workflow = WorkflowManager(
         planner=Planner(llm_client),
