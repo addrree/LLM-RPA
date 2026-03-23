@@ -127,8 +127,8 @@ class DummyLLMClient(LLMClient):
         return self._build_dummy_plan(user_prompt)
 
     def _build_dummy_plan(self, user_goal: str) -> Dict[str, Any]:
-        target_url = self._extract_first_url(user_goal) or "https://example.com"
-        domain = urlparse(target_url).netloc or "example.com"
+        target_url = self._extract_first_url(user_goal) or "https://www.wikipedia.org"
+        domain = urlparse(target_url).netloc or "www.wikipedia.org"
 
         return {
             "goal": user_goal,
@@ -148,7 +148,6 @@ class DummyLLMClient(LLMClient):
                     "step_id": 1,
                     "action": "open_url",
                     "args": {"url": target_url},
-                    "args": {"url": "https://example.com"},
                 },
                 {
                     "step_id": 2,
