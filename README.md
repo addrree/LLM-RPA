@@ -37,7 +37,7 @@ python -m app.main
 
 По умолчанию цель:
 
-- открыть `https://www.wikipedia.org`
+- открыть `https://example.com`
 - извлечь `h1`
 - сделать скриншот
 - завершить сценарий

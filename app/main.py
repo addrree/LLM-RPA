@@ -55,9 +55,6 @@ def save_artifacts(result: dict) -> None:
 
 async def run(user_goal: str, force_dummy: bool = False):
     llm_client = build_llm_client(force_dummy=force_dummy)
-    mode = "dummy" if isinstance(llm_client, DummyLLMClient) else "gemini"
-    print(f"[INFO] LLM mode: {mode}")
-    print(f"[INFO] User goal: {user_goal}")
 
     workflow = WorkflowManager(
         planner=Planner(llm_client),
@@ -84,7 +81,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run LLM-RPA MVP pipeline")
     parser.add_argument(
         "--goal",
-        default="Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish.",
+        default="Open https://example.com, extract the h1 text, take screenshot and finish.",
         help="User goal in natural language",
     )
     parser.add_argument(
