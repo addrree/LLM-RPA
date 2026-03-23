@@ -1,4 +1,4 @@
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 from pydantic import BaseModel, Field
 
 
@@ -16,7 +16,7 @@ class VerificationPackage(BaseModel):
 
 class VerificationVerdict(BaseModel):
     task_completed: bool
-    confidence: float
-    verdict: str
+    confidence: float = Field(ge=0.0, le=1.0)
+    verdict: Literal["accept", "reject", "uncertain"]
     issues: List[str] = Field(default_factory=list)
     summary: str

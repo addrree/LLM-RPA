@@ -1,68 +1,63 @@
+import argparse
 import asyncio
 import json
+import os
+from datetime import datetime
 
+from dotenv import load_dotenv
+
+from app.config import LOGS_DIR, RESULTS_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.planner.planner import Planner
-from app.utils.llm_client import LLMClient
+from app.utils.llm_client import DummyLLMClient, LLMClient, LLMClientError
 from app.validator.plan_validator import PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
 
-class DummyLLMClient(LLMClient):
-    def generate_json(self, system_prompt: str, user_prompt: str) -> dict:
-        # Временная заглушка.
-        # Сначала с ней прогоняешь pipeline.
-        if "модуль верификации" in system_prompt.lower():
-            return {
-                "task_completed": True,
-                "confidence": 0.85,
-                "verdict": "accept",
-                "issues": [],
-                "summary": "Result looks relevant to the task."
-            }
+def build_llm_client(force_dummy: bool = False):
+    if force_dummy:
+        return DummyLLMClient()
 
-        return {
-            "goal": user_prompt,
-            "start_url": "https://example.com",
-            "allowed_domains": ["example.com"],
-            "constraints": {
-                "max_steps": 6,
-                "max_replans": 1,
-                "timeout_sec": 20
-            },
-            "expected_result": {
-                "description": "Extract page heading text",
-                "required_fields": ["heading"]
-            },
-            "steps": [
-                {
-                    "step_id": 1,
-                    "action": "open_url",
-                    "args": {"url": "https://example.com"}
-                },
-                {
-                    "step_id": 2,
-                    "action": "extract_text",
-                    "args": {"selector": "h1"},
-                    "save_as": "heading"
-                },
-                {
-                    "step_id": 3,
-                    "action": "screenshot",
-                    "args": {}
-                },
-                {
-                    "step_id": 4,
-                    "action": "finish",
-                    "args": {}
-                }
-            ]
-        }
+    try:
+        return LLMClient(
+            planner_model=os.getenv("GEMINI_PLANNER_MODEL", "gemini-2.0-flash"),
+            verifier_model=os.getenv("GEMINI_VERIFIER_MODEL", "gemini-2.0-flash"),
+        )
+    except LLMClientError as exc:
+        print(f"[WARN] {exc} Falling back to DummyLLMClient.")
+        return DummyLLMClient()
 
 
-async def main():
-    llm_client = DummyLLMClient()
+def save_artifacts(result: dict) -> None:
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    plan_path = RESULTS_DIR / f"plan_{timestamp}.json"
+    execution_path = RESULTS_DIR / f"execution_{timestamp}.json"
+    verdict_path = RESULTS_DIR / f"verdict_{timestamp}.json"
+    logs_path = LOGS_DIR / f"logs_{timestamp}.json"
+
+    plan_json = result["plan"].model_dump(mode="json")
+    execution_json = result["execution_result"].model_dump(mode="json")
+    verdict_json = result["verdict"].model_dump(mode="json")
+
+    plan_path.write_text(json.dumps(plan_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    execution_path.write_text(json.dumps(execution_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    verdict_path.write_text(json.dumps(verdict_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    logs_path.write_text(json.dumps(execution_json.get("logs", []), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\nARTIFACTS:")
+    print(f"- Plan: {plan_path}")
+    print(f"- Execution: {execution_path}")
+    print(f"- Verdict: {verdict_path}")
+    print(f"- Logs: {logs_path}")
+
+
+async def run(user_goal: str, force_dummy: bool = False):
+    llm_client = build_llm_client(force_dummy=force_dummy)
+    mode = "dummy" if isinstance(llm_client, DummyLLMClient) else "gemini"
+    print(f"[INFO] LLM mode: {mode}")
+    print(f"[INFO] User goal: {user_goal}")
 
     workflow = WorkflowManager(
         planner=Planner(llm_client),
@@ -70,8 +65,6 @@ async def main():
         executor=PlaywrightExecutor(),
         verifier=LLMVerifier(llm_client),
     )
-
-    user_goal = "Открой example.com и выгрузи главный заголовок страницы"
 
     result = await workflow.run(user_goal)
 
@@ -84,6 +77,25 @@ async def main():
     print("\nVERDICT:")
     print(result["verdict"].model_dump_json(indent=2))
 
+    save_artifacts(result)
+
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run LLM-RPA MVP pipeline")
+    parser.add_argument(
+        "--goal",
+        default="Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish.",
+        help="User goal in natural language",
+    )
+    parser.add_argument(
+        "--dummy",
+        action="store_true",
+        help="Force DummyLLMClient instead of Gemini API",
+    )
+    return parser.parse_args()
+
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    load_dotenv()
+    args = parse_args()
+    asyncio.run(run(user_goal=args.goal, force_dummy=args.dummy))
