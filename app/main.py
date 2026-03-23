@@ -1,9 +1,12 @@
 import argparse
 import asyncio
+import json
 import os
+from datetime import datetime
 
 from dotenv import load_dotenv
 
+from app.config import LOGS_DIR, RESULTS_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.planner.planner import Planner
@@ -26,6 +29,30 @@ def build_llm_client(force_dummy: bool = False):
         return DummyLLMClient()
 
 
+def save_artifacts(result: dict) -> None:
+    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+
+    plan_path = RESULTS_DIR / f"plan_{timestamp}.json"
+    execution_path = RESULTS_DIR / f"execution_{timestamp}.json"
+    verdict_path = RESULTS_DIR / f"verdict_{timestamp}.json"
+    logs_path = LOGS_DIR / f"logs_{timestamp}.json"
+
+    plan_json = result["plan"].model_dump(mode="json")
+    execution_json = result["execution_result"].model_dump(mode="json")
+    verdict_json = result["verdict"].model_dump(mode="json")
+
+    plan_path.write_text(json.dumps(plan_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    execution_path.write_text(json.dumps(execution_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    verdict_path.write_text(json.dumps(verdict_json, ensure_ascii=False, indent=2), encoding="utf-8")
+    logs_path.write_text(json.dumps(execution_json.get("logs", []), ensure_ascii=False, indent=2), encoding="utf-8")
+
+    print("\nARTIFACTS:")
+    print(f"- Plan: {plan_path}")
+    print(f"- Execution: {execution_path}")
+    print(f"- Verdict: {verdict_path}")
+    print(f"- Logs: {logs_path}")
+
+
 async def run(user_goal: str, force_dummy: bool = False):
     llm_client = build_llm_client(force_dummy=force_dummy)
 
@@ -46,6 +73,8 @@ async def run(user_goal: str, force_dummy: bool = False):
 
     print("\nVERDICT:")
     print(result["verdict"].model_dump_json(indent=2))
+
+    save_artifacts(result)
 
 
 def parse_args():

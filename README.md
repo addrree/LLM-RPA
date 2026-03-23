@@ -48,10 +48,21 @@ python -m app.main
 python -m app.main --dummy
 ```
 
+### 5) Что появляется в artifacts
+
+После каждого запуска сохраняются:
+- `artifacts/results/plan_<timestamp>.json`
+- `artifacts/results/execution_<timestamp>.json`
+- `artifacts/results/verdict_<timestamp>.json`
+- `artifacts/logs/logs_<timestamp>.json`
+
+Скриншот (`artifacts/screenshots/...`) появляется только если шаг `screenshot` реально выполнен.
+Если выполнение упало раньше (например, `open_url` с DNS/сеть ошибкой), скриншота не будет.
+
 ## Пример своей цели
 
 ```bash
-python -m app.main --goal "Open https://example.com, extract the h1 text, take screenshot and finish."
+python -m app.main --goal "Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish."
 ```
 
 ## Smoke test
