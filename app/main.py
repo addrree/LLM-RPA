@@ -1,68 +1,33 @@
+import argparse
 import asyncio
-import json
+import os
+
+from dotenv import load_dotenv
 
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.planner.planner import Planner
-from app.utils.llm_client import LLMClient
+from app.utils.llm_client import DummyLLMClient, LLMClient, LLMClientError
 from app.validator.plan_validator import PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
 
-class DummyLLMClient(LLMClient):
-    def generate_json(self, system_prompt: str, user_prompt: str) -> dict:
-        # Временная заглушка.
-        # Сначала с ней прогоняешь pipeline.
-        if "модуль верификации" in system_prompt.lower():
-            return {
-                "task_completed": True,
-                "confidence": 0.85,
-                "verdict": "accept",
-                "issues": [],
-                "summary": "Result looks relevant to the task."
-            }
+def build_llm_client(force_dummy: bool = False):
+    if force_dummy:
+        return DummyLLMClient()
 
-        return {
-            "goal": user_prompt,
-            "start_url": "https://example.com",
-            "allowed_domains": ["example.com"],
-            "constraints": {
-                "max_steps": 6,
-                "max_replans": 1,
-                "timeout_sec": 20
-            },
-            "expected_result": {
-                "description": "Extract page heading text",
-                "required_fields": ["heading"]
-            },
-            "steps": [
-                {
-                    "step_id": 1,
-                    "action": "open_url",
-                    "args": {"url": "https://example.com"}
-                },
-                {
-                    "step_id": 2,
-                    "action": "extract_text",
-                    "args": {"selector": "h1"},
-                    "save_as": "heading"
-                },
-                {
-                    "step_id": 3,
-                    "action": "screenshot",
-                    "args": {}
-                },
-                {
-                    "step_id": 4,
-                    "action": "finish",
-                    "args": {}
-                }
-            ]
-        }
+    try:
+        return LLMClient(
+            planner_model=os.getenv("GEMINI_PLANNER_MODEL", "gemini-2.0-flash"),
+            verifier_model=os.getenv("GEMINI_VERIFIER_MODEL", "gemini-2.0-flash"),
+        )
+    except LLMClientError as exc:
+        print(f"[WARN] {exc} Falling back to DummyLLMClient.")
+        return DummyLLMClient()
 
 
-async def main():
-    llm_client = DummyLLMClient()
+async def run(user_goal: str, force_dummy: bool = False):
+    llm_client = build_llm_client(force_dummy=force_dummy)
 
     workflow = WorkflowManager(
         planner=Planner(llm_client),
@@ -70,8 +35,6 @@ async def main():
         executor=PlaywrightExecutor(),
         verifier=LLMVerifier(llm_client),
     )
-
-    user_goal = "Открой example.com и выгрузи главный заголовок страницы"
 
     result = await workflow.run(user_goal)
 
@@ -85,5 +48,22 @@ async def main():
     print(result["verdict"].model_dump_json(indent=2))
 
 
+def parse_args():
+    parser = argparse.ArgumentParser(description="Run LLM-RPA MVP pipeline")
+    parser.add_argument(
+        "--goal",
+        default="Open https://example.com, extract the h1 text, take screenshot and finish.",
+        help="User goal in natural language",
+    )
+    parser.add_argument(
+        "--dummy",
+        action="store_true",
+        help="Force DummyLLMClient instead of Gemini API",
+    )
+    return parser.parse_args()
+
+
 if __name__ == "__main__":
-    asyncio.run(main())
+    load_dotenv()
+    args = parse_args()
+    asyncio.run(run(user_goal=args.goal, force_dummy=args.dummy))
