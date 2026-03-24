@@ -30,6 +30,15 @@ class LLMVerifier:
         self.llm_client = llm_client
 
     def verify(self, plan: TaskSpec, result: ExecutionResult) -> VerificationVerdict:
+        if result.status != "success":
+            return VerificationVerdict(
+                task_completed=False,
+                confidence=0.0,
+                verdict="reject",
+                issues=["Execution status is not success."],
+                summary="Verifier rejected the run because execution did not finish successfully.",
+            )
+
         package = VerificationPackage(
             user_goal=plan.goal,
             expected_result_description=plan.expected_result.description,
@@ -46,5 +55,6 @@ class LLMVerifier:
         raw_json = self.llm_client.generate_verifier_json(
             system_prompt=VERIFIER_SYSTEM_PROMPT,
             user_prompt=user_prompt,
+            image_path=result.screenshot_path,
         )
         return VerificationVerdict.model_validate(raw_json)

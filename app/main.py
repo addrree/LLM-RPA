@@ -17,14 +17,20 @@ from app.verifier.llm_verifier import LLMVerifier
 UTC = timezone.utc
 
 
-def build_llm_client(force_dummy: bool = False):
+def build_llm_client(force_dummy: bool = False, backend: str | None = None):
     if force_dummy:
+        return DummyLLMClient()
+
+    selected_backend = (backend or os.getenv("LLM_BACKEND", "ollama")).strip().lower()
+    if selected_backend == "dummy":
         return DummyLLMClient()
 
     try:
         return LLMClient(
-            planner_model=os.getenv("GEMINI_PLANNER_MODEL", "gemini-2.0-flash"),
-            verifier_model=os.getenv("GEMINI_VERIFIER_MODEL", "gemini-2.0-flash"),
+            backend=selected_backend,
+            planner_model=os.getenv("OLLAMA_PLANNER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
+            verifier_model=os.getenv("OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
+            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
         )
     except LLMClientError as exc:
         print(f"[WARN] {exc} Falling back to DummyLLMClient.")
@@ -55,8 +61,8 @@ def save_artifacts(result: dict) -> None:
     print(f"- Logs: {logs_path}")
 
 
-async def run(user_goal: str, force_dummy: bool = False):
-    llm_client = build_llm_client(force_dummy=force_dummy)
+async def run(user_goal: str, force_dummy: bool = False, backend: str | None = None):
+    llm_client = build_llm_client(force_dummy=force_dummy, backend=backend)
 
     workflow = WorkflowManager(
         planner=Planner(llm_client),
@@ -89,7 +95,13 @@ def parse_args():
     parser.add_argument(
         "--dummy",
         action="store_true",
-        help="Force DummyLLMClient instead of Gemini API",
+        help="Force DummyLLMClient",
+    )
+    parser.add_argument(
+        "--backend",
+        choices=["ollama", "dummy"],
+        default=None,
+        help="LLM backend to use (default from LLM_BACKEND env, fallback: ollama)",
     )
     return parser.parse_args()
 
@@ -97,4 +109,4 @@ def parse_args():
 if __name__ == "__main__":
     load_dotenv()
     args = parse_args()
-    asyncio.run(run(user_goal=args.goal, force_dummy=args.dummy))
+    asyncio.run(run(user_goal=args.goal, force_dummy=args.dummy, backend=args.backend))
