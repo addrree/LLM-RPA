@@ -1,9 +1,13 @@
+from datetime import datetime, timezone
+
 from playwright.async_api import async_playwright
 
 from app.config import SCREENSHOTS_DIR
 from app.executor.action_handlers import ActionHandlers
 from app.schemas.execution import ExecutionResult, StepLog
 from app.schemas.task_spec import TaskSpec
+
+UTC = timezone.utc
 
 
 class PlaywrightExecutor:
@@ -75,6 +79,16 @@ class PlaywrightExecutor:
                                 status="success"
                             )
                         )
+                        debug_note = step.args.pop("_executor_note", None)
+                        if debug_note:
+                            logs.append(
+                                StepLog(
+                                    step_id=step.step_id,
+                                    action=step.action,
+                                    status="success",
+                                    message=debug_note,
+                                )
+                            )
                     except Exception as step_error:
                         logs.append(
                             StepLog(
@@ -103,6 +117,30 @@ class PlaywrightExecutor:
                 )
 
             except Exception as e:
+                if screenshot_path is None:
+                    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+                    emergency_path = SCREENSHOTS_DIR / f"emergency_{timestamp}.png"
+                    try:
+                        await page.screenshot(path=str(emergency_path))
+                        screenshot_path = str(emergency_path)
+                        logs.append(
+                            StepLog(
+                                step_id=0,
+                                action="emergency_screenshot",
+                                status="success",
+                                message=f"Saved failure screenshot to {screenshot_path}",
+                            )
+                        )
+                    except Exception as screenshot_error:
+                        logs.append(
+                            StepLog(
+                                step_id=0,
+                                action="emergency_screenshot",
+                                status="failed",
+                                message=str(screenshot_error),
+                            )
+                        )
+
                 try:
                     page_title = await page.title()
                     final_url = page.url

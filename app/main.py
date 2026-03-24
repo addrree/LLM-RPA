@@ -2,7 +2,7 @@ import argparse
 import asyncio
 import json
 import os
-from datetime import datetime
+from datetime import datetime, timezone
 
 from dotenv import load_dotenv
 
@@ -13,6 +13,8 @@ from app.planner.planner import Planner
 from app.utils.llm_client import DummyLLMClient, LLMClient, LLMClientError
 from app.validator.plan_validator import PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
+
+UTC = timezone.utc
 
 
 def build_llm_client(force_dummy: bool = False):
@@ -30,7 +32,7 @@ def build_llm_client(force_dummy: bool = False):
 
 
 def save_artifacts(result: dict) -> None:
-    timestamp = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     plan_path = RESULTS_DIR / f"plan_{timestamp}.json"
     execution_path = RESULTS_DIR / f"execution_{timestamp}.json"
