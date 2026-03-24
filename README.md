@@ -5,7 +5,7 @@
 1. **Planner (LLM)**: строит JSON-план из цели пользователя.
 2. **Validator**: проверяет безопасность/корректность плана.
 3. **Executor (Playwright)**: исполняет шаги на странице.
-4. **Verifier (LLM)**: оценивает, достигнута ли цель.
+4. **Verifier (LLM)**: оценивает, достигнута ли цель (включая screenshot через vision).
 
 ## Быстрый запуск
 
@@ -16,39 +16,62 @@ pip install -r requirements.txt
 playwright install
 ```
 
-### 2) Настроить переменные окружения
+### 2) Проверить, что Ollama запущена локально
+
+```bash
+ollama serve
+```
+
+По умолчанию проект ожидает API на `http://localhost:11434`.
+
+### 3) Проверить, что модель доступна
+
+```bash
+ollama list
+ollama pull qwen3-vl:4b
+```
+
+### 4) Настроить переменные окружения
 
 ```bash
 cp .env.example .env
-# затем заполнить GEMINI_API_KEY в .env
 ```
 
-Или экспортом:
+Минимальный `.env`:
 
-```bash
-export GEMINI_API_KEY="..."
+```env
+LLM_BACKEND=ollama
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=qwen3-vl:4b
 ```
 
-### 3) Запустить MVP
-
-```bash
-python -m app.main
-```
-
-По умолчанию цель:
-
-- открыть `https://example.com`
-- извлечь `h1`
-- сделать скриншот
-- завершить сценарий
-
-### 4) Запуск в dummy-режиме (без Gemini)
+### 5) Запуск MVP в dummy-режиме
 
 ```bash
 python -m app.main --dummy
 ```
 
-### 5) Что появляется в artifacts
+### 6) Запуск MVP с Ollama
+
+```bash
+python -m app.main --backend ollama
+```
+
+Или просто:
+
+```bash
+python -m app.main
+```
+
+(если `LLM_BACKEND=ollama` в env).
+
+### 7) Пример простого сценария
+
+```bash
+python -m app.main --goal "Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish."
+```
+
+## Что появляется в artifacts
 
 После каждого запуска сохраняются:
 - `artifacts/results/plan_<timestamp>.json`
@@ -59,16 +82,10 @@ python -m app.main --dummy
 Скриншот (`artifacts/screenshots/...`) появляется только если шаг `screenshot` реально выполнен.
 Если выполнение упало раньше (например, `open_url` с DNS/сеть ошибкой), скриншота не будет.
 
-## Пример своей цели
-
-```bash
-python -m app.main --goal "Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish."
-```
-
 ## Smoke test
 
 ```bash
 pytest -q
 ```
 
-> Тест не вызывает Gemini API и проверяет совместимость `planner -> validator -> verifier` на `DummyLLMClient`.
+> Тест не вызывает Ollama API и проверяет совместимость `planner -> validator -> verifier` на `DummyLLMClient`.

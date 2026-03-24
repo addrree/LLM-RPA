@@ -1,8 +1,12 @@
+import base64
 import json
 import os
 import re
+from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
+
+import requests
 
 
 class LLMClientError(RuntimeError):
@@ -13,102 +17,125 @@ class LLMClient:
     def __init__(
         self,
         *,
-        api_key: Optional[str] = None,
-        planner_model: str = "gemini-2.0-flash",
-        verifier_model: str = "gemini-2.0-flash",
+        backend: Optional[str] = None,
+        planner_model: Optional[str] = None,
+        verifier_model: Optional[str] = None,
+        ollama_base_url: Optional[str] = None,
         temperature: float = 0.1,
+        timeout_sec: int = 60,
     ):
-        self.api_key = api_key or os.getenv("GEMINI_API_KEY")
-        if not self.api_key:
-            raise LLMClientError("GEMINI_API_KEY is not set.")
+        self.backend = (backend or os.getenv("LLM_BACKEND", "ollama")).strip().lower()
+        if self.backend != "ollama":
+            raise LLMClientError(
+                f"Unsupported backend '{self.backend}'. Only 'ollama' and DummyLLMClient are available."
+            )
 
-        try:
-            from google import genai
-            from google.genai import types
-        except ImportError as exc:
-            raise LLMClientError("google-genai is not installed. Run: pip install -r requirements.txt") from exc
-
-        self._types = types
-        self.client = genai.Client(api_key=self.api_key)
-        self.planner_model = planner_model
-        self.verifier_model = verifier_model
+        self.ollama_base_url = (ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+        default_model = os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")
+        self.planner_model = planner_model or os.getenv("OLLAMA_PLANNER_MODEL", default_model)
+        self.verifier_model = verifier_model or os.getenv("OLLAMA_VERIFIER_MODEL", default_model)
         self.temperature = temperature
+        self.timeout_sec = timeout_sec
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return self._generate_json_with_model(
-            model=self.planner_model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-        )
+        return self.generate_planner_json(system_prompt, user_prompt)
 
     def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return self._generate_json_with_model(
+        raw_text = self._ollama_chat(
             model=self.planner_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            image_path=None,
         )
+        return self._safe_parse_json(raw_text)
 
-    def generate_verifier_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return self._generate_json_with_model(
+    def generate_verifier_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        raw_text = self._ollama_chat(
             model=self.verifier_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
+            image_path=image_path,
         )
+        return self._safe_parse_json(raw_text)
 
-    def _generate_json_with_model(self, model: str, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        config = self._types.GenerateContentConfig(
-            temperature=self.temperature,
-            response_mime_type="application/json",
-            system_instruction=system_prompt,
-        )
+    def _ollama_chat(self, model: str, system_prompt: str, user_prompt: str, image_path: Optional[str]) -> str:
+        url = f"{self.ollama_base_url}/api/chat"
+
+        user_message: Dict[str, Any] = {"role": "user", "content": user_prompt}
+        if image_path:
+            user_message["images"] = [self._encode_image_base64(image_path)]
+
+        payload = {
+            "model": model,
+            "stream": False,
+            "format": "json",
+            "options": {"temperature": self.temperature},
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                user_message,
+            ],
+        }
 
         try:
-            response = self.client.models.generate_content(
-                model=model,
-                contents=user_prompt,
-                config=config,
-            )
-        except Exception as exc:
-            raise LLMClientError(f"Gemini API request failed: {exc}") from exc
+            response = requests.post(url, json=payload, timeout=self.timeout_sec)
+            response.raise_for_status()
+        except requests.RequestException as exc:
+            raise LLMClientError(f"Ollama request failed: {exc}") from exc
 
-        text = self._extract_response_text(response)
-        return self._safe_parse_json(text)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise LLMClientError(f"Ollama returned non-JSON response: {response.text[:300]}") from exc
+
+        message_content = (
+            (data.get("message") or {}).get("content")
+            or data.get("response")
+            or ""
+        )
+        cleaned_content = str(message_content).strip()
+        if not cleaned_content:
+            raise LLMClientError(f"Ollama returned empty content. Full payload: {data}")
+
+        return cleaned_content
 
     @staticmethod
-    def _extract_response_text(response: Any) -> str:
-        text = getattr(response, "text", None)
-        if text:
-            return text.strip()
+    def _encode_image_base64(image_path: str) -> str:
+        candidate = Path(image_path).expanduser()
+        if not candidate.is_file():
+            raise LLMClientError(f"Screenshot does not exist or is not a file: {candidate}")
 
-        candidates = []
-        for candidate in getattr(response, "candidates", []) or []:
-            content = getattr(candidate, "content", None)
-            if not content:
-                continue
-            for part in getattr(content, "parts", []) or []:
-                part_text = getattr(part, "text", None)
-                if part_text:
-                    candidates.append(part_text)
+        try:
+            image_bytes = candidate.read_bytes()
+        except OSError as exc:
+            raise LLMClientError(f"Failed to read screenshot '{candidate}': {exc}") from exc
 
-        if candidates:
-            return "\n".join(candidates).strip()
-
-        raise LLMClientError("Gemini API returned empty response.")
+        return base64.b64encode(image_bytes).decode("utf-8")
 
     @staticmethod
     def _safe_parse_json(raw_text: str) -> Dict[str, Any]:
         cleaned = raw_text.strip()
-        if cleaned.startswith("```"):
-            cleaned = cleaned.strip("`")
-            if cleaned.lower().startswith("json"):
-                cleaned = cleaned[4:]
-            cleaned = cleaned.strip()
+
+        fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
+        if fence_match:
+            cleaned = fence_match.group(1).strip()
+
+        if not cleaned.startswith("{"):
+            start = cleaned.find("{")
+            end = cleaned.rfind("}")
+            if start != -1 and end != -1 and end > start:
+                cleaned = cleaned[start : end + 1]
 
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
             raise LLMClientError(
-                f"Failed to parse JSON response. Raw response: {raw_text[:500]}"
+                "Failed to parse JSON response from LLM. "
+                f"Raw response (first 500 chars): {raw_text[:500]}"
             ) from exc
 
         if not isinstance(data, dict):
@@ -223,5 +250,10 @@ class DummyLLMClient(LLMClient):
     def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         return self.generate_json(system_prompt, user_prompt)
 
-    def generate_verifier_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def generate_verifier_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return self.generate_json(system_prompt, user_prompt)
