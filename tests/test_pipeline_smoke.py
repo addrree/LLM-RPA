@@ -1,7 +1,8 @@
 from app.planner.planner import Planner
 from app.schemas.execution import ExecutionResult, StepLog
+from app.schemas.task_spec import TaskSpec
 from app.utils.llm_client import DummyLLMClient
-from app.validator.plan_validator import PlanValidator
+from app.validator.plan_validator import PlanValidationError, PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
 
@@ -60,3 +61,35 @@ def test_dummy_verifier_rejects_failed_execution():
 
     assert verdict.verdict == "reject"
     assert verdict.task_completed is False
+
+
+def test_validator_requires_save_as_for_extract_items():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract products",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Extract products", "required_fields": ["products"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_items",
+                    "args": {
+                        "container_selector": ".card",
+                        "limit": 10,
+                        "fields": {"title": ".title", "link": {"selector": "a", "attr": "href"}},
+                    },
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    try:
+        validator.validate(plan)
+        raise AssertionError("Expected validator to reject extract_items without save_as")
+    except PlanValidationError as exc:
+        assert "save_as" in str(exc)
