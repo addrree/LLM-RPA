@@ -1,6 +1,9 @@
-from typing import Any, Dict, List, Optional, Literal
+from typing import Any, Dict, List, Literal, Optional, Union
+
 from pydantic import BaseModel, Field, HttpUrl
 
+
+FieldRule = Union[str, Dict[str, Any]]
 
 ActionType = Literal[
     "open_url",
@@ -9,8 +12,9 @@ ActionType = Literal[
     "wait_for",
     "extract_text",
     "extract_html",
+    "extract_items",
     "screenshot",
-    "finish"
+    "finish",
 ]
 
 

@@ -3,11 +3,13 @@ import asyncio
 import json
 import os
 from datetime import datetime, timezone
+from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.config import LOGS_DIR, RESULTS_DIR
+from app.config import EXPORTS_DIR, LOGS_DIR, RAW_LLM_DIR, RESULTS_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
+from app.exporters import CSVExporter, JSONExporter
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.planner.planner import Planner
 from app.utils.llm_client import DummyLLMClient, LLMClient, LLMClientError
@@ -25,64 +27,134 @@ def build_llm_client(force_dummy: bool = False, backend: str | None = None):
     if selected_backend == "dummy":
         return DummyLLMClient()
 
-    try:
-        return LLMClient(
-            backend=selected_backend,
-            planner_model=os.getenv("OLLAMA_PLANNER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
-            verifier_model=os.getenv("OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
-            ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
-        )
-    except LLMClientError as exc:
-        print(f"[WARN] {exc} Falling back to DummyLLMClient.")
-        return DummyLLMClient()
+    return LLMClient(
+        backend=selected_backend,
+        planner_model=os.getenv("OLLAMA_PLANNER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
+        verifier_model=os.getenv("OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
+        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+    )
 
 
-def save_artifacts(result: dict) -> None:
-    timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+def _write_json(path: Path, payload: dict) -> None:
+    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    plan_path = RESULTS_DIR / f"plan_{timestamp}.json"
-    execution_path = RESULTS_DIR / f"execution_{timestamp}.json"
-    verdict_path = RESULTS_DIR / f"verdict_{timestamp}.json"
-    logs_path = LOGS_DIR / f"logs_{timestamp}.json"
+
+def save_artifacts(result: dict, run_id: str) -> dict:
+    plan_path = RESULTS_DIR / f"plan_{run_id}.json"
+    execution_path = RESULTS_DIR / f"execution_{run_id}.json"
+    verdict_path = RESULTS_DIR / f"verdict_{run_id}.json"
+    logs_path = LOGS_DIR / f"logs_{run_id}.json"
 
     plan_json = result["plan"].model_dump(mode="json")
     execution_json = result["execution_result"].model_dump(mode="json")
     verdict_json = result["verdict"].model_dump(mode="json")
 
-    plan_path.write_text(json.dumps(plan_json, ensure_ascii=False, indent=2), encoding="utf-8")
-    execution_path.write_text(json.dumps(execution_json, ensure_ascii=False, indent=2), encoding="utf-8")
-    verdict_path.write_text(json.dumps(verdict_json, ensure_ascii=False, indent=2), encoding="utf-8")
-    logs_path.write_text(json.dumps(execution_json.get("logs", []), ensure_ascii=False, indent=2), encoding="utf-8")
+    _write_json(plan_path, plan_json)
+    _write_json(execution_path, execution_json)
+    _write_json(verdict_path, verdict_json)
+    _write_json(logs_path, {"logs": execution_json.get("logs", [])})
 
-    print("\nARTIFACTS:")
-    print(f"- Plan: {plan_path}")
-    print(f"- Execution: {execution_path}")
-    print(f"- Verdict: {verdict_path}")
-    print(f"- Logs: {logs_path}")
+    planner_artifact = result.get("planner_artifact")
+    if planner_artifact is not None:
+        _write_json(
+            RAW_LLM_DIR / f"planner_raw_{run_id}.json",
+            {
+                "raw_response": planner_artifact.raw_response,
+                "parsed_json": planner_artifact.parsed_response,
+                "generation_metadata": planner_artifact.generation.model_dump(),
+            },
+        )
+
+    verifier_artifact = result.get("verifier_artifact")
+    if verifier_artifact is not None:
+        _write_json(
+            RAW_LLM_DIR / f"verifier_raw_{run_id}.json",
+            {
+                "raw_response": verifier_artifact.raw_response,
+                "parsed_json": verifier_artifact.parsed_response,
+                "generation_metadata": verifier_artifact.generation.model_dump(),
+            },
+        )
+
+    return {
+        "plan": plan_path,
+        "execution": execution_path,
+        "verdict": verdict_path,
+        "logs": logs_path,
+        "planner_raw": RAW_LLM_DIR / f"planner_raw_{run_id}.json" if planner_artifact else None,
+        "verifier_raw": RAW_LLM_DIR / f"verifier_raw_{run_id}.json" if verifier_artifact else None,
+    }
 
 
-async def run(user_goal: str, force_dummy: bool = False, backend: str | None = None):
+def export_results(result: dict, run_id: str, export_formats: list[str]) -> list[Path]:
+    extracted_data = result["execution_result"].extracted_data
+    structured_output = {
+        "status": result["execution_result"].status,
+        "verdict": result["verdict"].model_dump(mode="json"),
+        "final_url": result["execution_result"].final_url,
+        "screenshot_path": result["execution_result"].screenshot_path,
+    }
+
+    exporters = {
+        "json": JSONExporter(EXPORTS_DIR),
+        "csv": CSVExporter(EXPORTS_DIR),
+    }
+
+    paths = []
+    for export_format in export_formats:
+        exporter = exporters[export_format]
+        paths.append(
+            exporter.export(
+                run_id=run_id,
+                extracted_data=extracted_data,
+                structured_output=structured_output,
+            )
+        )
+    return paths
+
+
+async def run(
+    user_goal: str,
+    force_dummy: bool = False,
+    backend: str | None = None,
+    show_browser: bool = False,
+    slow_mo: int = 0,
+    record_video: bool = False,
+    export_formats: list[str] | None = None,
+):
+    export_formats = export_formats or ["json"]
+    export_formats = list(dict.fromkeys(export_formats))
     llm_client = build_llm_client(force_dummy=force_dummy, backend=backend)
 
     workflow = WorkflowManager(
         planner=Planner(llm_client),
         validator=PlanValidator(),
-        executor=PlaywrightExecutor(),
+        executor=PlaywrightExecutor(headless=not show_browser, slow_mo=slow_mo, record_video=record_video),
         verifier=LLMVerifier(llm_client),
     )
 
     result = await workflow.run(user_goal)
+    run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
-    print("\nPLAN:")
-    print(result["plan"].model_dump_json(indent=2))
+    artifact_paths = save_artifacts(result, run_id=run_id)
+    export_paths = export_results(result, run_id=run_id, export_formats=export_formats)
 
-    print("\nEXECUTION RESULT:")
-    print(result["execution_result"].model_dump_json(indent=2))
+    print("\nWORKFLOW SUMMARY:")
+    print(json.dumps({
+        "execution_status": result["execution_result"].status,
+        "verdict": result["verdict"].verdict,
+        "confidence": result["verdict"].confidence,
+        "extracted_keys": sorted(list(result["execution_result"].extracted_data.keys())),
+    }, ensure_ascii=False, indent=2))
 
-    print("\nVERDICT:")
-    print(result["verdict"].model_dump_json(indent=2))
+    print("\nARTIFACTS:")
+    for name, path in artifact_paths.items():
+        if path:
+            print(f"- {name}: {path}")
 
-    save_artifacts(result)
+    print("\nEXPORTS:")
+    for path in export_paths:
+        print(f"- {path}")
 
 
 def parse_args():
@@ -103,10 +175,49 @@ def parse_args():
         default=None,
         help="LLM backend to use (default from LLM_BACKEND env, fallback: ollama)",
     )
+    parser.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Run Playwright in headed mode so browser actions are visible",
+    )
+    parser.add_argument(
+        "--slow-mo",
+        type=int,
+        default=0,
+        help="Delay between Playwright actions in milliseconds",
+    )
+    parser.add_argument(
+        "--record-video",
+        action="store_true",
+        help="Record Playwright session video to artifacts/videos",
+    )
+    parser.add_argument(
+        "--export-format",
+        action="append",
+        choices=["json", "csv"],
+        default=None,
+        help="Export format for workflow result (can be specified multiple times)",
+    )
     return parser.parse_args()
 
 
 if __name__ == "__main__":
     load_dotenv()
     args = parse_args()
-    asyncio.run(run(user_goal=args.goal, force_dummy=args.dummy, backend=args.backend))
+    try:
+        asyncio.run(
+            run(
+                user_goal=args.goal,
+                force_dummy=args.dummy,
+                backend=args.backend,
+                show_browser=args.show_browser,
+                slow_mo=args.slow_mo,
+                record_video=args.record_video,
+                export_formats=args.export_format,
+            )
+        )
+    except LLMClientError as exc:
+        raise SystemExit(
+            "LLM backend error: no fallback was used, planning/verifying requires a working backend. "
+            f"Details: {exc}"
+        )

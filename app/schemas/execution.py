@@ -1,4 +1,5 @@
 from typing import Any, Dict, List, Optional
+
 from pydantic import BaseModel, Field
 
 
@@ -7,6 +8,19 @@ class StepLog(BaseModel):
     action: str
     status: str
     message: Optional[str] = None
+
+
+class GenerationMetadata(BaseModel):
+    backend: str
+    model: str
+    source: str
+    fallback_used: bool = False
+
+
+class LLMArtifact(BaseModel):
+    raw_response: str
+    parsed_response: Dict[str, Any]
+    generation: GenerationMetadata
 
 
 class ExecutionResult(BaseModel):
