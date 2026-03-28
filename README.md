@@ -43,6 +43,7 @@ cp .env.example .env
 LLM_BACKEND=ollama
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=qwen3-vl:4b
+OLLAMA_TIMEOUT_SEC=300
 ```
 
 ### 5) Запуск MVP в dummy-режиме
@@ -55,6 +56,12 @@ python -m app.main --dummy
 
 ```bash
 python -m app.main --backend ollama
+```
+
+С кастомным timeout (если локальная модель отвечает долго):
+
+```bash
+OLLAMA_TIMEOUT_SEC=300 python -m app.main --backend ollama
 ```
 
 Или просто:

@@ -22,7 +22,7 @@ class LLMClient:
         verifier_model: Optional[str] = None,
         ollama_base_url: Optional[str] = None,
         temperature: float = 0.1,
-        timeout_sec: int = 60,
+        timeout_sec: Optional[int] = None,
     ):
         self.backend = (backend or os.getenv("LLM_BACKEND", "ollama")).strip().lower()
         if self.backend != "ollama":
@@ -35,7 +35,20 @@ class LLMClient:
         self.planner_model = planner_model or os.getenv("OLLAMA_PLANNER_MODEL", default_model)
         self.verifier_model = verifier_model or os.getenv("OLLAMA_VERIFIER_MODEL", default_model)
         self.temperature = temperature
-        self.timeout_sec = timeout_sec
+        self.timeout_sec = timeout_sec if timeout_sec is not None else self._resolve_timeout_sec()
+
+        self.session = requests.Session()
+        self.session.trust_env = False
+
+    @staticmethod
+    def _resolve_timeout_sec() -> int:
+        raw_timeout = os.getenv("OLLAMA_TIMEOUT_SEC", "300")
+        try:
+            return int(raw_timeout)
+        except ValueError as exc:
+            raise LLMClientError(
+                f"Invalid OLLAMA_TIMEOUT_SEC='{raw_timeout}'. Expected integer seconds."
+            ) from exc
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         return self.generate_planner_json(system_prompt, user_prompt)
@@ -82,10 +95,23 @@ class LLMClient:
         }
 
         try:
-            response = requests.post(url, json=payload, timeout=self.timeout_sec)
-            response.raise_for_status()
+            response = self.session.post(url, json=payload, timeout=self.timeout_sec)
+            if not response.ok:
+                raise LLMClientError(
+                    "Ollama request failed "
+                    f"(status_code={response.status_code}, url={url}, model={model}). "
+                    f"Response: {response.text}"
+                )
+        except requests.Timeout as exc:
+            raise LLMClientError(
+                "Ollama request timed out: локальная модель не успела ответить "
+                f"за {self.timeout_sec} сек (url={url}, model={model}). "
+                "Увеличьте OLLAMA_TIMEOUT_SEC или упростите prompt."
+            ) from exc
         except requests.RequestException as exc:
-            raise LLMClientError(f"Ollama request failed: {exc}") from exc
+            raise LLMClientError(
+                f"Ollama request failed (url={url}, model={model}): {exc}"
+            ) from exc
 
         try:
             data = response.json()
