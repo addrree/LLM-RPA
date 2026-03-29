@@ -93,3 +93,47 @@ def test_validator_requires_save_as_for_extract_items():
         raise AssertionError("Expected validator to reject extract_items without save_as")
     except PlanValidationError as exc:
         assert "save_as" in str(exc)
+
+
+def test_validator_accepts_parent_domain_for_subdomain_start_url():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract heading",
+            "start_url": "https://www.wikipedia.org/",
+            "allowed_domains": ["wikipedia.org"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Extract heading", "required_fields": ["heading"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.wikipedia.org/"}},
+                {"step_id": 2, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "heading"},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    validator.validate(plan)
+
+
+def test_validator_rejects_unrelated_domain():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract heading",
+            "start_url": "https://www.wikipedia.org/",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Extract heading", "required_fields": ["heading"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.wikipedia.org/"}},
+                {"step_id": 2, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "heading"},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    try:
+        validator.validate(plan)
+        raise AssertionError("Expected validator to reject unrelated allowed_domains")
+    except PlanValidationError as exc:
+        assert "start_url domain is not allowed" in str(exc)
