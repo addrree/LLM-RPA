@@ -11,6 +11,7 @@ ALLOWED_ACTIONS = {
     "wait_for",
     "extract_text",
     "extract_html",
+    "extract_items",
     "screenshot",
     "finish",
 }
@@ -52,6 +53,25 @@ class PlanValidator:
                 raise PlanValidationError("type requires 'selector' and 'text'")
             if step.action in {"extract_text", "extract_html"} and "selector" not in step.args:
                 raise PlanValidationError(f"{step.action} requires 'selector'")
+            if step.action == "extract_items":
+                self._validate_extract_items(step.args, step.save_as)
+
+    @staticmethod
+    def _validate_extract_items(args: dict, save_as: str | None) -> None:
+        required = {"container_selector", "limit", "fields"}
+        missing = [key for key in required if key not in args]
+        if missing:
+            raise PlanValidationError(f"extract_items missing required args: {', '.join(missing)}")
+
+        if not isinstance(args["fields"], dict) or not args["fields"]:
+            raise PlanValidationError("extract_items requires non-empty 'fields' dict")
+
+        limit = args.get("limit")
+        if not isinstance(limit, int) or limit <= 0:
+            raise PlanValidationError("extract_items requires positive integer 'limit'")
+
+        if not save_as:
+            raise PlanValidationError("extract_items requires 'save_as'")
 
     def _validate_step_order(self, plan: TaskSpec) -> None:
         expected_ids = list(range(1, len(plan.steps) + 1))

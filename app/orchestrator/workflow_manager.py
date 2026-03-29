@@ -1,6 +1,5 @@
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.planner.planner import Planner
-from app.schemas.verification import VerificationVerdict
 from app.validator.plan_validator import PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
@@ -29,4 +28,6 @@ class WorkflowManager:
             "plan": plan,
             "execution_result": execution_result,
             "verdict": verdict,
+            "planner_artifact": self.planner.last_artifact,
+            "verifier_artifact": self.verifier.last_artifact,
         }

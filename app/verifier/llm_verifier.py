@@ -1,6 +1,6 @@
 import json
 
-from app.schemas.execution import ExecutionResult
+from app.schemas.execution import ExecutionResult, LLMArtifact
 from app.schemas.task_spec import TaskSpec
 from app.schemas.verification import VerificationPackage, VerificationVerdict
 from app.utils.llm_client import LLMClient
@@ -28,9 +28,11 @@ VERIFIER_SYSTEM_PROMPT = """
 class LLMVerifier:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
+        self.last_artifact: LLMArtifact | None = None
 
     def verify(self, plan: TaskSpec, result: ExecutionResult) -> VerificationVerdict:
         if result.status != "success":
+            self.last_artifact = None
             return VerificationVerdict(
                 task_completed=False,
                 confidence=0.0,
@@ -52,9 +54,10 @@ class LLMVerifier:
         )
 
         user_prompt = json.dumps(package.model_dump(), ensure_ascii=False, indent=2)
-        raw_json = self.llm_client.generate_verifier_json(
+        artifact = self.llm_client.generate_verifier_artifact(
             system_prompt=VERIFIER_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             image_path=result.screenshot_path,
         )
-        return VerificationVerdict.model_validate(raw_json)
+        self.last_artifact = artifact
+        return VerificationVerdict.model_validate(artifact.parsed_response)

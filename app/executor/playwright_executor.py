@@ -2,7 +2,7 @@ from datetime import datetime, timezone
 
 from playwright.async_api import async_playwright
 
-from app.config import SCREENSHOTS_DIR
+from app.config import SCREENSHOTS_DIR, VIDEOS_DIR
 from app.executor.action_handlers import ActionHandlers
 from app.schemas.execution import ExecutionResult, StepLog
 from app.schemas.task_spec import TaskSpec
@@ -11,8 +11,11 @@ UTC = timezone.utc
 
 
 class PlaywrightExecutor:
-    def __init__(self):
+    def __init__(self, *, headless: bool = True, slow_mo: int = 0, record_video: bool = False):
         self.handlers = ActionHandlers()
+        self.headless = headless
+        self.slow_mo = slow_mo
+        self.record_video = record_video
 
     async def execute(self, plan: TaskSpec) -> ExecutionResult:
         extracted_data = {}
@@ -21,8 +24,12 @@ class PlaywrightExecutor:
 
         async with async_playwright() as p:
             try:
-                browser = await p.chromium.launch(headless=True)
-                page = await browser.new_page()
+                browser = await p.chromium.launch(headless=self.headless, slow_mo=self.slow_mo)
+                context_kwargs = {}
+                if self.record_video:
+                    context_kwargs["record_video_dir"] = str(VIDEOS_DIR)
+                context = await browser.new_context(**context_kwargs)
+                page = await context.new_page()
             except Exception as launch_error:
                 logs.append(
                     StepLog(
@@ -52,16 +59,13 @@ class PlaywrightExecutor:
                                     step_id=step.step_id,
                                     action=step.action,
                                     status="success",
-                                    message="Workflow finished."
+                                    message="Workflow finished.",
                                 )
                             )
                             break
 
-                        if step.action == "screenshot":
-                            if "path" not in step.args:
-                                step.args["path"] = str(
-                                    SCREENSHOTS_DIR / f"step_{step.step_id}.png"
-                                )
+                        if step.action == "screenshot" and "path" not in step.args:
+                            step.args["path"] = str(SCREENSHOTS_DIR / f"step_{step.step_id}.png")
 
                         handler = getattr(self.handlers, step.action)
                         result = await handler(page, step.args)
@@ -76,7 +80,7 @@ class PlaywrightExecutor:
                             StepLog(
                                 step_id=step.step_id,
                                 action=step.action,
-                                status="success"
+                                status="success",
                             )
                         )
                         debug_note = step.args.pop("_executor_note", None)
@@ -95,7 +99,7 @@ class PlaywrightExecutor:
                                 step_id=step.step_id,
                                 action=step.action,
                                 status="failed",
-                                message=str(step_error)
+                                message=str(step_error),
                             )
                         )
                         raise step_error
@@ -104,6 +108,7 @@ class PlaywrightExecutor:
                 final_url = page.url
                 text_excerpt = (await page.locator("body").inner_text())[:3000]
 
+                await context.close()
                 await browser.close()
 
                 return ExecutionResult(
@@ -150,6 +155,7 @@ class PlaywrightExecutor:
                     final_url = None
                     text_excerpt = None
 
+                await context.close()
                 await browser.close()
 
                 return ExecutionResult(

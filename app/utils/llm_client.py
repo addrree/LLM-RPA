@@ -8,6 +8,8 @@ from urllib.parse import urlparse
 
 import requests
 
+from app.schemas.execution import GenerationMetadata, LLMArtifact
+
 
 class LLMClientError(RuntimeError):
     pass
@@ -54,13 +56,26 @@ class LLMClient:
         return self.generate_planner_json(system_prompt, user_prompt)
 
     def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+        return self.generate_planner_artifact(system_prompt, user_prompt).parsed_response
+
+    def generate_planner_artifact(self, system_prompt: str, user_prompt: str) -> LLMArtifact:
         raw_text = self._ollama_chat(
             model=self.planner_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_path=None,
         )
-        return self._safe_parse_json(raw_text)
+        parsed = self._safe_parse_json(raw_text)
+        return LLMArtifact(
+            raw_response=raw_text,
+            parsed_response=parsed,
+            generation=GenerationMetadata(
+                backend=self.backend,
+                model=self.planner_model,
+                source="llm",
+                fallback_used=False,
+            ),
+        )
 
     def generate_verifier_json(
         self,
@@ -68,13 +83,31 @@ class LLMClient:
         user_prompt: str,
         image_path: Optional[str] = None,
     ) -> Dict[str, Any]:
+        return self.generate_verifier_artifact(system_prompt, user_prompt, image_path=image_path).parsed_response
+
+    def generate_verifier_artifact(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[str] = None,
+    ) -> LLMArtifact:
         raw_text = self._ollama_chat(
             model=self.verifier_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_path=image_path,
         )
-        return self._safe_parse_json(raw_text)
+        parsed = self._safe_parse_json(raw_text)
+        return LLMArtifact(
+            raw_response=raw_text,
+            parsed_response=parsed,
+            generation=GenerationMetadata(
+                backend=self.backend,
+                model=self.verifier_model,
+                source="llm",
+                fallback_used=False,
+            ),
+        )
 
     def _ollama_chat(self, model: str, system_prompt: str, user_prompt: str, image_path: Optional[str]) -> str:
         url = f"{self.ollama_base_url}/api/chat"
@@ -172,7 +205,9 @@ class LLMClient:
 
 class DummyLLMClient(LLMClient):
     def __init__(self):
-        pass
+        self.backend = "dummy"
+        self.planner_model = "dummy-template"
+        self.verifier_model = "dummy-template"
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         if "модуль верификации" in system_prompt.lower() or "verification" in system_prompt.lower():
@@ -283,3 +318,34 @@ class DummyLLMClient(LLMClient):
         image_path: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.generate_json(system_prompt, user_prompt)
+
+    def generate_planner_artifact(self, system_prompt: str, user_prompt: str) -> LLMArtifact:
+        parsed = self._build_dummy_plan(user_prompt)
+        return LLMArtifact(
+            raw_response=json.dumps(parsed, ensure_ascii=False),
+            parsed_response=parsed,
+            generation=GenerationMetadata(
+                backend=self.backend,
+                model=self.planner_model,
+                source="dummy",
+                fallback_used=False,
+            ),
+        )
+
+    def generate_verifier_artifact(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[str] = None,
+    ) -> LLMArtifact:
+        parsed = self._build_dummy_verdict(user_prompt)
+        return LLMArtifact(
+            raw_response=json.dumps(parsed, ensure_ascii=False),
+            parsed_response=parsed,
+            generation=GenerationMetadata(
+                backend=self.backend,
+                model=self.verifier_model,
+                source="dummy",
+                fallback_used=False,
+            ),
+        )
