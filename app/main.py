@@ -31,7 +31,10 @@ def build_llm_client(force_dummy: bool = False, backend: str | None = None):
         backend=selected_backend,
         planner_model=os.getenv("OLLAMA_PLANNER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
         verifier_model=os.getenv("OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
-        ollama_base_url=os.getenv("OLLAMA_BASE_URL", "http://localhost:11434"),
+        ollama_base_url=os.getenv(
+            "OLLAMA_BASE_URL",
+            "https://ollama.com" if selected_backend == "ollama_cloud" else "http://localhost:11434",
+        ),
     )
 
 
@@ -171,7 +174,7 @@ def parse_args():
     )
     parser.add_argument(
         "--backend",
-        choices=["ollama", "dummy"],
+        choices=["ollama", "ollama_cloud", "dummy"],
         default=None,
         help="LLM backend to use (default from LLM_BACKEND env, fallback: ollama)",
     )

@@ -16,7 +16,14 @@ pip install -r requirements.txt
 playwright install
 ```
 
-### 2) Проверить, что Ollama запущена локально
+### 2) Выбрать backend (local или cloud)
+
+Проект поддерживает:
+- `ollama` — локальный Ollama backend (`http://localhost:11434`)
+- `ollama_cloud` — прямой Ollama Cloud API backend (`https://ollama.com/api/...`, через `OLLAMA_API_KEY`)
+- `dummy` — заглушка без реальных LLM вызовов
+
+Для локального режима проверьте, что Ollama запущена:
 
 ```bash
 ollama serve
@@ -46,6 +53,19 @@ OLLAMA_MODEL=qwen3-vl:4b
 OLLAMA_TIMEOUT_SEC=300
 ```
 
+Пример `.env` для **Ollama Cloud**:
+
+```env
+LLM_BACKEND=ollama_cloud
+OLLAMA_BASE_URL=https://ollama.com
+OLLAMA_API_KEY=your_ollama_api_key
+OLLAMA_MODEL=qwen3-vl:4b
+# optional per-role overrides:
+# OLLAMA_PLANNER_MODEL=qwen3-vl:4b
+# OLLAMA_VERIFIER_MODEL=qwen3-vl:4b
+OLLAMA_TIMEOUT_SEC=300
+```
+
 ### 5) Запуск MVP в dummy-режиме
 
 ```bash
@@ -56,6 +76,12 @@ python -m app.main --dummy
 
 ```bash
 python -m app.main --backend ollama
+```
+
+Запуск с **Ollama Cloud**:
+
+```bash
+python -m app.main --backend ollama_cloud
 ```
 
 С кастомным timeout (если локальная модель отвечает долго):
@@ -76,6 +102,12 @@ python -m app.main
 
 ```bash
 python -m app.main --goal "Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish."
+```
+
+Рабочий пример для cloud backend:
+
+```bash
+python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org, extract the h1 text, take a screenshot, and finish." --show-browser --slow-mo 500 --export-format json
 ```
 
 ## Что появляется в artifacts
