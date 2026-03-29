@@ -13,8 +13,12 @@ ALLOWED_ACTIONS = {
     "extract_html",
     "extract_items",
     "screenshot",
+    "observe_page",
+    "extract_pattern_from_page_text",
     "finish",
 }
+
+TECHNICAL_ARTIFACT_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
 
 
 class PlanValidationError(Exception):
@@ -57,6 +61,10 @@ class PlanValidator:
                 raise PlanValidationError(f"{step.action} requires 'selector'")
             if step.action == "extract_items":
                 self._validate_extract_items(step.args, step.save_as)
+            if step.action == "observe_page" and not step.save_as:
+                raise PlanValidationError("observe_page requires 'save_as'")
+            if step.action == "extract_pattern_from_page_text":
+                self._validate_extract_pattern_from_page_text(step.args, step.save_as)
 
     @staticmethod
     def _validate_extract_items(args: dict, save_as: str | None) -> None:
@@ -74,6 +82,16 @@ class PlanValidator:
 
         if not save_as:
             raise PlanValidationError("extract_items requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_pattern_from_page_text(args: dict, save_as: str | None) -> None:
+        if "pattern" not in args or not str(args.get("pattern", "")).strip():
+            raise PlanValidationError("extract_pattern_from_page_text requires non-empty 'pattern'")
+        occurrence = args.get("occurrence", 1)
+        if not isinstance(occurrence, int) or occurrence <= 0:
+            raise PlanValidationError("extract_pattern_from_page_text requires positive integer 'occurrence'")
+        if not save_as:
+            raise PlanValidationError("extract_pattern_from_page_text requires 'save_as'")
 
     def _validate_step_order(self, plan: TaskSpec) -> None:
         expected_ids = list(range(1, len(plan.steps) + 1))
@@ -96,15 +114,22 @@ class PlanValidator:
     def _validate_domains(self, plan: TaskSpec) -> None:
         parsed = urlparse(str(plan.start_url))
         start_netloc = parsed.netloc
-        if plan.allowed_domains and start_netloc not in plan.allowed_domains:
-            raise PlanValidationError(
-                "start_url domain is not allowed. "
-                f"start_url={plan.start_url}, start_netloc={start_netloc}, allowed_domains={plan.allowed_domains}"
-            )
+        if not plan.allowed_domains:
+            return
+
+        for allowed in plan.allowed_domains:
+            if start_netloc == allowed or start_netloc.endswith(f".{allowed}"):
+                return
+        raise PlanValidationError(
+            "start_url domain is not allowed. "
+            f"start_url={plan.start_url}, start_netloc={start_netloc}, allowed_domains={plan.allowed_domains}"
+        )
 
     def _validate_expected_result_consistency(self, plan: TaskSpec) -> None:
         saved_fields = {step.save_as for step in plan.steps if step.save_as}
         for field in plan.expected_result.required_fields:
+            if field in TECHNICAL_ARTIFACT_FIELDS:
+                continue
             if field not in saved_fields:
                 raise PlanValidationError(
                     f"Required field '{field}' is not produced by any step."

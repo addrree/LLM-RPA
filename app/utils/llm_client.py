@@ -231,9 +231,68 @@ class DummyLLMClient(LLMClient):
         self.verifier_model = "dummy-template"
 
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        if "модуль верификации" in system_prompt.lower() or "verification" in system_prompt.lower():
+        lower_prompt = system_prompt.lower()
+        if "модуль верификации" in lower_prompt or "verification" in lower_prompt:
             return self._build_dummy_verdict(user_prompt)
+        if "initial planner" in lower_prompt or "двухэтапного режима" in lower_prompt:
+            return self._build_dummy_initial_plan(user_prompt)
+        if "context-aware replanner" in lower_prompt or "replanner" in lower_prompt:
+            return self._build_dummy_replan(user_prompt)
         return self._build_dummy_plan(user_prompt)
+
+
+    def _build_dummy_initial_plan(self, user_goal: str) -> Dict[str, Any]:
+        target_url = self._extract_first_url(user_goal) or "https://www.wikipedia.org"
+        domain = urlparse(target_url).netloc or "www.wikipedia.org"
+        return {
+            "goal": user_goal,
+            "start_url": target_url,
+            "allowed_domains": [domain],
+            "constraints": {"max_steps": 4, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Observe page", "required_fields": ["page_snapshot"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": target_url}},
+                {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+
+    def _build_dummy_replan(self, user_prompt: str) -> Dict[str, Any]:
+        try:
+            payload = json.loads(user_prompt)
+        except json.JSONDecodeError:
+            payload = {"user_goal": user_prompt, "page_snapshot": {}}
+
+        user_goal = payload.get("user_goal", "Extract value")
+        page_snapshot = payload.get("page_snapshot", {}) or {}
+        url = page_snapshot.get("url") or self._extract_first_url(user_goal) or "https://www.wikipedia.org"
+        domain = urlparse(url).netloc or "www.wikipedia.org"
+
+        return {
+            "goal": user_goal,
+            "start_url": url,
+            "allowed_domains": [domain],
+            "constraints": {"max_steps": 6, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {
+                "description": "Extract value using observed page text",
+                "required_fields": ["ru_articles_count"],
+            },
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": url}},
+                {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                {
+                    "step_id": 3,
+                    "action": "extract_pattern_from_page_text",
+                    "args": {
+                        "pattern": "Русский\\s*[—-]\\s*([0-9\\s,\\.]+)",
+                        "flags": "IGNORECASE",
+                        "occurrence": 1,
+                    },
+                    "save_as": "ru_articles_count",
+                },
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
 
     def _build_dummy_plan(self, user_goal: str) -> Dict[str, Any]:
         target_url = self._extract_first_url(user_goal) or "https://www.wikipedia.org"

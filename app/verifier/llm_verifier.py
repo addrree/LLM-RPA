@@ -20,9 +20,13 @@ VERIFIER_SYSTEM_PROMPT = """
 
 Правила:
 1) confidence обязательно от 0 до 1.
-2) verdict=accept только если required_fields заполнены и цель достигнута.
-3) Если данных не хватает — verdict=uncertain или reject и пояснение в issues.
+2) verdict=accept только если semantic required_fields заполнены и цель достигнута.
+3) screenshot_path — технический артефакт, не бизнес-поле цели.
+4) Если данных не хватает — verdict=uncertain или reject и пояснение в issues.
 """
+
+
+TECHNICAL_REQUIRED_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
 
 
 class LLMVerifier:
@@ -41,10 +45,14 @@ class LLMVerifier:
                 summary="Verifier rejected the run because execution did not finish successfully.",
             )
 
+        semantic_required_fields = [
+            field for field in plan.expected_result.required_fields if field not in TECHNICAL_REQUIRED_FIELDS
+        ]
+
         package = VerificationPackage(
             user_goal=plan.goal,
             expected_result_description=plan.expected_result.description,
-            required_fields=plan.expected_result.required_fields,
+            required_fields=semantic_required_fields,
             extracted_data=result.extracted_data,
             final_url=result.final_url,
             page_title=result.page_title,
