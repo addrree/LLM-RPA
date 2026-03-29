@@ -21,6 +21,7 @@ class PlaywrightExecutor:
         extracted_data = {}
         logs = []
         screenshot_path = None
+        runtime_state = {}
 
         async with async_playwright() as p:
             try:
@@ -68,13 +69,15 @@ class PlaywrightExecutor:
                             step.args["path"] = str(SCREENSHOTS_DIR / f"step_{step.step_id}.png")
 
                         handler = getattr(self.handlers, step.action)
-                        result = await handler(page, step.args)
+                        result = await handler(page, step.args, runtime_state)
 
                         if step.save_as:
                             extracted_data[step.save_as] = result
 
                         if step.action == "screenshot":
                             screenshot_path = result
+                        if step.action == "observe_page" and isinstance(result, dict):
+                            screenshot_path = result.get("screenshot_path") or screenshot_path
 
                         logs.append(
                             StepLog(

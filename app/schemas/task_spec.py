@@ -14,6 +14,8 @@ ActionType = Literal[
     "extract_html",
     "extract_items",
     "screenshot",
+    "observe_page",
+    "extract_pattern_from_page_text",
     "finish",
 ]
 

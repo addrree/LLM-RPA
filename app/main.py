@@ -12,6 +12,7 @@ from app.executor.playwright_executor import PlaywrightExecutor
 from app.exporters import CSVExporter, JSONExporter
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.planner.planner import Planner
+from app.planner.replanner import Replanner
 from app.utils.llm_client import DummyLLMClient, LLMClient, LLMClientError
 from app.validator.plan_validator import PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
@@ -49,10 +50,18 @@ def save_artifacts(result: dict, run_id: str) -> dict:
     logs_path = LOGS_DIR / f"logs_{run_id}.json"
 
     plan_json = result["plan"].model_dump(mode="json")
+    initial_plan = result.get("initial_plan")
+    final_plan = result.get("final_plan")
+    planning_mode = result.get("planning_mode", "single_stage")
     execution_json = result["execution_result"].model_dump(mode="json")
     verdict_json = result["verdict"].model_dump(mode="json")
 
-    _write_json(plan_path, plan_json)
+    _write_json(plan_path, {
+        "planning_mode": planning_mode,
+        "plan": plan_json,
+        "initial_plan": initial_plan.model_dump(mode="json") if initial_plan else None,
+        "final_plan": final_plan.model_dump(mode="json") if final_plan else None,
+    })
     _write_json(execution_path, execution_json)
     _write_json(verdict_path, verdict_json)
     _write_json(logs_path, {"logs": execution_json.get("logs", [])})
@@ -65,6 +74,28 @@ def save_artifacts(result: dict, run_id: str) -> dict:
                 "raw_response": planner_artifact.raw_response,
                 "parsed_json": planner_artifact.parsed_response,
                 "generation_metadata": planner_artifact.generation.model_dump(),
+            },
+        )
+
+    replanner_artifact = result.get("replanner_artifact")
+    if replanner_artifact is not None:
+        _write_json(
+            RAW_LLM_DIR / f"replanner_raw_{run_id}.json",
+            {
+                "raw_response": replanner_artifact.raw_response,
+                "parsed_json": replanner_artifact.parsed_response,
+                "generation_metadata": replanner_artifact.generation.model_dump(),
+            },
+        )
+
+    initial_planner_artifact = result.get("initial_planner_artifact")
+    if initial_planner_artifact is not None:
+        _write_json(
+            RAW_LLM_DIR / f"initial_planner_raw_{run_id}.json",
+            {
+                "raw_response": initial_planner_artifact.raw_response,
+                "parsed_json": initial_planner_artifact.parsed_response,
+                "generation_metadata": initial_planner_artifact.generation.model_dump(),
             },
         )
 
@@ -85,6 +116,8 @@ def save_artifacts(result: dict, run_id: str) -> dict:
         "verdict": verdict_path,
         "logs": logs_path,
         "planner_raw": RAW_LLM_DIR / f"planner_raw_{run_id}.json" if planner_artifact else None,
+        "initial_planner_raw": RAW_LLM_DIR / f"initial_planner_raw_{run_id}.json" if initial_planner_artifact else None,
+        "replanner_raw": RAW_LLM_DIR / f"replanner_raw_{run_id}.json" if replanner_artifact else None,
         "verifier_raw": RAW_LLM_DIR / f"verifier_raw_{run_id}.json" if verifier_artifact else None,
     }
 
@@ -92,6 +125,10 @@ def save_artifacts(result: dict, run_id: str) -> dict:
 def export_results(result: dict, run_id: str, export_formats: list[str]) -> list[Path]:
     extracted_data = result["execution_result"].extracted_data
     structured_output = {
+        "planning_mode": result.get("planning_mode", "single_stage"),
+        "initial_plan": result["initial_plan"].model_dump(mode="json") if result.get("initial_plan") else None,
+        "final_plan": result["final_plan"].model_dump(mode="json") if result.get("final_plan") else None,
+        "page_snapshot": result["execution_result"].extracted_data.get("page_snapshot"),
         "status": result["execution_result"].status,
         "verdict": result["verdict"].model_dump(mode="json"),
         "final_url": result["execution_result"].final_url,
@@ -124,6 +161,7 @@ async def run(
     slow_mo: int = 0,
     record_video: bool = False,
     export_formats: list[str] | None = None,
+    two_stage_planning: bool = False,
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
@@ -134,6 +172,8 @@ async def run(
         validator=PlanValidator(),
         executor=PlaywrightExecutor(headless=not show_browser, slow_mo=slow_mo, record_video=record_video),
         verifier=LLMVerifier(llm_client),
+        replanner=Replanner(llm_client),
+        two_stage_planning=two_stage_planning,
     )
 
     result = await workflow.run(user_goal)
@@ -147,6 +187,7 @@ async def run(
         "execution_status": result["execution_result"].status,
         "verdict": result["verdict"].verdict,
         "confidence": result["verdict"].confidence,
+        "planning_mode": result.get("planning_mode", "single_stage"),
         "extracted_keys": sorted(list(result["execution_result"].extracted_data.keys())),
     }, ensure_ascii=False, indent=2))
 
@@ -195,6 +236,11 @@ def parse_args():
         help="Record Playwright session video to artifacts/videos",
     )
     parser.add_argument(
+        "--two-stage-planning",
+        action="store_true",
+        help="Enable two-stage planning: initial observation plan + context-aware replanning",
+    )
+    parser.add_argument(
         "--export-format",
         action="append",
         choices=["json", "csv"],
@@ -217,6 +263,7 @@ if __name__ == "__main__":
                 slow_mo=args.slow_mo,
                 record_video=args.record_video,
                 export_formats=args.export_format,
+                two_stage_planning=args.two_stage_planning,
             )
         )
     except LLMClientError as exc:

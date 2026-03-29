@@ -137,3 +137,90 @@ def test_validator_rejects_unrelated_domain():
         raise AssertionError("Expected validator to reject unrelated allowed_domains")
     except PlanValidationError as exc:
         assert "start_url domain is not allowed" in str(exc)
+
+
+def test_validator_requires_save_as_for_observe_page():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Observe page",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Observe page", "required_fields": []},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "observe_page", "args": {}},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    try:
+        validator.validate(plan)
+        raise AssertionError("Expected validator to reject observe_page without save_as")
+    except PlanValidationError as exc:
+        assert "observe_page requires 'save_as'" in str(exc)
+
+
+def test_validator_accepts_extract_pattern_from_page_text():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract count",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Count", "required_fields": ["count"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                {
+                    "step_id": 3,
+                    "action": "extract_pattern_from_page_text",
+                    "args": {"pattern": "([0-9]+)", "occurrence": 1},
+                    "save_as": "count",
+                },
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    validator.validate(plan)
+
+
+def test_verifier_ignores_technical_screenshot_required_field():
+    llm = DummyLLMClient()
+
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Open page and take screenshot",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 4, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {
+                "description": "Screenshot artifact",
+                "required_fields": ["screenshot_path"],
+            },
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "screenshot", "args": {"path": "artifacts/screenshots/a.png"}},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    result = ExecutionResult(
+        status="success",
+        extracted_data={},
+        final_url="https://example.com",
+        page_title="Example Domain",
+        page_text_excerpt="Example Domain",
+        screenshot_path="artifacts/screenshots/a.png",
+        logs=[StepLog(step_id=1, action="open_url", status="success")],
+    )
+
+    verifier = LLMVerifier(llm)
+    verdict = verifier.verify(plan, result)
+
+    assert verdict.verdict == "accept"
