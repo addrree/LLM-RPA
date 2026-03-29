@@ -45,8 +45,10 @@ class PlanValidator:
             if step.action not in ALLOWED_ACTIONS:
                 raise PlanValidationError(f"Unsupported action: {step.action}")
 
-            if step.action == "open_url" and "url" not in step.args:
-                raise PlanValidationError("open_url requires 'url'")
+            if step.action == "open_url" and not step.args.get("url"):
+                raise PlanValidationError(
+                    f"open_url requires non-empty 'url'. Problematic step: {step.model_dump(mode='json')}"
+                )
             if step.action == "click" and "selector" not in step.args:
                 raise PlanValidationError("click requires 'selector'")
             if step.action == "type" and ("selector" not in step.args or "text" not in step.args):
@@ -93,8 +95,24 @@ class PlanValidator:
 
     def _validate_domains(self, plan: TaskSpec) -> None:
         parsed = urlparse(str(plan.start_url))
-        if plan.allowed_domains and parsed.netloc not in plan.allowed_domains:
-            raise PlanValidationError("start_url domain is not allowed.")
+        start_netloc = parsed.netloc
+        if plan.allowed_domains and not any(
+            self._domain_allows_netloc(allowed_domain, start_netloc) for allowed_domain in plan.allowed_domains
+        ):
+            raise PlanValidationError(
+                "start_url domain is not allowed. "
+                f"start_url={plan.start_url}, start_netloc={start_netloc}, allowed_domains={plan.allowed_domains}"
+            )
+
+    @staticmethod
+    def _domain_allows_netloc(allowed_domain: str, start_netloc: str) -> bool:
+        normalized_allowed = allowed_domain.strip().lower().rstrip(".")
+        normalized_start = start_netloc.strip().lower().rstrip(".")
+
+        if not normalized_allowed or not normalized_start:
+            return False
+
+        return normalized_start == normalized_allowed or normalized_start.endswith(f".{normalized_allowed}")
 
     def _validate_expected_result_consistency(self, plan: TaskSpec) -> None:
         saved_fields = {step.save_as for step in plan.steps if step.save_as}

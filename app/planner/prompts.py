@@ -33,6 +33,9 @@ PLANNER_SYSTEM_PROMPT = """
 3. Для extract_* шагов с save_as в required_fields должны быть соответствующие поля.
 4. Для extract_items всегда указывай args.container_selector, args.limit, args.fields и save_as.
 5. Формат args.fields для extract_items: {"title": ".title", "price": ".price", "link": {"selector": "a", "attr": "href"}}.
-6. Делай минимум шагов (обычно 3-6).
-7. Ничего кроме JSON.
+6. Для action=open_url аргумент args.url обязателен и не может быть пустым.
+7. allowed_domains должен содержать точный netloc из start_url (без wildcard и без других доменов).
+8. action=screenshot добавляй только когда это явно нужно для цели; указывай корректный args.path.
+9. Делай минимальный план без лишних шагов (обычно 3-6).
+10. Ничего кроме JSON.
 """

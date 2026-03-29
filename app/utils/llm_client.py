@@ -27,17 +27,19 @@ class LLMClient:
         timeout_sec: Optional[int] = None,
     ):
         self.backend = (backend or os.getenv("LLM_BACKEND", "ollama")).strip().lower()
-        if self.backend != "ollama":
+        if self.backend not in {"ollama", "ollama_cloud"}:
             raise LLMClientError(
-                f"Unsupported backend '{self.backend}'. Only 'ollama' and DummyLLMClient are available."
+                f"Unsupported backend '{self.backend}'. Supported backends: 'ollama', 'ollama_cloud', 'dummy'."
             )
 
-        self.ollama_base_url = (ollama_base_url or os.getenv("OLLAMA_BASE_URL", "http://localhost:11434")).rstrip("/")
+        default_base_url = "https://ollama.com" if self.backend == "ollama_cloud" else "http://localhost:11434"
+        self.ollama_base_url = (ollama_base_url or os.getenv("OLLAMA_BASE_URL", default_base_url)).rstrip("/")
         default_model = os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")
         self.planner_model = planner_model or os.getenv("OLLAMA_PLANNER_MODEL", default_model)
         self.verifier_model = verifier_model or os.getenv("OLLAMA_VERIFIER_MODEL", default_model)
         self.temperature = temperature
         self.timeout_sec = timeout_sec if timeout_sec is not None else self._resolve_timeout_sec()
+        self.ollama_api_key = os.getenv("OLLAMA_API_KEY", "").strip()
 
         self.session = requests.Session()
         self.session.trust_env = False
@@ -111,6 +113,14 @@ class LLMClient:
 
     def _ollama_chat(self, model: str, system_prompt: str, user_prompt: str, image_path: Optional[str]) -> str:
         url = f"{self.ollama_base_url}/api/chat"
+        headers: Dict[str, str] = {}
+        if self.backend == "ollama_cloud":
+            if not self.ollama_api_key:
+                raise LLMClientError(
+                    "OLLAMA_API_KEY is required for backend=ollama_cloud. "
+                    "Set OLLAMA_API_KEY and retry."
+                )
+            headers["Authorization"] = f"Bearer {self.ollama_api_key}"
 
         user_message: Dict[str, Any] = {"role": "user", "content": user_prompt}
         if image_path:
@@ -128,22 +138,33 @@ class LLMClient:
         }
 
         try:
-            response = self.session.post(url, json=payload, timeout=self.timeout_sec)
+            response = self.session.post(url, json=payload, headers=headers or None, timeout=self.timeout_sec)
             if not response.ok:
+                details = response.text[:800]
+                if response.status_code in {401, 403}:
+                    raise LLMClientError(
+                        f"Ollama Cloud authentication failed (status_code={response.status_code}, url={url}). "
+                        "Check OLLAMA_API_KEY."
+                    )
+                if response.status_code == 404:
+                    raise LLMClientError(
+                        f"Ollama model not found (status_code=404, url={url}, model={model}). "
+                        "Verify OLLAMA_PLANNER_MODEL / OLLAMA_VERIFIER_MODEL / OLLAMA_MODEL."
+                    )
                 raise LLMClientError(
                     "Ollama request failed "
                     f"(status_code={response.status_code}, url={url}, model={model}). "
-                    f"Response: {response.text}"
+                    f"Response: {details}"
                 )
         except requests.Timeout as exc:
+            backend_hint = "Ollama Cloud" if self.backend == "ollama_cloud" else "Ollama local"
             raise LLMClientError(
-                "Ollama request timed out: локальная модель не успела ответить "
-                f"за {self.timeout_sec} сек (url={url}, model={model}). "
-                "Увеличьте OLLAMA_TIMEOUT_SEC или упростите prompt."
+                f"{backend_hint} request timed out after {self.timeout_sec}s "
+                f"(url={url}, model={model}). Increase OLLAMA_TIMEOUT_SEC or simplify the prompt."
             ) from exc
         except requests.RequestException as exc:
             raise LLMClientError(
-                f"Ollama request failed (url={url}, model={model}): {exc}"
+                f"Ollama request failed (backend={self.backend}, url={url}, model={model}): {exc}"
             ) from exc
 
         try:
