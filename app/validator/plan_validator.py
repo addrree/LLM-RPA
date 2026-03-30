@@ -90,6 +90,20 @@ class PlanValidator:
         occurrence = args.get("occurrence", 1)
         if not isinstance(occurrence, int) or occurrence <= 0:
             raise PlanValidationError("extract_pattern_from_page_text requires positive integer 'occurrence'")
+        group_index = args.get("group_index")
+        if group_index is not None and (not isinstance(group_index, int) or group_index < 0):
+            raise PlanValidationError(
+                "extract_pattern_from_page_text requires non-negative integer 'group_index'"
+            )
+        normalize_number = args.get("normalize_number")
+        if normalize_number is not None and not isinstance(normalize_number, bool):
+            raise PlanValidationError("extract_pattern_from_page_text requires boolean 'normalize_number'")
+        number_type = args.get("number_type")
+        if number_type is not None and number_type != "int":
+            raise PlanValidationError("extract_pattern_from_page_text supports only number_type='int'")
+        strip_plus = args.get("strip_plus")
+        if strip_plus is not None and not isinstance(strip_plus, bool):
+            raise PlanValidationError("extract_pattern_from_page_text requires boolean 'strip_plus'")
         if not save_as:
             raise PlanValidationError("extract_pattern_from_page_text requires 'save_as'")
 

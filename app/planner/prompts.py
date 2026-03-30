@@ -38,6 +38,10 @@ PLANNER_SYSTEM_PROMPT = """
 8. observe_page и extract_pattern_from_page_text требуют save_as.
 9. Делай минимальный план без лишних шагов (обычно 3-6).
 10. Ничего кроме JSON.
+11. Для извлечения количественных значений из page_text не используй слишком узкий regex вроде "(\\d+)".
+12. Если число может содержать разделители тысяч (пробел, запятая, точка, NBSP \\u00A0, NNBSP \\u202F) или "+":
+    - используй extract_pattern_from_page_text с полной группой, например [0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*
+    - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -63,6 +67,9 @@ REPLANNER_SYSTEM_PROMPT = """
 Ключевые правила:
 1) Не выдумывай CSS-селекторы, если можно извлечь значение из page_text через regex/pattern.
 2) Если цель про "найди число рядом с известным текстом", предпочитай action=extract_pattern_from_page_text.
+2.1) Для чисел с возможными разделителями тысяч и "+" захватывай ПОЛНУЮ числовую строку, а не только первую группу цифр.
+2.2) Для таких шагов указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
+2.3) Избегай шаблонов уровня "(\\d+)" если рядом ожидается формат 2 087 000+, 2,087,000+ или 2.087.000+.
 3) Можно использовать observe_page как первый шаг final-плана только если нужен новый snapshot после переходов.
 4) required_fields должны быть только бизнес-поля, НЕ технические артефакты (например screenshot_path).
 5) Последний шаг всегда finish, step_id подряд.

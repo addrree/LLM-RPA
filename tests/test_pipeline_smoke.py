@@ -177,7 +177,14 @@ def test_validator_accepts_extract_pattern_from_page_text():
                 {
                     "step_id": 3,
                     "action": "extract_pattern_from_page_text",
-                    "args": {"pattern": "([0-9]+)", "occurrence": 1},
+                    "args": {
+                        "pattern": r"Русский\s*\n?\s*([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                        "occurrence": 1,
+                        "group_index": 1,
+                        "normalize_number": True,
+                        "number_type": "int",
+                        "strip_plus": True,
+                    },
                     "save_as": "count",
                 },
                 {"step_id": 4, "action": "finish", "args": {}},

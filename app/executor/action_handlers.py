@@ -100,6 +100,10 @@ class ActionHandlers:
 
         pattern = args["pattern"]
         occurrence = int(args.get("occurrence", 1))
+        group_index = args.get("group_index")
+        normalize_number = bool(args.get("normalize_number", False))
+        number_type = str(args.get("number_type", "int")).lower()
+        strip_plus = bool(args.get("strip_plus", True))
 
         source_text = ""
         if runtime_state is not None:
@@ -112,12 +116,107 @@ class ActionHandlers:
 
         matches = list(re.finditer(pattern, source_text, flags=flags_value))
         if not matches:
+            self._record_pattern_artifact(
+                runtime_state=runtime_state,
+                pattern=pattern,
+                success=False,
+                reason="pattern_not_found",
+            )
             raise ValueError(f"Pattern not found: {pattern}")
         if occurrence < 1 or occurrence > len(matches):
+            self._record_pattern_artifact(
+                runtime_state=runtime_state,
+                pattern=pattern,
+                success=False,
+                reason=f"occurrence_out_of_range:{occurrence}/{len(matches)}",
+            )
             raise ValueError(f"Occurrence {occurrence} out of range, found {len(matches)} matches")
 
         match = matches[occurrence - 1]
+        extracted_value = self._extract_match_value(match, group_index=group_index)
+
+        normalized_value = None
+        if normalize_number:
+            normalized_value = self._normalize_number_token(
+                extracted_value,
+                number_type=number_type,
+                strip_plus=strip_plus,
+            )
+            result_value = normalized_value
+        else:
+            result_value = extracted_value
+
+        self._record_pattern_artifact(
+            runtime_state=runtime_state,
+            pattern=pattern,
+            success=True,
+            raw_match=extracted_value,
+            normalized_value=normalized_value,
+            group_index=group_index,
+            occurrence=occurrence,
+        )
+        args["_executor_note"] = (
+            f"extract_pattern_from_page_text matched pattern={pattern!r}; "
+            f"raw_match={extracted_value!r}; normalized_value={normalized_value!r}"
+        )
+        return result_value
+
+    @staticmethod
+    def _extract_match_value(match: re.Match[str], group_index: int | None):
+        if group_index is not None:
+            return match.group(int(group_index))
         return match.group(1) if match.groups() else match.group(0)
+
+    @staticmethod
+    def _normalize_number_token(value: str, *, number_type: str, strip_plus: bool):
+        if number_type != "int":
+            raise ValueError(f"Unsupported number_type: {number_type}")
+
+        candidate = str(value).strip()
+        if strip_plus:
+            candidate = candidate.rstrip("+").strip()
+
+        grouped_pattern = r"^\d{1,3}(?:[ \t,\.\u00A0\u202F]\d{3})+$"
+        plain_integer = r"^\d+$"
+
+        if re.fullmatch(grouped_pattern, candidate):
+            compact = re.sub(r"[ \t,\.\u00A0\u202F]", "", candidate)
+        elif re.fullmatch(plain_integer, candidate):
+            compact = candidate
+        else:
+            raise ValueError(f"Value is not grouped/plain integer-like: {value!r}")
+
+        if not re.fullmatch(plain_integer, compact):
+            raise ValueError(f"Normalized value is not integer-like: {value!r} -> {compact!r}")
+
+        return int(compact)
+
+    @staticmethod
+    def _record_pattern_artifact(
+        *,
+        runtime_state,
+        pattern: str,
+        success: bool,
+        reason: str | None = None,
+        raw_match: str | None = None,
+        normalized_value: int | None = None,
+        group_index: int | None = None,
+        occurrence: int | None = None,
+    ) -> None:
+        if runtime_state is None:
+            return
+        artifacts = runtime_state.setdefault("pattern_extractions", [])
+        artifacts.append(
+            {
+                "pattern": pattern,
+                "success": success,
+                "reason": reason,
+                "raw_match": raw_match,
+                "normalized_value": normalized_value,
+                "group_index": group_index,
+                "occurrence": occurrence,
+            }
+        )
 
     async def _extract_field_value(self, container, field_name: str, rule: Any):
         selector = None
