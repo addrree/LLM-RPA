@@ -81,6 +81,7 @@ class Planner:
             steps = []
 
         normalized_steps: list[dict] = []
+        has_observe_page = False
         for step in steps:
             if not isinstance(step, dict):
                 continue
@@ -93,6 +94,11 @@ class Planner:
             if current.get("action") == "open_url" and "url" not in current["args"] and "url" in current:
                 current["args"]["url"] = current["url"]
                 current.pop("url", None)
+            if current.get("action") == "observe_page":
+                has_observe_page = True
+                save_as = current.get("save_as")
+                if not isinstance(save_as, str) or not save_as.strip():
+                    current["save_as"] = "page_snapshot"
 
             normalized_steps.append(current)
 
@@ -111,6 +117,8 @@ class Planner:
             expected_result["description"] = "Collect page snapshot for replanning"
         if not isinstance(expected_result.get("required_fields"), list):
             expected_result["required_fields"] = ["page_snapshot"]
+        elif has_observe_page and "page_snapshot" not in expected_result["required_fields"]:
+            expected_result["required_fields"] = [*expected_result["required_fields"], "page_snapshot"]
 
         start_url = plan.get("start_url")
         if not start_url:
