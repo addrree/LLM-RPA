@@ -76,3 +76,23 @@ def test_extract_pattern_raises_when_match_not_found():
                 runtime_state={},
             )
         )
+
+
+def test_extract_text_near_text_returns_normalized_number():
+    page = _FakePage("English\n6 987 000+ articles")
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_text_near_text(
+            page,
+            {
+                "anchor_text": "English",
+                "pattern": r"English\s*\n?\s*([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                "group_index": 1,
+                "normalize_number": True,
+                "number_type": "int",
+                "strip_plus": True,
+            },
+            runtime_state={},
+        )
+    )
+    assert value == 6987000

@@ -16,6 +16,7 @@ ActionType = Literal[
     "screenshot",
     "observe_page",
     "extract_pattern_from_page_text",
+    "extract_text_near_text",
     "finish",
 ]
 

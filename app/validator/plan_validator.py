@@ -15,6 +15,7 @@ ALLOWED_ACTIONS = {
     "screenshot",
     "observe_page",
     "extract_pattern_from_page_text",
+    "extract_text_near_text",
     "finish",
 }
 
@@ -65,6 +66,8 @@ class PlanValidator:
                 raise PlanValidationError("observe_page requires 'save_as'")
             if step.action == "extract_pattern_from_page_text":
                 self._validate_extract_pattern_from_page_text(step.args, step.save_as)
+            if step.action == "extract_text_near_text":
+                self._validate_extract_text_near_text(step.args, step.save_as)
 
     @staticmethod
     def _validate_extract_items(args: dict, save_as: str | None) -> None:
@@ -106,6 +109,18 @@ class PlanValidator:
             raise PlanValidationError("extract_pattern_from_page_text requires boolean 'strip_plus'")
         if not save_as:
             raise PlanValidationError("extract_pattern_from_page_text requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_text_near_text(args: dict, save_as: str | None) -> None:
+        if "anchor_text" not in args or not str(args.get("anchor_text", "")).strip():
+            raise PlanValidationError("extract_text_near_text requires non-empty 'anchor_text'")
+        if "pattern" not in args or not str(args.get("pattern", "")).strip():
+            raise PlanValidationError("extract_text_near_text requires non-empty 'pattern'")
+        window_chars = args.get("window_chars", 200)
+        if not isinstance(window_chars, int) or window_chars <= 0:
+            raise PlanValidationError("extract_text_near_text requires positive integer 'window_chars'")
+        if not save_as:
+            raise PlanValidationError("extract_text_near_text requires 'save_as'")
 
     def _validate_step_order(self, plan: TaskSpec) -> None:
         expected_ids = list(range(1, len(plan.steps) + 1))
