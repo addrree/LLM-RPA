@@ -124,11 +124,16 @@ def save_artifacts(result: dict, run_id: str) -> dict:
 
 def export_results(result: dict, run_id: str, export_formats: list[str]) -> list[Path]:
     extracted_data = result["execution_result"].extracted_data
+    exported_page_snapshot = (
+        extracted_data.get("page_snapshot")
+        or result.get("page_snapshot")
+        or (result.get("initial_execution_result").extracted_data.get("page_snapshot") if result.get("initial_execution_result") else None)
+    )
     structured_output = {
         "planning_mode": result.get("planning_mode", "single_stage"),
         "initial_plan": result["initial_plan"].model_dump(mode="json") if result.get("initial_plan") else None,
         "final_plan": result["final_plan"].model_dump(mode="json") if result.get("final_plan") else None,
-        "page_snapshot": result["execution_result"].extracted_data.get("page_snapshot"),
+        "page_snapshot": exported_page_snapshot,
         "status": result["execution_result"].status,
         "verdict": result["verdict"].model_dump(mode="json"),
         "final_url": result["execution_result"].final_url,

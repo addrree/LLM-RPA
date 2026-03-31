@@ -105,14 +105,7 @@ class ActionHandlers:
         number_type = str(args.get("number_type", "int")).lower()
         strip_plus = bool(args.get("strip_plus", True))
 
-        source_text = ""
-        if runtime_state is not None:
-            source_text = runtime_state.get("last_page_text") or ""
-
-        if not source_text:
-            source_text = (await page.locator("body").inner_text()).strip()
-            if runtime_state is not None:
-                runtime_state["last_page_text"] = source_text
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
 
         matches = list(re.finditer(pattern, source_text, flags=flags_value))
         if not matches:
@@ -160,6 +153,56 @@ class ActionHandlers:
             f"raw_match={extracted_value!r}; normalized_value={normalized_value!r}"
         )
         return result_value
+
+    async def extract_text_near_text(self, page, args, runtime_state=None):
+        anchor_text = str(args["anchor_text"])
+        pattern = str(args["pattern"])
+        window_chars = int(args.get("window_chars", 200))
+        flags_value = re.IGNORECASE if bool(args.get("ignore_case", True)) else 0
+
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        anchor_match = re.search(re.escape(anchor_text), source_text, flags=flags_value)
+        if not anchor_match:
+            raise ValueError(f"Anchor text not found: {anchor_text}")
+
+        start = max(0, anchor_match.start() - window_chars)
+        end = min(len(source_text), anchor_match.end() + window_chars)
+        window_text = source_text[start:end]
+
+        match = re.search(pattern, window_text, flags=flags_value)
+        if not match:
+            raise ValueError(
+                f"Pattern not found near anchor_text={anchor_text!r} within {window_chars} chars"
+            )
+
+        group_index = args.get("group_index")
+        extracted_value = self._extract_match_value(match, group_index=group_index)
+
+        normalized_value = None
+        if bool(args.get("normalize_number", False)):
+            normalized_value = self._normalize_number_token(
+                extracted_value,
+                number_type=str(args.get("number_type", "int")).lower(),
+                strip_plus=bool(args.get("strip_plus", True)),
+            )
+            args["_executor_note"] = (
+                f"extract_text_near_text matched near anchor={anchor_text!r}; "
+                f"raw_match={extracted_value!r}; normalized_value={normalized_value!r}"
+            )
+            return normalized_value
+
+        args["_executor_note"] = f"extract_text_near_text matched near anchor={anchor_text!r}; raw={extracted_value!r}"
+        return extracted_value
+
+    async def _load_source_text(self, page, runtime_state=None) -> str:
+        source_text = ""
+        if runtime_state is not None:
+            source_text = runtime_state.get("last_page_text") or ""
+        if not source_text:
+            source_text = (await page.locator("body").inner_text()).strip()
+            if runtime_state is not None:
+                runtime_state["last_page_text"] = source_text
+        return source_text
 
     @staticmethod
     def _extract_match_value(match: re.Match[str], group_index: int | None):

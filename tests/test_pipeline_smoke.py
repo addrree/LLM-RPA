@@ -196,6 +196,37 @@ def test_validator_accepts_extract_pattern_from_page_text():
     validator.validate(plan)
 
 
+def test_validator_accepts_extract_text_near_text():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract count near anchor",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Count", "required_fields": ["count"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_text_near_text",
+                    "args": {
+                        "anchor_text": "English",
+                        "pattern": r"English\s*([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                        "group_index": 1,
+                        "normalize_number": True,
+                        "number_type": "int",
+                    },
+                    "save_as": "count",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    validator.validate(plan)
+
+
 def test_verifier_ignores_technical_screenshot_required_field():
     llm = DummyLLMClient()
 
