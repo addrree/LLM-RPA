@@ -16,6 +16,7 @@ ALLOWED_ACTIONS = {
     "observe_page",
     "extract_pattern_from_page_text",
     "extract_text_near_text",
+    "extract_value_near_anchor",
     "finish",
 }
 
@@ -68,6 +69,8 @@ class PlanValidator:
                 self._validate_extract_pattern_from_page_text(step.args, step.save_as)
             if step.action == "extract_text_near_text":
                 self._validate_extract_text_near_text(step.args, step.save_as)
+            if step.action == "extract_value_near_anchor":
+                self._validate_extract_value_near_anchor(step.args, step.save_as)
 
     @staticmethod
     def _validate_extract_items(args: dict, save_as: str | None) -> None:
@@ -102,8 +105,10 @@ class PlanValidator:
         if normalize_number is not None and not isinstance(normalize_number, bool):
             raise PlanValidationError("extract_pattern_from_page_text requires boolean 'normalize_number'")
         number_type = args.get("number_type")
-        if number_type is not None and number_type != "int":
-            raise PlanValidationError("extract_pattern_from_page_text supports only number_type='int'")
+        if number_type is not None and number_type not in {"int", "float"}:
+            raise PlanValidationError(
+                "extract_pattern_from_page_text supports number_type in {'int','float'}"
+            )
         strip_plus = args.get("strip_plus")
         if strip_plus is not None and not isinstance(strip_plus, bool):
             raise PlanValidationError("extract_pattern_from_page_text requires boolean 'strip_plus'")
@@ -121,6 +126,40 @@ class PlanValidator:
             raise PlanValidationError("extract_text_near_text requires positive integer 'window_chars'")
         if not save_as:
             raise PlanValidationError("extract_text_near_text requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_value_near_anchor(args: dict, save_as: str | None) -> None:
+        if "anchor_text" not in args or not str(args.get("anchor_text", "")).strip():
+            raise PlanValidationError("extract_value_near_anchor requires non-empty 'anchor_text'")
+        if "value_pattern" not in args or not str(args.get("value_pattern", "")).strip():
+            raise PlanValidationError("extract_value_near_anchor requires non-empty 'value_pattern'")
+        direction = args.get("search_direction", "after")
+        if direction not in {"after", "before", "around"}:
+            raise PlanValidationError(
+                "extract_value_near_anchor requires search_direction in {'after','before','around'}"
+            )
+        same_block_only = args.get("same_block_only")
+        if same_block_only is not None and not isinstance(same_block_only, bool):
+            raise PlanValidationError("extract_value_near_anchor requires boolean 'same_block_only'")
+        max_distance_chars = args.get("max_distance_chars")
+        if max_distance_chars is not None and (not isinstance(max_distance_chars, int) or max_distance_chars <= 0):
+            raise PlanValidationError(
+                "extract_value_near_anchor requires positive integer 'max_distance_chars'"
+            )
+        group_index = args.get("group_index")
+        if group_index is not None and (not isinstance(group_index, int) or group_index < 0):
+            raise PlanValidationError("extract_value_near_anchor requires non-negative integer 'group_index'")
+        normalize_number = args.get("normalize_number")
+        if normalize_number is not None and not isinstance(normalize_number, bool):
+            raise PlanValidationError("extract_value_near_anchor requires boolean 'normalize_number'")
+        number_type = args.get("number_type")
+        if number_type is not None and number_type not in {"int", "float"}:
+            raise PlanValidationError("extract_value_near_anchor supports number_type in {'int','float'}")
+        strip_plus = args.get("strip_plus")
+        if strip_plus is not None and not isinstance(strip_plus, bool):
+            raise PlanValidationError("extract_value_near_anchor requires boolean 'strip_plus'")
+        if not save_as:
+            raise PlanValidationError("extract_value_near_anchor requires 'save_as'")
 
     def _validate_step_order(self, plan: TaskSpec) -> None:
         expected_ids = list(range(1, len(plan.steps) + 1))
