@@ -1,10 +1,16 @@
+import json
+from datetime import datetime, timezone
+
+from app.config import RAW_LLM_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
 from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.task_spec import TaskSpec
-from app.validator.plan_validator import PlanValidator
+from app.validator.plan_validator import PlanValidationError, PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
+
+UTC = timezone.utc
 
 
 class WorkflowManager:
@@ -83,7 +89,28 @@ class WorkflowManager:
                 )
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._ensure_open_url_for_final_plan(final_plan)
-                self.validator.validate(final_plan)
+                try:
+                    self.validator.validate(final_plan)
+                except PlanValidationError as first_error:
+                    invalid_plan_dump = final_plan.model_dump(mode="json")
+                    repaired_plan = self.replanner.revise_plan(
+                        user_goal=user_goal,
+                        page_snapshot=page_snapshot,
+                        previous_plan=initial_plan,
+                        validation_error=str(first_error),
+                        invalid_plan=invalid_plan_dump,
+                    )
+                    replanner_artifact = self.replanner.last_artifact
+                    final_plan = self._ensure_open_url_for_final_plan(repaired_plan)
+                    try:
+                        self.validator.validate(final_plan)
+                    except PlanValidationError as second_error:
+                        self._persist_final_plan_repair_failure(
+                            invalid_plan=invalid_plan_dump,
+                            validation_error=str(second_error),
+                            repaired_raw_response=replanner_artifact.raw_response if replanner_artifact else None,
+                        )
+                        raise
                 execution_result = await self.executor.execute(
                     final_plan,
                     session=session,
@@ -132,3 +159,18 @@ class WorkflowManager:
             **plan.model_dump(mode="json"),
             "steps": normalized_steps,
         })
+
+    @staticmethod
+    def _persist_final_plan_repair_failure(
+        invalid_plan: dict,
+        validation_error: str,
+        repaired_raw_response: str | None,
+    ) -> None:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        path = RAW_LLM_DIR / f"replanner_repair_failed_{timestamp}.json"
+        payload = {
+            "raw_invalid_plan": invalid_plan,
+            "validation_error": validation_error,
+            "repaired_raw_response": repaired_raw_response,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")

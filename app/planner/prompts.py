@@ -80,4 +80,11 @@ REPLANNER_SYSTEM_PROMPT = """
 4) Можно использовать observe_page как первый шаг final-плана только если нужен новый snapshot после переходов.
 5) required_fields должны быть только бизнес-поля, НЕ технические артефакты (например screenshot_path).
 6) Последний шаг всегда finish, step_id подряд.
+7) Для action=open_url обязательно передавай args.url (не пустой).
+8) Для action=extract_value_near_anchor обязательно передавай:
+   - args.anchor_text
+   - args.value_pattern
+   - save_as
+9) Не пропускай обязательные поля TaskSpec (goal, start_url, constraints, expected_result.description, steps[*].args).
+10) Никаких комментариев/markdown, только валидный JSON-объект.
 """
