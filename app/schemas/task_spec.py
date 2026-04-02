@@ -17,6 +17,7 @@ ActionType = Literal[
     "observe_page",
     "extract_pattern_from_page_text",
     "extract_text_near_text",
+    "extract_value_near_anchor",
     "finish",
 ]
 

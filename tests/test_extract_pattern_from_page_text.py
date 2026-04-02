@@ -48,12 +48,16 @@ class _FakeBodyLocator:
 
 
 class _FakePage:
-    def __init__(self, text: str):
+    def __init__(self, text: str, evaluate_payload: list[dict] | None = None):
         self._text = text
+        self._evaluate_payload = evaluate_payload or []
 
     def locator(self, selector: str):
         assert selector == "body"
         return _FakeBodyLocator(self._text)
+
+    async def evaluate(self, _script, _payload):
+        return self._evaluate_payload
 
 
 def test_extract_pattern_returns_raw_value_when_normalization_disabled():
@@ -96,3 +100,36 @@ def test_extract_text_near_text_returns_normalized_number():
         )
     )
     assert value == 6987000
+
+
+def test_extract_value_near_anchor_smoke_prefers_contextual_match():
+    observed_text = "25 years of the free encyclopedia ... English ... 7,141,000+ articles"
+    page = _FakePage(
+        observed_text,
+        evaluate_payload=[
+            {
+                "source": "dom_same_block",
+                "window_text": observed_text,
+                "anchor_idx_in_window": observed_text.index("English"),
+            }
+        ],
+    )
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_value_near_anchor(
+            page,
+            {
+                "anchor_text": "English",
+                "value_pattern": r"([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                "search_direction": "after",
+                "same_block_only": True,
+                "required_right_context": "articles",
+                "group_index": 1,
+                "normalize_number": True,
+                "number_type": "int",
+                "strip_plus": True,
+            },
+            runtime_state={},
+        )
+    )
+    assert value == 7141000
