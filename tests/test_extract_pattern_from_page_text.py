@@ -60,6 +60,22 @@ class _FakePage:
         return self._evaluate_payload
 
 
+class _FakeFieldTarget:
+    def __init__(self, *, text: str = "", attrs: dict | None = None):
+        self._text = text
+        self._attrs = attrs or {}
+        self.first = self
+
+    async def inner_text(self):
+        return self._text
+
+    async def get_attribute(self, attr: str):
+        return self._attrs.get(attr)
+
+    def locator(self, _selector: str):
+        return self
+
+
 def test_extract_pattern_returns_raw_value_when_normalization_disabled():
     page = _FakePage("Русский\n2 087 000+")
     handler = ActionHandlers()
@@ -133,3 +149,45 @@ def test_extract_value_near_anchor_smoke_prefers_contextual_match():
         )
     )
     assert value == 7141000
+
+
+def test_extract_items_field_rule_near_anchor_normalizes_number():
+    container = _FakeFieldTarget(text="English 7,141,000+ articles")
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler._extract_field_value(
+            container,
+            "article_count",
+            {
+                "anchor_text": "English",
+                "value_pattern": r"([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                "search_direction": "after",
+                "required_right_context": "articles",
+                "group_index": 1,
+                "normalize_number": True,
+                "number_type": "int",
+                "strip_plus": True,
+            },
+        )
+    )
+    assert value == 7141000
+
+
+def test_extract_items_field_rule_pattern_inside_selector_text():
+    container = _FakeFieldTarget(text="Русский — 2 115 000+ статей")
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler._extract_field_value(
+            container,
+            "article_count",
+            {
+                "selector": ".lang-block",
+                "pattern": r"([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                "group_index": 1,
+                "normalize_number": True,
+                "number_type": "int",
+                "strip_plus": True,
+            },
+        )
+    )
+    assert value == 2115000

@@ -81,6 +81,8 @@ class PlanValidator:
 
         if not isinstance(args["fields"], dict) or not args["fields"]:
             raise PlanValidationError("extract_items requires non-empty 'fields' dict")
+        for field_name, rule in args["fields"].items():
+            PlanValidator._validate_extract_items_field_rule(field_name, rule)
 
         limit = args.get("limit")
         if not isinstance(limit, int) or limit <= 0:
@@ -88,6 +90,79 @@ class PlanValidator:
 
         if not save_as:
             raise PlanValidationError("extract_items requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_items_field_rule(field_name: str, rule) -> None:
+        if isinstance(rule, str):
+            if not rule.strip():
+                raise PlanValidationError(
+                    f"extract_items field '{field_name}' requires non-empty selector string"
+                )
+            return
+
+        if not isinstance(rule, dict):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' must be string selector or object rule"
+            )
+
+        selector = rule.get("selector")
+        anchor_text = rule.get("anchor_text")
+        value_pattern = rule.get("value_pattern")
+        pattern = rule.get("pattern")
+
+        if selector is not None and (not isinstance(selector, str) or not selector.strip()):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' has invalid 'selector'"
+            )
+        if rule.get("attr") is not None and (not isinstance(rule.get("attr"), str) or not rule["attr"].strip()):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' has invalid 'attr'"
+            )
+        if pattern is not None and (not isinstance(pattern, str) or not pattern.strip()):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' has invalid 'pattern'"
+            )
+        if anchor_text is not None and (not isinstance(anchor_text, str) or not anchor_text.strip()):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' has invalid 'anchor_text'"
+            )
+        if value_pattern is not None and (not isinstance(value_pattern, str) or not value_pattern.strip()):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' has invalid 'value_pattern'"
+            )
+
+        if (anchor_text is None) ^ (value_pattern is None):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' must provide both 'anchor_text' and 'value_pattern'"
+            )
+
+        if not selector and pattern is None and anchor_text is None:
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' requires 'selector' or extraction rule"
+            )
+
+        if "group_index" in rule and (not isinstance(rule["group_index"], int) or rule["group_index"] < 0):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' requires non-negative integer 'group_index'"
+            )
+        if "normalize_number" in rule and not isinstance(rule["normalize_number"], bool):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' requires boolean 'normalize_number'"
+            )
+        if "strip_plus" in rule and not isinstance(rule["strip_plus"], bool):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' requires boolean 'strip_plus'"
+            )
+        if "max_distance_chars" in rule and (
+            not isinstance(rule["max_distance_chars"], int) or rule["max_distance_chars"] <= 0
+        ):
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' requires positive integer 'max_distance_chars'"
+            )
+        if "search_direction" in rule and rule["search_direction"] not in {"after", "before", "around"}:
+            raise PlanValidationError(
+                f"extract_items field '{field_name}' requires search_direction in {{'after','before','around'}}"
+            )
 
     @staticmethod
     def _validate_extract_pattern_from_page_text(args: dict, save_as: str | None) -> None:
