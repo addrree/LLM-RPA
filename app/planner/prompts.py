@@ -47,6 +47,7 @@ PLANNER_SYSTEM_PROMPT = """
 12. Если число может содержать разделители тысяч (пробел, запятая, точка, NBSP \\u00A0, NNBSP \\u202F) или "+":
     - используй extract_pattern_from_page_text с полной группой, например [0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
+13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -87,6 +88,9 @@ REPLANNER_SYSTEM_PROMPT = """
    - language_name: селектор названия языка внутри блока
    - article_count: селектор/паттерн и normalize_number=true
    Результат должен быть массивом объектов, а не массивом строк.
+4.2) Для list/block/card/top-N задач не делай ставку на extract_pattern_from_page_text как основную долгосрочную стратегию:
+   - сначала пробуй extract_items (DOM/block-aware),
+   - extract_pattern_from_page_text используй только как тактический fallback.
 5) required_fields должны быть только бизнес-поля, НЕ технические артефакты (например screenshot_path).
 6) Последний шаг всегда finish, step_id подряд.
 7) Для action=open_url обязательно передавай args.url (не пустой).

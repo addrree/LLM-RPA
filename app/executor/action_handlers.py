@@ -100,6 +100,8 @@ class ActionHandlers:
 
         pattern = args["pattern"]
         occurrence = int(args.get("occurrence", 1))
+        limit = args.get("limit")
+        fields = args.get("fields")
         group_index = args.get("group_index")
         normalize_number = bool(args.get("normalize_number", False))
         number_type = str(args.get("number_type", "int")).lower()
@@ -126,6 +128,19 @@ class ActionHandlers:
             raise ValueError(f"Occurrence {occurrence} out of range, found {len(matches)} matches")
 
         match = matches[occurrence - 1]
+        if limit is not None:
+            extracted_items = self._extract_pattern_repeated(
+                matches=matches,
+                limit=int(limit),
+                fields=fields,
+                group_index=group_index,
+            )
+            args["_executor_note"] = (
+                f"extract_pattern_from_page_text matched pattern={pattern!r}; "
+                f"returned {len(extracted_items)} repeated item(s)"
+            )
+            return extracted_items
+
         extracted_value = self._extract_match_value(match, group_index=group_index)
 
         normalized_value = None
@@ -153,6 +168,70 @@ class ActionHandlers:
             f"raw_match={extracted_value!r}; normalized_value={normalized_value!r}"
         )
         return result_value
+
+    @classmethod
+    def _extract_pattern_repeated(
+        cls,
+        *,
+        matches: list[re.Match[str]],
+        limit: int,
+        fields: Any,
+        group_index: int | None,
+    ) -> list[Any]:
+        if limit < 1:
+            return []
+        repeated = matches[:limit]
+
+        if fields is not None:
+            return [cls._build_structured_match_item(match=match, fields=fields) for match in repeated]
+
+        return [cls._extract_match_value(match, group_index=group_index) for match in repeated]
+
+    @classmethod
+    def _build_structured_match_item(cls, *, match: re.Match[str], fields: Any) -> dict[str, Any]:
+        item: dict[str, Any] = {}
+        if isinstance(fields, dict):
+            field_entries = fields.items()
+        else:
+            field_entries = [(field_name, idx + 1) for idx, field_name in enumerate(list(fields))]
+
+        for default_group_index, (field_name, spec) in enumerate(field_entries, start=1):
+            field = str(field_name)
+            extracted = cls._extract_match_group_by_field(match=match, field=field, spec=spec, default_index=default_group_index)
+            item[field] = extracted
+        return item
+
+    @classmethod
+    def _extract_match_group_by_field(
+        cls,
+        *,
+        match: re.Match[str],
+        field: str,
+        spec: Any,
+        default_index: int,
+    ) -> Any:
+        if isinstance(spec, dict):
+            group = int(spec.get("group_index", default_index))
+            normalize_number = bool(spec.get("normalize_number", False))
+            number_type = str(spec.get("number_type", "int")).lower()
+            strip_plus = bool(spec.get("strip_plus", True))
+        else:
+            group = int(spec) if isinstance(spec, int) else default_index
+            normalize_number = False
+            number_type = "int"
+            strip_plus = True
+
+        extracted = cls._extract_match_value(match, group_index=group)
+        if normalize_number or field.endswith("_count") or field in {"count", "total", "article_count"}:
+            try:
+                return cls._normalize_number_token(
+                    extracted,
+                    number_type=number_type,
+                    strip_plus=strip_plus,
+                )
+            except ValueError:
+                return extracted
+        return extracted
 
     async def extract_text_near_text(self, page, args, runtime_state=None):
         anchor_text = str(args["anchor_text"])

@@ -98,6 +98,39 @@ def test_extract_pattern_raises_when_match_not_found():
         )
 
 
+def test_extract_pattern_supports_repeated_structured_items_with_limit():
+    page = _FakePage("Русский\n2 087 000+\nEnglish\n6 987 000+")
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_pattern_from_page_text(
+            page,
+            {
+                "pattern": r"(Русский|English)\s*\n?\s*([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                "limit": 2,
+                "fields": ["language_name", "article_count"],
+            },
+            runtime_state={},
+        )
+    )
+    assert value == [
+        {"language_name": "Русский", "article_count": 2087000},
+        {"language_name": "English", "article_count": 6987000},
+    ]
+
+
+def test_extract_pattern_repeated_without_fields_returns_values():
+    page = _FakePage("A: 10\nB: 20")
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_pattern_from_page_text(
+            page,
+            {"pattern": r"[A-Z]:\s*(\d+)", "group_index": 1, "limit": 2},
+            runtime_state={},
+        )
+    )
+    assert value == ["10", "20"]
+
+
 def test_extract_text_near_text_returns_normalized_number():
     page = _FakePage("English\n6 987 000+ articles")
     handler = ActionHandlers()
