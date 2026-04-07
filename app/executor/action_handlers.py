@@ -533,6 +533,18 @@ class ActionHandlers:
     async def _extract_field_value(self, container, field_name: str, rule: Any):
         selector = None
         attr = None
+        pattern = None
+        group_index = None
+        normalize_number = False
+        number_type = "int"
+        strip_plus = True
+        anchor_text = None
+        value_pattern = None
+        search_direction = "after"
+        required_right_context = None
+        required_left_context = None
+        max_distance_chars = None
+        ignore_case = True
 
         if isinstance(rule, str):
             if rule.endswith(".href"):
@@ -545,16 +557,100 @@ class ActionHandlers:
         elif isinstance(rule, dict):
             selector = rule.get("selector")
             attr = rule.get("attr")
+            pattern = rule.get("pattern")
+            group_index = rule.get("group_index")
+            normalize_number = bool(rule.get("normalize_number", False))
+            number_type = str(rule.get("number_type", "int")).lower()
+            strip_plus = bool(rule.get("strip_plus", True))
+            anchor_text = rule.get("anchor_text")
+            value_pattern = rule.get("value_pattern")
+            search_direction = str(rule.get("search_direction", "after")).lower()
+            required_right_context = rule.get("required_right_context")
+            required_left_context = rule.get("required_left_context")
+            max_distance_chars = rule.get("max_distance_chars")
+            ignore_case = bool(rule.get("ignore_case", True))
 
-        if not selector:
-            return None
+        target = container
+        if selector:
+            target = container.locator(selector).first
 
-        locator = container.locator(selector).first
         if attr:
-            value = await locator.get_attribute(attr)
+            value = await target.get_attribute(attr)
             return (value or "").strip()
 
-        return (await locator.inner_text()).strip()
+        text = (await target.inner_text()).strip()
+        if not text:
+            return None
+
+        flags_value = re.IGNORECASE if ignore_case else 0
+        if anchor_text and value_pattern:
+            match = self._match_value_near_anchor_in_text(
+                text=text,
+                anchor_text=str(anchor_text),
+                value_pattern=str(value_pattern),
+                search_direction=search_direction,
+                required_right_context=None if required_right_context is None else str(required_right_context),
+                required_left_context=None if required_left_context is None else str(required_left_context),
+                max_distance_chars=(
+                    int(max_distance_chars) if max_distance_chars is not None else None
+                ),
+                flags_value=flags_value,
+            )
+            if match is None:
+                return None
+            extracted = self._extract_match_value(match, group_index=group_index)
+        elif pattern:
+            match = re.search(str(pattern), text, flags=flags_value)
+            if not match:
+                return None
+            extracted = self._extract_match_value(match, group_index=group_index)
+        else:
+            extracted = text
+
+        if normalize_number:
+            return self._normalize_number_token(
+                extracted,
+                number_type=number_type,
+                strip_plus=strip_plus,
+            )
+
+        return extracted
+
+    def _match_value_near_anchor_in_text(
+        self,
+        *,
+        text: str,
+        anchor_text: str,
+        value_pattern: str,
+        search_direction: str,
+        required_right_context: str | None,
+        required_left_context: str | None,
+        max_distance_chars: int | None,
+        flags_value: int,
+    ):
+        anchor_match = re.search(re.escape(anchor_text), text, flags=flags_value)
+        if not anchor_match:
+            return None
+
+        anchor_idx = anchor_match.start()
+        best = None
+        for match in re.finditer(value_pattern, text, flags=flags_value):
+            if not self._contexts_match(
+                window_text=text,
+                match=match,
+                required_left_context=required_left_context,
+                required_right_context=required_right_context,
+                flags_value=flags_value,
+            ):
+                continue
+            distance = self._distance_from_anchor(anchor_idx=anchor_idx, match=match, direction=search_direction)
+            if distance is None:
+                continue
+            if isinstance(max_distance_chars, int) and max_distance_chars > 0 and distance > max_distance_chars:
+                continue
+            if best is None or distance < best[0]:
+                best = (distance, match)
+        return None if best is None else best[1]
 
     async def screenshot(self, page, args, runtime_state=None):
         path = args["path"]

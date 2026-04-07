@@ -32,6 +32,11 @@ PLANNER_SYSTEM_PROMPT = """
 2. step_id строго подряд: 1,2,3,...
 3. Для extract_* шагов с save_as в required_fields должны быть соответствующие поля.
 4. Для extract_items всегда указывай args.container_selector, args.limit, args.fields и save_as.
+4.1) Для повторяющихся карточек/блоков заполняй args.fields как объект полей (например language_name, article_count), а не как плоский список.
+4.2) Для числовых полей внутри extract_items можно использовать расширенное правило поля:
+    {"selector":"...", "pattern":"...", "group_index":1, "normalize_number":true, "number_type":"int", "strip_plus":true}
+    или правило с anchor/value внутри блока:
+    {"selector":"...", "anchor_text":"English", "value_pattern":"([0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*)", ... }.
 5. Для action=open_url аргумент args.url обязателен и не может быть пустым.
 6. allowed_domains должен содержать netloc start_url или его родительский домен.
 7. action=screenshot добавляй только когда это явно нужно для цели; указывай корректный args.path.
@@ -78,6 +83,10 @@ REPLANNER_SYSTEM_PROMPT = """
 2.2) Для таких шагов указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 2.3) Избегай шаблонов уровня "(\\d+)" если рядом ожидается формат 2 087 000+, 2,087,000+ или 2.087.000+.
 4) Можно использовать observe_page как первый шаг final-плана только если нужен новый snapshot после переходов.
+4.1) Для извлечения повторяющихся структур (например top 10 языков Wikipedia) предпочитай один шаг extract_items с полями-объектами:
+   - language_name: селектор названия языка внутри блока
+   - article_count: селектор/паттерн и normalize_number=true
+   Результат должен быть массивом объектов, а не массивом строк.
 5) required_fields должны быть только бизнес-поля, НЕ технические артефакты (например screenshot_path).
 6) Последний шаг всегда finish, step_id подряд.
 7) Для action=open_url обязательно передавай args.url (не пустой).

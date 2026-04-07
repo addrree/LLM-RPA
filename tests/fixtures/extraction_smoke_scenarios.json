@@ -1,0 +1,24 @@
+[
+  {
+    "id": "wiki_english_articles",
+    "goal": "Open https://www.wikipedia.org and extract the number of English articles",
+    "start_url": "https://www.wikipedia.org/",
+    "expected_fields": ["english_article_count"],
+    "recommended_action": "extract_value_near_anchor"
+  },
+  {
+    "id": "wiki_russian_articles",
+    "goal": "Open https://www.wikipedia.org and extract the number of Russian articles",
+    "start_url": "https://www.wikipedia.org/",
+    "expected_fields": ["russian_article_count"],
+    "recommended_action": "extract_value_near_anchor"
+  },
+  {
+    "id": "wiki_top_10_languages",
+    "goal": "Открой https://www.wikipedia.org и выгрузи первые 10 языковых блоков с названием языка и числом статей",
+    "start_url": "https://www.wikipedia.org/",
+    "expected_fields": ["top_languages"],
+    "recommended_action": "extract_items",
+    "expected_item_fields": ["language_name", "article_count"]
+  }
+]

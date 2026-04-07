@@ -95,6 +95,45 @@ def test_validator_requires_save_as_for_extract_items():
         assert "save_as" in str(exc)
 
 
+def test_validator_accepts_structured_extract_items_rules():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract top languages",
+            "start_url": "https://www.wikipedia.org",
+            "allowed_domains": ["wikipedia.org"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "timeout_sec": 30},
+            "expected_result": {"description": "Top language blocks", "required_fields": ["top_languages"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.wikipedia.org/"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_items",
+                    "args": {
+                        "container_selector": ".central-featured-lang",
+                        "limit": 10,
+                        "fields": {
+                            "language_name": ".link-box strong",
+                            "article_count": {
+                                "selector": ".link-box small",
+                                "pattern": r"([0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*)",
+                                "group_index": 1,
+                                "normalize_number": True,
+                                "number_type": "int",
+                                "strip_plus": True,
+                            },
+                        },
+                    },
+                    "save_as": "top_languages",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    validator = PlanValidator()
+    validator.validate(plan)
+
+
 def test_validator_accepts_parent_domain_for_subdomain_start_url():
     plan = TaskSpec.model_validate(
         {
