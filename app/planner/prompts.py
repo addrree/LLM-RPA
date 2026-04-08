@@ -20,7 +20,7 @@ PLANNER_SYSTEM_PROMPT = """
   "steps": [
     {
       "step_id": 1,
-      "action": "open_url|click|type|wait_for|extract_text|extract_html|extract_items|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
+      "action": "open_url|click|type|wait_for|extract_text|extract_html|extract_items|extract_structured_items|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
       "args": {},
       "save_as": "optional_string"
     }
@@ -32,6 +32,7 @@ PLANNER_SYSTEM_PROMPT = """
 2. step_id строго подряд: 1,2,3,...
 3. Для extract_* шагов с save_as в required_fields должны быть соответствующие поля.
 4. Для extract_items всегда указывай args.container_selector, args.limit, args.fields и save_as.
+4.0) Если надежный container_selector определить нельзя по snapshot, используй extract_structured_items (pattern + limit + fields) и сохраняй результат в одно top-level поле через save_as.
 4.1) Для повторяющихся карточек/блоков заполняй args.fields как объект полей (например language_name, article_count), а не как плоский список.
 4.2) Для числовых полей внутри extract_items можно использовать расширенное правило поля:
     {"selector":"...", "pattern":"...", "group_index":1, "normalize_number":true, "number_type":"int", "strip_plus":true}
@@ -88,10 +89,12 @@ REPLANNER_SYSTEM_PROMPT = """
    - language_name: селектор названия языка внутри блока
    - article_count: селектор/паттерн и normalize_number=true
    Результат должен быть массивом объектов, а не массивом строк.
+4.1.1) Если CSS-контейнер неочевиден или нестабилен, вместо extract_items используй extract_structured_items с regex pattern, limit и fields.
 4.2) Для list/block/card/top-N задач не делай ставку на extract_pattern_from_page_text как основную долгосрочную стратегию:
    - сначала пробуй extract_items (DOM/block-aware),
    - extract_pattern_from_page_text используй только как тактический fallback.
 5) required_fields должны быть только бизнес-поля, НЕ технические артефакты (например screenshot_path).
+5.1) Для structured outputs required_fields должны ссылаться на top-level save_as (например ["language_blocks"]), а не на вложенные поля объектов (language_name/article_count).
 6) Последний шаг всегда finish, step_id подряд.
 7) Для action=open_url обязательно передавай args.url (не пустой).
 8) Для action=extract_value_near_anchor обязательно передавай:

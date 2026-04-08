@@ -104,6 +104,49 @@ def test_normalize_final_plan_fills_required_shape_from_context():
     assert [step.step_id for step in plan.steps] == [1, 2, 3]
 
 
+def test_normalize_final_plan_maps_structured_nested_required_fields_to_save_as():
+    snapshot = PageSnapshot(
+        url="https://www.wikipedia.org/",
+        title="Wikipedia",
+        screenshot_path="artifacts/screenshots/a.png",
+        page_text_excerpt="Wikipedia",
+        timestamp=datetime.now(timezone.utc),
+    )
+
+    normalized = Replanner.normalize_final_plan(
+        raw_plan={
+            "goal": "Top languages",
+            "start_url": "https://www.wikipedia.org/",
+            "allowed_domains": ["wikipedia.org"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "timeout_sec": 30},
+            "expected_result": {"description": "Top language blocks", "required_fields": ["language_name", "article_count"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.wikipedia.org/"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_structured_items",
+                    "args": {
+                        "pattern": r"([A-Za-zА-Яа-яЁё]+)\\s+([0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*)",
+                        "limit": 10,
+                        "fields": {
+                            "language_name": {"group_index": 1},
+                            "article_count": {"group_index": 2, "normalize_number": True, "number_type": "int"},
+                        },
+                    },
+                    "save_as": "language_blocks",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        },
+        user_goal="Extract top 10 languages",
+        previous_plan=None,
+        page_snapshot=snapshot,
+    )
+    plan = TaskSpec.model_validate(normalized)
+
+    assert plan.expected_result.required_fields == ["language_blocks"]
+
+
 class _FakePlanner:
     def build_initial_plan(self, user_goal: str) -> TaskSpec:
         return TaskSpec.model_validate(

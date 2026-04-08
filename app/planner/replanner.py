@@ -132,6 +132,10 @@ class Replanner:
             expected_result["required_fields"] = (
                 list(previous_plan.expected_result.required_fields) if previous_plan else []
             )
+        expected_result["required_fields"] = Replanner._normalize_required_fields_against_steps(
+            required_fields=expected_result.get("required_fields", []),
+            steps=normalized_steps,
+        )
 
         constraints = plan.get("constraints")
         if not isinstance(constraints, dict):
@@ -170,3 +174,38 @@ class Replanner:
             "expected_result": expected_result,
             "steps": normalized_steps,
         }
+
+    @staticmethod
+    def _normalize_required_fields_against_steps(required_fields: list, steps: list[dict]) -> list[str]:
+        top_level_fields = {
+            step.get("save_as")
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
+        }
+        structured_field_to_parent: dict[str, str] = {}
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            if step.get("action") not in {"extract_items", "extract_structured_items"}:
+                continue
+            save_as = step.get("save_as")
+            if not isinstance(save_as, str) or not save_as.strip():
+                continue
+            fields = step.get("args", {}).get("fields")
+            if not isinstance(fields, dict):
+                continue
+            for field_name in fields.keys():
+                structured_field_to_parent[str(field_name)] = save_as
+
+        normalized_required_fields: list[str] = []
+        for field in required_fields:
+            name = str(field).strip()
+            if not name:
+                continue
+            mapped = structured_field_to_parent.get(name, name)
+            if mapped in top_level_fields and mapped not in normalized_required_fields:
+                normalized_required_fields.append(mapped)
+                continue
+            if mapped == name and mapped not in normalized_required_fields:
+                normalized_required_fields.append(mapped)
+        return normalized_required_fields

@@ -12,6 +12,7 @@ ALLOWED_ACTIONS = {
     "extract_text",
     "extract_html",
     "extract_items",
+    "extract_structured_items",
     "screenshot",
     "observe_page",
     "extract_pattern_from_page_text",
@@ -63,6 +64,8 @@ class PlanValidator:
                 raise PlanValidationError(f"{step.action} requires 'selector'")
             if step.action == "extract_items":
                 self._validate_extract_items(step.args, step.save_as)
+            if step.action == "extract_structured_items":
+                self._validate_extract_structured_items(step.args, step.save_as)
             if step.action == "observe_page" and not step.save_as:
                 raise PlanValidationError("observe_page requires 'save_as'")
             if step.action == "extract_pattern_from_page_text":
@@ -191,6 +194,47 @@ class PlanValidator:
             raise PlanValidationError("extract_pattern_from_page_text requires 'save_as'")
 
     @staticmethod
+    def _validate_extract_structured_items(args: dict, save_as: str | None) -> None:
+        if "pattern" not in args or not str(args.get("pattern", "")).strip():
+            raise PlanValidationError("extract_structured_items requires non-empty 'pattern'")
+        limit = args.get("limit")
+        if not isinstance(limit, int) or limit <= 0:
+            raise PlanValidationError("extract_structured_items requires positive integer 'limit'")
+        fields = args.get("fields")
+        if not isinstance(fields, dict) or not fields:
+            raise PlanValidationError("extract_structured_items requires non-empty 'fields' dict")
+        for field_name, spec in fields.items():
+            if isinstance(spec, int):
+                if spec <= 0:
+                    raise PlanValidationError(
+                        f"extract_structured_items field '{field_name}' requires positive group index"
+                    )
+                continue
+            if not isinstance(spec, dict):
+                raise PlanValidationError(
+                    f"extract_structured_items field '{field_name}' must be int group index or object rule"
+                )
+            group_index = spec.get("group_index", 1)
+            if not isinstance(group_index, int) or group_index <= 0:
+                raise PlanValidationError(
+                    f"extract_structured_items field '{field_name}' requires positive integer 'group_index'"
+                )
+            if "normalize_number" in spec and not isinstance(spec["normalize_number"], bool):
+                raise PlanValidationError(
+                    f"extract_structured_items field '{field_name}' requires boolean 'normalize_number'"
+                )
+            if "number_type" in spec and spec["number_type"] not in {"int", "float"}:
+                raise PlanValidationError(
+                    f"extract_structured_items field '{field_name}' supports number_type in {{'int','float'}}"
+                )
+            if "strip_plus" in spec and not isinstance(spec["strip_plus"], bool):
+                raise PlanValidationError(
+                    f"extract_structured_items field '{field_name}' requires boolean 'strip_plus'"
+                )
+        if not save_as:
+            raise PlanValidationError("extract_structured_items requires 'save_as'")
+
+    @staticmethod
     def _validate_extract_text_near_text(args: dict, save_as: str | None) -> None:
         if "anchor_text" not in args or not str(args.get("anchor_text", "")).strip():
             raise PlanValidationError("extract_text_near_text requires non-empty 'anchor_text'")
@@ -274,10 +318,27 @@ class PlanValidator:
 
     def _validate_expected_result_consistency(self, plan: TaskSpec) -> None:
         saved_fields = {step.save_as for step in plan.steps if step.save_as}
+        structured_nested_fields = self._collect_structured_nested_fields(plan)
         for field in plan.expected_result.required_fields:
             if field in TECHNICAL_ARTIFACT_FIELDS:
+                continue
+            if field in structured_nested_fields:
                 continue
             if field not in saved_fields:
                 raise PlanValidationError(
                     f"Required field '{field}' is not produced by any step."
                 )
+
+    @staticmethod
+    def _collect_structured_nested_fields(plan: TaskSpec) -> set[str]:
+        nested_fields: set[str] = set()
+        for step in plan.steps:
+            if step.action == "extract_items":
+                fields = step.args.get("fields")
+                if isinstance(fields, dict):
+                    nested_fields.update(str(name) for name in fields.keys())
+            if step.action == "extract_structured_items":
+                fields = step.args.get("fields")
+                if isinstance(fields, dict):
+                    nested_fields.update(str(name) for name in fields.keys())
+        return nested_fields
