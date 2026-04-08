@@ -113,7 +113,9 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 
 Правила:
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
-2) Если требовался список, возвращай массив объектов через extract_items или repeated extraction (limit + fields).
+2) Если требовался список, возвращай массив объектов:
+   - используй extract_items ТОЛЬКО когда можешь надежно задать args.container_selector + args.fields + args.limit + save_as,
+   - если container_selector неочевиден/нестабилен, используй extract_structured_items (pattern + fields + limit + save_as).
 3) Не возвращай одиночную строку, когда ожидается list[dict].
 4) Для open_url всегда задавай args.url.
 5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения.

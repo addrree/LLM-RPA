@@ -1,9 +1,11 @@
 import asyncio
+import json
 
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.schemas.execution import ExecutionResult
 from app.schemas.task_spec import TaskSpec
 from app.utils.llm_client import LLMClient, LLMClientError
+from app.validator.plan_validator import PlanValidationError
 
 
 class _StubPlanner:
@@ -31,6 +33,14 @@ class _StubValidator:
     def validate(self, plan: TaskSpec) -> None:
         assert plan.steps[0].action == "open_url"
         assert plan.steps[0].args.get("url")
+
+
+class _StrictValidator(_StubValidator):
+    def validate(self, plan: TaskSpec) -> None:
+        super().validate(plan)
+        for step in plan.steps:
+            if step.action == "extract_items" and not step.args.get("container_selector"):
+                raise PlanValidationError("extract_items missing required args: container_selector")
 
 
 class _StubExecutor:
@@ -86,6 +96,29 @@ class _StubReplanner:
         )
 
 
+class _InvalidCorrectiveReplanner:
+    def __init__(self):
+        self.last_artifact = None
+
+    def build_corrective_plan(self, **kwargs):
+        previous = kwargs["previous_plan"]
+        return TaskSpec.model_validate(
+            {
+                **previous.model_dump(mode="json"),
+                "steps": [
+                    {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                    {
+                        "step_id": 2,
+                        "action": "extract_items",
+                        "args": {"limit": 10, "fields": {"name": ".name"}},
+                        "save_as": "items",
+                    },
+                    {"step_id": 3, "action": "finish", "args": {}},
+                ],
+            }
+        )
+
+
 def test_llm_json_parser_reports_stage_and_position():
     try:
         LLMClient._safe_parse_json("```json\n{\n  \"a\": 1,,\n}\n```", stage="replanner")
@@ -127,3 +160,57 @@ def test_ensure_open_url_for_final_plan_fills_missing_args_url_from_start_url():
     )
     fixed = WorkflowManager._ensure_open_url_for_final_plan(plan)
     assert fixed.steps[0].args["url"] == "https://example.com/"
+
+
+def test_identify_offending_step_for_extract_items_without_container_selector():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "g",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 20},
+            "expected_result": {"description": "d", "required_fields": []},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_items",
+                    "args": {"limit": 5, "fields": {"title": ".title"}},
+                    "save_as": "rows",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    offending = WorkflowManager._identify_offending_step(
+        corrective_plan=plan,
+        validation_error="extract_items missing required args: container_selector",
+    )
+    assert offending is not None
+    assert offending["step_id"] == 2
+    assert offending["action"] == "extract_items"
+
+
+def test_workflow_stops_retry_and_persists_artifacts_when_corrective_plan_is_invalid(tmp_path, monkeypatch):
+    monkeypatch.setattr("app.orchestrator.workflow_manager.RAW_LLM_DIR", tmp_path)
+    manager = WorkflowManager(
+        planner=_StubPlanner(),
+        validator=_StrictValidator(),
+        executor=_StubExecutor(),
+        verifier=_StubVerifier(),
+        replanner=_InvalidCorrectiveReplanner(),
+        two_stage_planning=False,
+    )
+
+    result = asyncio.run(manager.run("Extract list"))
+    assert result["verdict"].verdict == "reject"
+    assert result["execution_result"].extracted_data["value"] == "bad"
+
+    candidate_files = sorted(tmp_path.glob("corrective_plan_candidate_attempt1_*.json"))
+    failure_files = sorted(tmp_path.glob("corrective_plan_validation_failed_attempt1_*.json"))
+    assert candidate_files
+    assert failure_files
+
+    failure_payload = json.loads(failure_files[-1].read_text(encoding="utf-8"))
+    assert failure_payload["validation_error"] == "extract_items missing required args: container_selector"
+    assert failure_payload["offending_step"]["action"] == "extract_items"
