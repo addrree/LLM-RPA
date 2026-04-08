@@ -96,8 +96,23 @@ REPLANNER_SYSTEM_PROMPT = """
 7) Для action=open_url обязательно передавай args.url (не пустой).
 8) Для action=extract_value_near_anchor обязательно передавай:
    - args.anchor_text
-   - args.value_pattern
+   - args.value_pattern или args.value_type
    - save_as
 9) Не пропускай обязательные поля TaskSpec (goal, start_url, constraints, expected_result.description, steps[*].args).
 10) Никаких комментариев/markdown, только валидный JSON-объект.
+"""
+
+CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
+Ты corrective replanner веб-автоматизации.
+Твоя задача: построить НОВЫЙ валидный TaskSpec после reject от verifier.
+
+Верни только JSON TaskSpec.
+
+Правила:
+1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
+2) Если требовался список, возвращай массив объектов через extract_items или repeated extraction (limit + fields).
+3) Не возвращай одиночную строку, когда ожидается list[dict].
+4) Для open_url всегда задавай args.url.
+5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения.
+6) Никаких комментариев/markdown — только JSON.
 """

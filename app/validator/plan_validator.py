@@ -1,6 +1,6 @@
 from urllib.parse import urlparse
 
-from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_TIMEOUT_SEC
+from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_MAX_VERIFICATION_RETRIES, GLOBAL_TIMEOUT_SEC
 from app.schemas.task_spec import TaskSpec
 
 
@@ -206,8 +206,10 @@ class PlanValidator:
     def _validate_extract_value_near_anchor(args: dict, save_as: str | None) -> None:
         if "anchor_text" not in args or not str(args.get("anchor_text", "")).strip():
             raise PlanValidationError("extract_value_near_anchor requires non-empty 'anchor_text'")
-        if "value_pattern" not in args or not str(args.get("value_pattern", "")).strip():
-            raise PlanValidationError("extract_value_near_anchor requires non-empty 'value_pattern'")
+        has_pattern = bool(str(args.get("value_pattern", "")).strip())
+        has_type = bool(str(args.get("value_type", "")).strip())
+        if not has_pattern and not has_type:
+            raise PlanValidationError("extract_value_near_anchor requires non-empty 'value_pattern' or 'value_type'")
         direction = args.get("search_direction", "after")
         if direction not in {"after", "before", "around"}:
             raise PlanValidationError(
@@ -251,6 +253,8 @@ class PlanValidator:
             raise PlanValidationError("max_steps exceeds global limit.")
         if plan.constraints.max_replans > GLOBAL_MAX_REPLANS:
             raise PlanValidationError("max_replans exceeds global limit.")
+        if plan.constraints.max_verification_retries > GLOBAL_MAX_VERIFICATION_RETRIES:
+            raise PlanValidationError("max_verification_retries exceeds global limit.")
         if plan.constraints.timeout_sec > GLOBAL_TIMEOUT_SEC:
             raise PlanValidationError("timeout_sec exceeds global limit.")
 

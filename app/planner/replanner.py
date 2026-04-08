@@ -1,7 +1,8 @@
 import json
+import logging
 from urllib.parse import urlparse
 
-from app.planner.prompts import REPLANNER_SYSTEM_PROMPT
+from app.planner.prompts import CORRECTIVE_REPLANNER_SYSTEM_PROMPT, REPLANNER_SYSTEM_PROMPT
 from app.schemas.execution import LLMArtifact
 from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.task_spec import TaskSpec
@@ -35,6 +36,37 @@ class Replanner:
         artifact = self.llm_client.generate_planner_artifact(
             system_prompt=REPLANNER_SYSTEM_PROMPT,
             user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
+            stage="replanner",
+        )
+        self.last_artifact = artifact
+        normalized = self.normalize_final_plan(
+            raw_plan=artifact.parsed_response,
+            user_goal=user_goal,
+            previous_plan=previous_plan,
+            page_snapshot=page_snapshot,
+        )
+        return TaskSpec.model_validate(normalized)
+
+    def build_corrective_plan(
+        self,
+        *,
+        user_goal: str,
+        page_snapshot: PageSnapshot,
+        previous_plan: TaskSpec,
+        execution_result: dict,
+        verifier_verdict: dict,
+    ) -> TaskSpec:
+        payload = {
+            "user_goal": user_goal,
+            "page_snapshot": page_snapshot.model_dump(mode="json"),
+            "previous_plan": previous_plan.model_dump(mode="json"),
+            "execution_result": execution_result,
+            "verifier_verdict": verifier_verdict,
+        }
+        artifact = self.llm_client.generate_planner_artifact(
+            system_prompt=CORRECTIVE_REPLANNER_SYSTEM_PROMPT,
+            user_prompt=json.dumps(payload, ensure_ascii=False, indent=2),
+            stage="corrective_replanner",
         )
         self.last_artifact = artifact
         normalized = self.normalize_final_plan(
@@ -65,6 +97,7 @@ class Replanner:
             steps = []
 
         normalized_steps: list[dict] = []
+        logger = logging.getLogger(__name__)
         for idx, step in enumerate(steps, start=1):
             if not isinstance(step, dict):
                 continue
@@ -73,6 +106,7 @@ class Replanner:
             current["args"] = dict(args) if isinstance(args, dict) else {}
 
             if current.get("action") == "open_url" and not str(current["args"].get("url", "")).strip():
+                logger.warning("Malformed open_url from model: missing args.url. Applying start_url normalization.")
                 current["args"]["url"] = context_start_url
 
             current["step_id"] = idx
@@ -106,12 +140,17 @@ class Replanner:
             constraints = {
                 "max_steps": constraints.get("max_steps", previous_plan.constraints.max_steps),
                 "max_replans": constraints.get("max_replans", previous_plan.constraints.max_replans),
+                "max_verification_retries": constraints.get(
+                    "max_verification_retries",
+                    previous_plan.constraints.max_verification_retries,
+                ),
                 "timeout_sec": constraints.get("timeout_sec", previous_plan.constraints.timeout_sec),
             }
         else:
             constraints = {
                 "max_steps": constraints.get("max_steps", 10),
                 "max_replans": constraints.get("max_replans", 1),
+                "max_verification_retries": constraints.get("max_verification_retries", 1),
                 "timeout_sec": constraints.get("timeout_sec", 30),
             }
 

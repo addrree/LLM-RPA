@@ -66,6 +66,7 @@ class LLMVerifier:
             system_prompt=VERIFIER_SYSTEM_PROMPT,
             user_prompt=user_prompt,
             image_path=result.screenshot_path,
+            stage="verifier",
         )
         self.last_artifact = artifact
         return VerificationVerdict.model_validate(artifact.parsed_response)

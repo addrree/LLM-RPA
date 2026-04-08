@@ -41,7 +41,13 @@ class WorkflowManager:
         if not self.two_stage_planning:
             plan = self.planner.build_plan(user_goal)
             self.validator.validate(plan)
-            execution_result = await self.executor.execute(plan)
+            execution_result, verdict, final_plan, replanner_artifact = await self._execute_verify_with_correction_loop(
+                user_goal=user_goal,
+                initial_plan=plan,
+                session=None,
+                runtime_state=None,
+                page_snapshot=None,
+            )
         else:
             if self.replanner is None:
                 raise ValueError("two_stage_planning requires replanner")
@@ -111,21 +117,22 @@ class WorkflowManager:
                             repaired_raw_response=replanner_artifact.raw_response if replanner_artifact else None,
                         )
                         raise
-                execution_result = await self.executor.execute(
-                    final_plan,
+
+                execution_result, verdict, final_plan, replanner_artifact = await self._execute_verify_with_correction_loop(
+                    user_goal=user_goal,
+                    initial_plan=final_plan,
                     session=session,
                     runtime_state=shared_runtime_state,
+                    page_snapshot=page_snapshot,
                 )
                 plan = final_plan
             finally:
                 await self.executor._close_session(session)
 
-        verdict = self.verifier.verify(plan, execution_result)
-
         return {
-            "plan": plan,
+            "plan": final_plan if self.two_stage_planning else plan,
             "initial_plan": initial_plan,
-            "final_plan": final_plan,
+            "final_plan": final_plan if self.two_stage_planning else None,
             "planning_mode": planning_mode,
             "execution_result": execution_result,
             "verdict": verdict,
@@ -137,11 +144,67 @@ class WorkflowManager:
             "page_snapshot": shared_page_snapshot,
         }
 
+    async def _execute_verify_with_correction_loop(
+        self,
+        *,
+        user_goal: str,
+        initial_plan: TaskSpec,
+        session,
+        runtime_state,
+        page_snapshot: PageSnapshot | None,
+    ):
+        current_plan = initial_plan
+        max_retries = max(0, int(current_plan.constraints.max_verification_retries))
+        attempt = 0
+        replanner_artifact = self.replanner.last_artifact if self.replanner else None
+
+        while True:
+            execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
+            verdict = self.verifier.verify(current_plan, execution_result)
+            if verdict.verdict == "accept":
+                return execution_result, verdict, current_plan, replanner_artifact
+
+            if attempt >= max_retries or self.replanner is None:
+                return execution_result, verdict, current_plan, replanner_artifact
+
+            effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
+            corrective_plan = self.replanner.build_corrective_plan(
+                user_goal=user_goal,
+                page_snapshot=effective_snapshot,
+                previous_plan=current_plan,
+                execution_result=execution_result.model_dump(mode="json"),
+                verifier_verdict=verdict.model_dump(mode="json"),
+            )
+            corrective_plan = self._ensure_open_url_for_final_plan(corrective_plan)
+            self.validator.validate(corrective_plan)
+            current_plan = corrective_plan
+            replanner_artifact = self.replanner.last_artifact
+            attempt += 1
+
+    @staticmethod
+    def _build_page_snapshot_from_execution(execution_result):
+        return PageSnapshot.model_validate(
+            {
+                "url": execution_result.final_url or "about:blank",
+                "title": execution_result.page_title or "",
+                "screenshot_path": execution_result.screenshot_path or "",
+                "page_text_excerpt": execution_result.page_text_excerpt or "",
+                "timestamp": datetime.now(UTC).isoformat(),
+            }
+        )
+
     @staticmethod
     def _ensure_open_url_for_final_plan(plan: TaskSpec) -> TaskSpec:
         if not plan.steps:
             return plan
         if plan.steps[0].action == "open_url":
+            first = plan.steps[0].model_dump(mode="json")
+            if not str(first.get("args", {}).get("url", "")).strip() and str(plan.start_url):
+                first["args"] = {"url": str(plan.start_url)}
+                steps = [first] + [step.model_dump(mode="json") for step in plan.steps[1:]]
+                for idx, step in enumerate(steps, start=1):
+                    step["step_id"] = idx
+                return plan.model_validate({**plan.model_dump(mode="json"), "steps": steps})
             return plan
 
         injected = {

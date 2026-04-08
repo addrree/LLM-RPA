@@ -1,5 +1,12 @@
 [
   {
+    "id": "wiki_h1",
+    "goal": "Open https://www.wikipedia.org and extract the h1 text",
+    "start_url": "https://www.wikipedia.org/",
+    "expected_fields": ["heading"],
+    "recommended_action": "extract_text"
+  },
+  {
     "id": "wiki_english_articles",
     "goal": "Open https://www.wikipedia.org and extract the number of English articles",
     "start_url": "https://www.wikipedia.org/",
