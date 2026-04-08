@@ -79,6 +79,27 @@ class ActionHandlers:
         args["_executor_note"] = f'Extracted {len(items)} item(s) via "{container_selector}" (limit={limit}).'
         return items
 
+    async def extract_structured_items(self, page, args, runtime_state=None):
+        pattern = args["pattern"]
+        limit = int(args["limit"])
+        fields = args["fields"]
+        flags = args.get("flags")
+
+        delegated_args = {
+            "pattern": pattern,
+            "limit": limit,
+            "fields": fields,
+            "occurrence": 1,
+        }
+        if flags is not None:
+            delegated_args["flags"] = flags
+
+        items = await self.extract_pattern_from_page_text(page, delegated_args, runtime_state)
+        args["_executor_note"] = (
+            f"extract_structured_items matched pattern={pattern!r}; returned {len(items)} repeated item(s)"
+        )
+        return items
+
     async def observe_page(self, page, args, runtime_state=None):
         snapshot = await self.page_observer.observe_page(
             page,
