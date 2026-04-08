@@ -275,7 +275,13 @@ class ActionHandlers:
 
     async def extract_value_near_anchor(self, page, args, runtime_state=None):
         anchor_text = str(args["anchor_text"])
-        value_pattern = str(args["value_pattern"])
+        value_pattern = args.get("value_pattern")
+        value_type = str(args.get("value_type", "")).strip().lower()
+        if not value_pattern:
+            value_pattern = self._resolve_value_pattern(value_type)
+        if not value_pattern:
+            raise ValueError("extract_value_near_anchor requires value_pattern or supported value_type")
+        value_pattern = str(value_pattern)
         search_direction = str(args.get("search_direction", "after")).lower()
         same_block_only = bool(args.get("same_block_only", True))
         required_right_context = args.get("required_right_context")
@@ -361,6 +367,14 @@ class ActionHandlers:
             f"source={best_match['source']}; fallback_used={fallback_used}"
         )
         return result
+
+    @staticmethod
+    def _resolve_value_pattern(value_type: str) -> str | None:
+        if value_type in {"article_count", "count", "number"}:
+            return r"([0-9][0-9\s,\.\u00A0\u202F\+]*)"
+        if value_type in {"float", "rating"}:
+            return r"([0-9]+(?:[.,][0-9]+)?)"
+        return None
 
     async def _load_source_text(self, page, runtime_state=None) -> str:
         source_text = ""

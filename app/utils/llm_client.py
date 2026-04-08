@@ -60,14 +60,20 @@ class LLMClient:
     def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         return self.generate_planner_artifact(system_prompt, user_prompt).parsed_response
 
-    def generate_planner_artifact(self, system_prompt: str, user_prompt: str) -> LLMArtifact:
+    def generate_planner_artifact(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        stage: str = "planner",
+    ) -> LLMArtifact:
         raw_text = self._ollama_chat(
             model=self.planner_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_path=None,
         )
-        parsed = self._safe_parse_json(raw_text)
+        parsed = self._safe_parse_json(raw_text, stage=stage)
         return LLMArtifact(
             raw_response=raw_text,
             parsed_response=parsed,
@@ -92,6 +98,8 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         image_path: Optional[str] = None,
+        *,
+        stage: str = "verifier",
     ) -> LLMArtifact:
         raw_text = self._ollama_chat(
             model=self.verifier_model,
@@ -99,7 +107,7 @@ class LLMClient:
             user_prompt=user_prompt,
             image_path=image_path,
         )
-        parsed = self._safe_parse_json(raw_text)
+        parsed = self._safe_parse_json(raw_text, stage=stage)
         return LLMArtifact(
             raw_response=raw_text,
             parsed_response=parsed,
@@ -197,24 +205,18 @@ class LLMClient:
         return base64.b64encode(image_bytes).decode("utf-8")
 
     @staticmethod
-    def _safe_parse_json(raw_text: str) -> Dict[str, Any]:
-        cleaned = raw_text.strip()
-
-        fence_match = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, flags=re.IGNORECASE | re.DOTALL)
-        if fence_match:
-            cleaned = fence_match.group(1).strip()
-
-        if not cleaned.startswith("{"):
-            start = cleaned.find("{")
-            end = cleaned.rfind("}")
-            if start != -1 and end != -1 and end > start:
-                cleaned = cleaned[start : end + 1]
-
+    def _safe_parse_json(raw_text: str, *, stage: str = "unknown_stage") -> Dict[str, Any]:
+        cleaned = LLMClient._sanitize_llm_json_text(raw_text)
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
+            snippet_start = max(0, exc.pos - 60)
+            snippet_end = min(len(cleaned), exc.pos + 60)
+            snippet = cleaned[snippet_start:snippet_end]
             raise LLMClientError(
-                "Failed to parse JSON response from LLM. "
+                f"Failed to parse JSON response from LLM at stage={stage}. "
+                f"line={exc.lineno}, col={exc.colno}, pos={exc.pos}. "
+                f"Context snippet: {snippet!r}. "
                 f"Raw response (first 500 chars): {raw_text[:500]}"
             ) from exc
 
@@ -222,6 +224,43 @@ class LLMClient:
             raise LLMClientError("JSON response must be an object.")
 
         return data
+
+    @staticmethod
+    def _sanitize_llm_json_text(raw_text: str) -> str:
+        cleaned = raw_text.strip()
+        cleaned = re.sub(r"```(?:json)?", "", cleaned, flags=re.IGNORECASE).replace("```", "").strip()
+        candidate = LLMClient._extract_first_json_block(cleaned)
+        return candidate.strip() if candidate else cleaned
+
+    @staticmethod
+    def _extract_first_json_block(text: str) -> str | None:
+        for opener, closer in (("{", "}"), ("[", "]")):
+            start = text.find(opener)
+            if start == -1:
+                continue
+            depth = 0
+            in_string = False
+            escape = False
+            for idx in range(start, len(text)):
+                char = text[idx]
+                if in_string:
+                    if escape:
+                        escape = False
+                    elif char == "\\":
+                        escape = True
+                    elif char == "\"":
+                        in_string = False
+                    continue
+                if char == "\"":
+                    in_string = True
+                    continue
+                if char == opener:
+                    depth += 1
+                elif char == closer:
+                    depth -= 1
+                    if depth == 0:
+                        return text[start: idx + 1]
+        return None
 
 
 class DummyLLMClient(LLMClient):
@@ -399,8 +438,14 @@ class DummyLLMClient(LLMClient):
     ) -> Dict[str, Any]:
         return self.generate_json(system_prompt, user_prompt)
 
-    def generate_planner_artifact(self, system_prompt: str, user_prompt: str) -> LLMArtifact:
-        parsed = self._build_dummy_plan(user_prompt)
+    def generate_planner_artifact(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        stage: str = "planner",
+    ) -> LLMArtifact:
+        parsed = self.generate_json(system_prompt, user_prompt)
         return LLMArtifact(
             raw_response=json.dumps(parsed, ensure_ascii=False),
             parsed_response=parsed,
@@ -417,8 +462,10 @@ class DummyLLMClient(LLMClient):
         system_prompt: str,
         user_prompt: str,
         image_path: Optional[str] = None,
+        *,
+        stage: str = "verifier",
     ) -> LLMArtifact:
-        parsed = self._build_dummy_verdict(user_prompt)
+        parsed = self.generate_json(system_prompt, user_prompt)
         return LLMArtifact(
             raw_response=json.dumps(parsed, ensure_ascii=False),
             parsed_response=parsed,

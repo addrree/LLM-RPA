@@ -7,7 +7,7 @@ def test_extraction_smoke_scenarios_cover_stage_targets():
     scenarios = json.loads(path.read_text(encoding="utf-8"))
 
     by_id = {scenario["id"]: scenario for scenario in scenarios}
-    assert {"wiki_english_articles", "wiki_russian_articles", "wiki_top_10_languages"} <= set(by_id)
+    assert {"wiki_h1", "wiki_english_articles", "wiki_russian_articles", "wiki_top_10_languages"} <= set(by_id)
 
     top = by_id["wiki_top_10_languages"]
     assert top["recommended_action"] == "extract_items"

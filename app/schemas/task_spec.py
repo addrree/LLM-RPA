@@ -25,6 +25,7 @@ ActionType = Literal[
 class Constraints(BaseModel):
     max_steps: int = 10
     max_replans: int = 1
+    max_verification_retries: int = 1
     timeout_sec: int = 30
 
 
