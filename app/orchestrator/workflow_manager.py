@@ -1,4 +1,5 @@
 import json
+import logging
 from datetime import datetime, timezone
 
 from app.config import RAW_LLM_DIR
@@ -11,6 +12,7 @@ from app.validator.plan_validator import PlanValidationError, PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
 UTC = timezone.utc
+logger = logging.getLogger(__name__)
 
 
 class WorkflowManager:
@@ -176,7 +178,38 @@ class WorkflowManager:
                 verifier_verdict=verdict.model_dump(mode="json"),
             )
             corrective_plan = self._ensure_open_url_for_final_plan(corrective_plan)
-            self.validator.validate(corrective_plan)
+            self._persist_corrective_plan_candidate(
+                corrective_plan=corrective_plan,
+                attempt=attempt + 1,
+                execution_result=execution_result.model_dump(mode="json"),
+                verifier_verdict=verdict.model_dump(mode="json"),
+                replanner_raw_response=(
+                    self.replanner.last_artifact.raw_response
+                    if self.replanner and self.replanner.last_artifact is not None
+                    else None
+                ),
+            )
+            try:
+                self.validator.validate(corrective_plan)
+            except PlanValidationError as validation_error:
+                offending_step = self._identify_offending_step(
+                    corrective_plan=corrective_plan,
+                    validation_error=str(validation_error),
+                )
+                logger.error(
+                    "Corrective plan rejected by validator: %s | offending_step=%s",
+                    validation_error,
+                    offending_step,
+                )
+                self._persist_corrective_plan_validation_failure(
+                    corrective_plan=corrective_plan,
+                    attempt=attempt + 1,
+                    validation_error=str(validation_error),
+                    offending_step=offending_step,
+                    execution_result=execution_result.model_dump(mode="json"),
+                    verifier_verdict=verdict.model_dump(mode="json"),
+                )
+                return execution_result, verdict, current_plan, replanner_artifact
             current_plan = corrective_plan
             replanner_artifact = self.replanner.last_artifact
             attempt += 1
@@ -235,5 +268,55 @@ class WorkflowManager:
             "raw_invalid_plan": invalid_plan,
             "validation_error": validation_error,
             "repaired_raw_response": repaired_raw_response,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _identify_offending_step(corrective_plan: TaskSpec, validation_error: str) -> dict | None:
+        if "extract_items missing required args: container_selector" in validation_error:
+            for step in corrective_plan.steps:
+                if step.action == "extract_items" and not str(step.args.get("container_selector", "")).strip():
+                    return {"step_id": step.step_id, "action": step.action, "args": step.args}
+        return None
+
+    @staticmethod
+    def _persist_corrective_plan_candidate(
+        *,
+        corrective_plan: TaskSpec,
+        attempt: int,
+        execution_result: dict,
+        verifier_verdict: dict,
+        replanner_raw_response: str | None,
+    ) -> None:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        path = RAW_LLM_DIR / f"corrective_plan_candidate_attempt{attempt}_{timestamp}.json"
+        payload = {
+            "attempt": attempt,
+            "corrective_plan": corrective_plan.model_dump(mode="json"),
+            "execution_result": execution_result,
+            "verifier_verdict": verifier_verdict,
+            "replanner_raw_response": replanner_raw_response,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _persist_corrective_plan_validation_failure(
+        *,
+        corrective_plan: TaskSpec,
+        attempt: int,
+        validation_error: str,
+        offending_step: dict | None,
+        execution_result: dict,
+        verifier_verdict: dict,
+    ) -> None:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        path = RAW_LLM_DIR / f"corrective_plan_validation_failed_attempt{attempt}_{timestamp}.json"
+        payload = {
+            "attempt": attempt,
+            "validation_error": validation_error,
+            "offending_step": offending_step,
+            "corrective_plan": corrective_plan.model_dump(mode="json"),
+            "execution_result": execution_result,
+            "verifier_verdict": verifier_verdict,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
