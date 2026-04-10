@@ -1,0 +1,78 @@
+{
+  "suite_id": "core_generalized_task_suite_v1",
+  "description": "Compact reproducible benchmark for generalized web automation task types across heterogeneous websites.",
+  "scenarios": [
+    {
+      "scenario_id": "single_value_title_or_header",
+      "goal": "Open a public informational website homepage and extract one primary page value (title or main heading) as a single scalar field.",
+      "category": "single_value_extraction",
+      "description": "Checks if planner+executor can extract a single obvious value without overfitting to one domain.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": ["value"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Use a stable public site; avoid login-walled pages."
+    },
+    {
+      "scenario_id": "anchored_support_email_or_phone",
+      "goal": "Open a public site and extract the value that appears near a textual anchor such as 'Support', 'Contact', 'Email', or 'Phone'.",
+      "category": "anchored_value_extraction",
+      "description": "Checks anchored extraction instead of global search.",
+      "expected_output_type": "object",
+      "required_top_level_fields": ["anchor", "value"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Anchor/value may appear in footer or contact section."
+    },
+    {
+      "scenario_id": "repeated_listing_cards",
+      "goal": "On a public listing-style page, extract a repeated structured list of at least 3 items with multiple fields per item.",
+      "category": "repeated_structured_items",
+      "description": "Checks extraction of list[object] rather than one-off scalar.",
+      "expected_output_type": "list",
+      "required_top_level_fields": ["items"],
+      "expected_min_items": 3,
+      "expected_item_fields": ["name", "detail"],
+      "should_succeed": true,
+      "notes": "Suitable targets include docs indexes, directories, catalogs, or public datasets."
+    },
+    {
+      "scenario_id": "navigate_then_extract_policy_or_pricing",
+      "goal": "Open a public homepage, navigate via one click to another page (for example Pricing, About, Docs, or Policy), then extract a key value from the new page.",
+      "category": "navigation_then_extraction",
+      "description": "Checks cross-page execution and final-page extraction.",
+      "expected_output_type": "object",
+      "required_top_level_fields": ["source_page", "target_page", "value"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Final URL should differ from initial URL in normal successful runs."
+    },
+    {
+      "scenario_id": "multi_step_compare_two_sections",
+      "goal": "On a public site, retrieve information from two different sections or pages and produce one merged structured output.",
+      "category": "multi_step_information_retrieval",
+      "description": "Checks planner ability to combine multi-hop retrieval into one result schema.",
+      "expected_output_type": "object",
+      "required_top_level_fields": ["source_a", "source_b", "combined_result"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Use deterministic sections when possible."
+    },
+    {
+      "scenario_id": "missing_or_ambiguous_field",
+      "goal": "Attempt to extract a specific field that is likely absent or ambiguous on a public page, and return explicit uncertainty or not-found outcome.",
+      "category": "negative_or_ambiguous_case",
+      "description": "Checks graceful handling of absent/ambiguous targets and verifier behavior.",
+      "expected_output_type": "none",
+      "required_top_level_fields": ["status", "reason"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": false,
+      "notes": "Expected behavior may be verifier reject with a clear explanation."
+    }
+  ]
+}
