@@ -9,6 +9,7 @@ LOGS_DIR = ARTIFACTS_DIR / "logs"
 EXPORTS_DIR = ARTIFACTS_DIR / "exports"
 RAW_LLM_DIR = ARTIFACTS_DIR / "raw_llm"
 VIDEOS_DIR = ARTIFACTS_DIR / "videos"
+BENCHMARKS_DIR = ARTIFACTS_DIR / "benchmarks"
 
 SCREENSHOTS_DIR.mkdir(parents=True, exist_ok=True)
 RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -16,6 +17,7 @@ LOGS_DIR.mkdir(parents=True, exist_ok=True)
 EXPORTS_DIR.mkdir(parents=True, exist_ok=True)
 RAW_LLM_DIR.mkdir(parents=True, exist_ok=True)
 VIDEOS_DIR.mkdir(parents=True, exist_ok=True)
+BENCHMARKS_DIR.mkdir(parents=True, exist_ok=True)
 
 GLOBAL_MAX_STEPS = 20
 GLOBAL_MAX_REPLANS = 2

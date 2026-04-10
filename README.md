@@ -121,6 +121,52 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 Скриншот (`artifacts/screenshots/...`) появляется только если шаг `screenshot` реально выполнен.
 Если выполнение упало раньше (например, `open_url` с DNS/сеть ошибкой), скриншота не будет.
 
+
+## Benchmark / evaluation layer
+
+Добавлен компактный воспроизводимый benchmark-suite с обобщёнными типами задач:
+
+- `single_value_extraction`
+- `anchored_value_extraction`
+- `repeated_structured_items`
+- `navigation_then_extraction`
+- `multi_step_information_retrieval`
+- `negative_or_ambiguous_case`
+
+Сценарии лежат в `benchmarks/scenarios/core_task_suite.json` и не привязаны к одному домену.
+
+Запустить все сценарии:
+
+```bash
+python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/core_task_suite.json --backend ollama
+```
+
+Запустить один сценарий:
+
+```bash
+python -m app.main --benchmark-scenario repeated_listing_cards --backend ollama
+```
+
+Запустить категорию:
+
+```bash
+python -m app.main --benchmark-category navigation_then_extraction --backend ollama
+```
+
+После запуска формируются агрегированные отчёты:
+
+- `artifacts/benchmarks/benchmark_summary_<suite_id>_<timestamp>.json`
+- `artifacts/benchmarks/benchmark_summary_<suite_id>_<timestamp>.csv`
+
+В summary считаются метрики:
+
+- total scenarios
+- execution success rate
+- verifier accept rate
+- correction retry usage rate
+- export success rate
+- mean runtime
+
 ## Smoke test
 
 ```bash

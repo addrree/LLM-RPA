@@ -39,11 +39,13 @@ class WorkflowManager:
         replanner_artifact = None
         initial_execution_result = None
         shared_page_snapshot = None
+        corrective_retry_used = False
+        corrective_retry_count = 0
 
         if not self.two_stage_planning:
             plan = self.planner.build_plan(user_goal)
             self.validator.validate(plan)
-            execution_result, verdict, final_plan, replanner_artifact = await self._execute_verify_with_correction_loop(
+            execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count = await self._execute_verify_with_correction_loop(
                 user_goal=user_goal,
                 initial_plan=plan,
                 session=None,
@@ -80,6 +82,8 @@ class WorkflowManager:
                         "verifier_artifact": self.verifier.last_artifact,
                         "initial_execution_result": initial_execution_result,
                         "page_snapshot": shared_page_snapshot,
+                        "corrective_retry_used": False,
+                        "corrective_retry_count": 0,
                     }
 
                 snapshot_payload = initial_execution.extracted_data.get("page_snapshot")
@@ -120,7 +124,7 @@ class WorkflowManager:
                         )
                         raise
 
-                execution_result, verdict, final_plan, replanner_artifact = await self._execute_verify_with_correction_loop(
+                execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count = await self._execute_verify_with_correction_loop(
                     user_goal=user_goal,
                     initial_plan=final_plan,
                     session=session,
@@ -144,6 +148,8 @@ class WorkflowManager:
             "verifier_artifact": self.verifier.last_artifact,
             "initial_execution_result": initial_execution_result,
             "page_snapshot": shared_page_snapshot,
+            "corrective_retry_used": corrective_retry_used,
+            "corrective_retry_count": corrective_retry_count,
         }
 
     async def _execute_verify_with_correction_loop(
@@ -164,10 +170,10 @@ class WorkflowManager:
             execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
             verdict = self.verifier.verify(current_plan, execution_result)
             if verdict.verdict == "accept":
-                return execution_result, verdict, current_plan, replanner_artifact
+                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
 
             if attempt >= max_retries or self.replanner is None:
-                return execution_result, verdict, current_plan, replanner_artifact
+                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
 
             effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
             corrective_plan = self.replanner.build_corrective_plan(
@@ -209,7 +215,7 @@ class WorkflowManager:
                     execution_result=execution_result.model_dump(mode="json"),
                     verifier_verdict=verdict.model_dump(mode="json"),
                 )
-                return execution_result, verdict, current_plan, replanner_artifact
+                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
             current_plan = corrective_plan
             replanner_artifact = self.replanner.last_artifact
             attempt += 1
