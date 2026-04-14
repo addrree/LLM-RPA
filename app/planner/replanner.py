@@ -2,6 +2,7 @@ import json
 import logging
 from urllib.parse import urlparse
 
+from app.planner.action_vocab import normalize_plan_action_aliases
 from app.planner.prompts import CORRECTIVE_REPLANNER_SYSTEM_PROMPT, REPLANNER_SYSTEM_PROMPT
 from app.schemas.execution import LLMArtifact
 from app.schemas.page_snapshot import PageSnapshot
@@ -13,6 +14,7 @@ class Replanner:
     def __init__(self, llm_client: LLMClient):
         self.llm_client = llm_client
         self.last_artifact: LLMArtifact | None = None
+        self.last_action_oov_detected = False
 
     def revise_plan(
         self,
@@ -39,8 +41,10 @@ class Replanner:
             stage="replanner",
         )
         self.last_artifact = artifact
+        canonicalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)
+        self.last_action_oov_detected = action_oov_detected
         normalized = self.normalize_final_plan(
-            raw_plan=artifact.parsed_response,
+            raw_plan=canonicalized,
             user_goal=user_goal,
             previous_plan=previous_plan,
             page_snapshot=page_snapshot,
@@ -69,8 +73,10 @@ class Replanner:
             stage="corrective_replanner",
         )
         self.last_artifact = artifact
+        canonicalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)
+        self.last_action_oov_detected = action_oov_detected
         normalized = self.normalize_final_plan(
-            raw_plan=artifact.parsed_response,
+            raw_plan=canonicalized,
             user_goal=user_goal,
             previous_plan=previous_plan,
             page_snapshot=page_snapshot,

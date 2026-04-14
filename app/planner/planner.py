@@ -2,6 +2,7 @@ import json
 import re
 from urllib.parse import urlparse
 
+from app.planner.action_vocab import normalize_plan_action_aliases
 from app.planner.prompts import INITIAL_PLANNER_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
 from app.schemas.execution import LLMArtifact
 from app.schemas.task_spec import TaskSpec
@@ -13,6 +14,7 @@ class Planner:
         self.llm_client = llm_client
         self.last_artifact: LLMArtifact | None = None
         self.last_initial_artifact: LLMArtifact | None = None
+        self.last_action_oov_detected = False
 
     def build_plan(self, user_goal: str) -> TaskSpec:
         artifact = self.llm_client.generate_planner_artifact(
@@ -21,7 +23,9 @@ class Planner:
             stage="planner",
         )
         self.last_artifact = artifact
-        return TaskSpec.model_validate(artifact.parsed_response)
+        normalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)
+        self.last_action_oov_detected = action_oov_detected
+        return TaskSpec.model_validate(normalized)
 
     def build_initial_plan(self, user_goal: str) -> TaskSpec:
         artifact = self.llm_client.generate_planner_artifact(
@@ -42,6 +46,8 @@ class Planner:
             )
             parsed = fallback
         normalized = self._normalize_initial_plan(parsed, user_goal)
+        normalized, action_oov_detected = normalize_plan_action_aliases(normalized)
+        self.last_action_oov_detected = action_oov_detected
         return TaskSpec.model_validate(normalized)
 
     @staticmethod

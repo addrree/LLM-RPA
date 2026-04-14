@@ -1,25 +1,11 @@
 from urllib.parse import urlparse
 
 from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_MAX_VERIFICATION_RETRIES, GLOBAL_TIMEOUT_SEC
+from app.planner.action_vocab import CANONICAL_ACTIONS
 from app.schemas.task_spec import TaskSpec
 
 
-ALLOWED_ACTIONS = {
-    "open_url",
-    "click",
-    "type",
-    "wait_for",
-    "extract_text",
-    "extract_html",
-    "extract_items",
-    "extract_structured_items",
-    "screenshot",
-    "observe_page",
-    "extract_pattern_from_page_text",
-    "extract_text_near_text",
-    "extract_value_near_anchor",
-    "finish",
-}
+ALLOWED_ACTIONS = CANONICAL_ACTIONS
 
 TECHNICAL_ARTIFACT_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
 

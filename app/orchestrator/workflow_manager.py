@@ -15,6 +15,12 @@ UTC = timezone.utc
 logger = logging.getLogger(__name__)
 
 
+class WorkflowStageError(Exception):
+    def __init__(self, stage: str, message: str):
+        super().__init__(message)
+        self.stage = stage
+
+
 class WorkflowManager:
     def __init__(
         self,
@@ -41,10 +47,24 @@ class WorkflowManager:
         shared_page_snapshot = None
         corrective_retry_used = False
         corrective_retry_count = 0
+        initial_plan_valid: bool | None = None
+        final_plan_valid: bool | None = None
+        action_oov_detected = False
 
         if not self.two_stage_planning:
-            plan = self.planner.build_plan(user_goal)
-            self.validator.validate(plan)
+            try:
+                plan = self.planner.build_plan(user_goal)
+            except Exception as exc:  # noqa: BLE001
+                raise WorkflowStageError("planning", str(exc)) from exc
+            action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
+            try:
+                self.validator.validate(plan)
+                initial_plan_valid = True
+                final_plan_valid = True
+            except PlanValidationError as exc:
+                initial_plan_valid = False
+                final_plan_valid = False
+                raise WorkflowStageError("validation", str(exc)) from exc
             execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count = await self._execute_verify_with_correction_loop(
                 user_goal=user_goal,
                 initial_plan=plan,
@@ -56,8 +76,17 @@ class WorkflowManager:
             if self.replanner is None:
                 raise ValueError("two_stage_planning requires replanner")
 
-            initial_plan = self.planner.build_initial_plan(user_goal)
-            self.validator.validate(initial_plan)
+            try:
+                initial_plan = self.planner.build_initial_plan(user_goal)
+            except Exception as exc:  # noqa: BLE001
+                raise WorkflowStageError("planning", str(exc)) from exc
+            action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
+            try:
+                self.validator.validate(initial_plan)
+                initial_plan_valid = True
+            except PlanValidationError as exc:
+                initial_plan_valid = False
+                raise WorkflowStageError("validation", str(exc)) from exc
             session = await self.executor._start_session()
             shared_runtime_state = {}
             try:
@@ -99,11 +128,16 @@ class WorkflowManager:
                     page_snapshot=page_snapshot,
                     previous_plan=initial_plan,
                 )
+                action_oov_detected = action_oov_detected or bool(
+                    getattr(self.replanner, "last_action_oov_detected", False)
+                )
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._ensure_open_url_for_final_plan(final_plan)
                 try:
                     self.validator.validate(final_plan)
+                    final_plan_valid = True
                 except PlanValidationError as first_error:
+                    final_plan_valid = False
                     invalid_plan_dump = final_plan.model_dump(mode="json")
                     repaired_plan = self.replanner.revise_plan(
                         user_goal=user_goal,
@@ -112,17 +146,21 @@ class WorkflowManager:
                         validation_error=str(first_error),
                         invalid_plan=invalid_plan_dump,
                     )
+                    action_oov_detected = action_oov_detected or bool(
+                        getattr(self.replanner, "last_action_oov_detected", False)
+                    )
                     replanner_artifact = self.replanner.last_artifact
                     final_plan = self._ensure_open_url_for_final_plan(repaired_plan)
                     try:
                         self.validator.validate(final_plan)
+                        final_plan_valid = True
                     except PlanValidationError as second_error:
                         self._persist_final_plan_repair_failure(
                             invalid_plan=invalid_plan_dump,
                             validation_error=str(second_error),
                             repaired_raw_response=replanner_artifact.raw_response if replanner_artifact else None,
                         )
-                        raise
+                        raise WorkflowStageError("validation", str(second_error)) from second_error
 
                 execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count = await self._execute_verify_with_correction_loop(
                     user_goal=user_goal,
@@ -150,6 +188,10 @@ class WorkflowManager:
             "page_snapshot": shared_page_snapshot,
             "corrective_retry_used": corrective_retry_used,
             "corrective_retry_count": corrective_retry_count,
+            "correction_attempt_count": corrective_retry_count,
+            "initial_plan_valid": initial_plan_valid,
+            "final_plan_valid": final_plan_valid,
+            "action_oov_detected": action_oov_detected,
         }
 
     async def _execute_verify_with_correction_loop(
