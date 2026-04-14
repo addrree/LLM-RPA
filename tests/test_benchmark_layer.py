@@ -46,6 +46,8 @@ def test_metrics_are_computed_from_scenario_results():
             runtime_sec=1.2,
             corrective_retry_used=False,
             correction_attempt_count=0,
+            corrective_plan_valid_count=0,
+            corrective_plan_invalid_count=0,
             initial_plan_valid=True,
             final_plan_valid=True,
             export_success=True,
@@ -59,6 +61,8 @@ def test_metrics_are_computed_from_scenario_results():
             runtime_sec=2.4,
             corrective_retry_used=True,
             correction_attempt_count=1,
+            corrective_plan_valid_count=1,
+            corrective_plan_invalid_count=0,
             initial_plan_valid=True,
             final_plan_valid=True,
             export_success=False,
@@ -73,6 +77,8 @@ def test_metrics_are_computed_from_scenario_results():
     assert metrics.negative_expected_reject_rate == 1.0
     assert metrics.plan_validation_pass_rate == 1.0
     assert metrics.correction_recovery_rate == 1.0
+    assert metrics.corrective_plan_valid_count == 1
+    assert metrics.corrective_plan_invalid_count == 0
     assert metrics.export_success_rate == 0.5
     assert metrics.mean_runtime_sec == 1.8
 
@@ -114,6 +120,8 @@ def test_plan_validation_pass_rate_respects_validation_failures():
             runtime_sec=0.5,
             corrective_retry_used=False,
             correction_attempt_count=0,
+            corrective_plan_valid_count=0,
+            corrective_plan_invalid_count=0,
             initial_plan_valid=True,
             final_plan_valid=True,
             failure_stage=None,
@@ -128,6 +136,8 @@ def test_plan_validation_pass_rate_respects_validation_failures():
             runtime_sec=0.4,
             corrective_retry_used=False,
             correction_attempt_count=0,
+            corrective_plan_valid_count=0,
+            corrective_plan_invalid_count=1,
             initial_plan_valid=None,
             final_plan_valid=None,
             failure_stage="validation",
@@ -137,3 +147,13 @@ def test_plan_validation_pass_rate_respects_validation_failures():
 
     metrics = BenchmarkRunner._compute_metrics(results)
     assert metrics.plan_validation_pass_rate == 0.5
+
+
+def test_smoke_suite_contains_three_core_categories():
+    suite = load_scenario_suite(Path("benchmarks/scenarios/smoke_generalized_suite.json"))
+    categories = {scenario.category for scenario in suite.scenarios}
+    assert categories == {
+        "single_value_extraction",
+        "anchored_value_extraction",
+        "repeated_structured_items",
+    }

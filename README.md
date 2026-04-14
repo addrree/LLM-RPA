@@ -134,11 +134,24 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 - `negative_or_ambiguous_case`
 
 Сценарии лежат в `benchmarks/scenarios/core_task_suite.json` и не привязаны к одному домену.
+Это основной benchmark (full generalized suite) и его нельзя заменять smoke-набором.
+
+Дополнительно есть быстрый smoke-suite: `benchmarks/scenarios/smoke_generalized_suite.json`
+с тремя категориями:
+- `single_value_extraction`
+- `anchored_value_extraction`
+- `repeated_structured_items`
 
 Запустить все сценарии:
 
 ```bash
 python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/core_task_suite.json --backend ollama
+```
+
+Запустить smoke-suite отдельно:
+
+```bash
+python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/smoke_generalized_suite.json --backend ollama
 ```
 
 Запустить один сценарий:
@@ -164,6 +177,7 @@ python -m app.main --benchmark-category navigation_then_extraction --backend oll
 - execution success rate
 - verifier accept rate
 - correction retry usage rate
+- correction attempt count / recovery
 - export success rate
 - mean runtime
 

@@ -12,7 +12,37 @@ class ActionHandlers:
         await page.goto(args["url"])
 
     async def click(self, page, args, runtime_state=None):
-        await page.click(args["selector"])
+        selector = str(args.get("selector", "")).strip()
+        text = str(args.get("text", "")).strip()
+        role = str(args.get("role", "")).strip()
+        name = str(args.get("name", "")).strip()
+        href_contains = str(args.get("href_contains", "")).strip()
+
+        if selector:
+            if self._is_too_broad_click_selector(selector):
+                raise ValueError(
+                    f"Click selector is too broad: {selector!r}. Use specific selector or text/role/href filter."
+                )
+            resolved_selector = selector
+            if bool(args.get("visible_only", True)):
+                resolved_selector = f"{selector}:visible"
+            locator = page.locator(resolved_selector)
+            await locator.first.click()
+            return
+
+        if text:
+            await page.get_by_text(text, exact=bool(args.get("exact", False))).first.click()
+            return
+
+        if role and name:
+            await page.get_by_role(role, name=name, exact=bool(args.get("exact", False))).first.click()
+            return
+
+        if href_contains:
+            await page.locator(f'a[href*="{href_contains}"]').first.click()
+            return
+
+        raise ValueError("click requires selector or text/role+name/href_contains")
 
     async def type(self, page, args, runtime_state=None):
         await page.fill(args["selector"], args["text"])
@@ -406,6 +436,10 @@ class ActionHandlers:
             if runtime_state is not None:
                 runtime_state["last_page_text"] = source_text
         return source_text
+
+    @staticmethod
+    def _is_too_broad_click_selector(selector: str) -> bool:
+        return selector.strip().lower() in {"a", "button", "*", "[role='button']", '[role="button"]'}
 
     @staticmethod
     def _extract_match_value(match: re.Match[str], group_index: int | None):

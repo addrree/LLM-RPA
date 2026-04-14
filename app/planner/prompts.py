@@ -50,6 +50,8 @@ PLANNER_SYSTEM_PROMPT = """
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
 14. Используй ТОЛЬКО канонические action names из схемы. Запрещены синонимы вроде click_element или extract_value.
+15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
+16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -105,6 +107,8 @@ REPLANNER_SYSTEM_PROMPT = """
 9) Не пропускай обязательные поля TaskSpec (goal, start_url, constraints, expected_result.description, steps[*].args).
 10) Никаких комментариев/markdown, только валидный JSON-объект.
 11) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
+12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
+13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй text/role+name/href_contains.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -123,4 +127,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения.
 6) Никаких комментариев/markdown — только JSON.
 7) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
+8) Учитывай prior corrective attempts и НЕ повторяй уже проваленные решения (тот же action+args, тот же regex/group mismatch, тот же широкий click locator).
+9) Запрещено генерировать шаги с пустыми обязательными аргументами.
+10) Для single_value_title_or_header не применяй extract_value_near_anchor, если нет явного anchor.
 """

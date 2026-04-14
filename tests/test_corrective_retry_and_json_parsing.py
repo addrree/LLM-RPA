@@ -18,7 +18,7 @@ class _StubPlanner:
                 "goal": user_goal,
                 "start_url": "https://example.com",
                 "allowed_domains": ["example.com"],
-                "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 20},
+                "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 3, "timeout_sec": 20},
                 "expected_result": {"description": "Extract value", "required_fields": ["value"]},
                 "steps": [
                     {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
@@ -41,6 +41,8 @@ class _StrictValidator(_StubValidator):
         for step in plan.steps:
             if step.action == "extract_items" and not step.args.get("container_selector"):
                 raise PlanValidationError("extract_items missing required args: container_selector")
+            if step.action == "click" and step.args.get("selector") == "a":
+                raise PlanValidationError("click selector is too broad: 'a'")
 
 
 class _StubExecutor:
@@ -113,6 +115,37 @@ class _InvalidCorrectiveReplanner:
                         "args": {"limit": 10, "fields": {"name": ".name"}},
                         "save_as": "items",
                     },
+                    {"step_id": 3, "action": "finish", "args": {}},
+                ],
+            }
+        )
+
+
+class _FlakyCorrectiveReplanner:
+    def __init__(self):
+        self.last_artifact = None
+        self.calls = 0
+
+    def build_corrective_plan(self, **kwargs):
+        self.calls += 1
+        previous = kwargs["previous_plan"]
+        if self.calls == 1:
+            return TaskSpec.model_validate(
+                {
+                    **previous.model_dump(mode="json"),
+                    "steps": [
+                        {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                        {"step_id": 2, "action": "click", "args": {"selector": "a"}},
+                        {"step_id": 3, "action": "finish", "args": {}},
+                    ],
+                }
+            )
+        return TaskSpec.model_validate(
+            {
+                **previous.model_dump(mode="json"),
+                "steps": [
+                    {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                    {"step_id": 2, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
                     {"step_id": 3, "action": "finish", "args": {}},
                 ],
             }
@@ -222,8 +255,7 @@ def test_workflow_stops_retry_and_persists_artifacts_when_corrective_plan_is_inv
     )
 
     result = asyncio.run(manager.run("Extract list"))
-    assert result["verdict"].verdict == "reject"
-    assert result["execution_result"].extracted_data["value"] == "bad"
+    assert result["corrective_plan_invalid_count"] == 1
 
     candidate_files = sorted(tmp_path.glob("corrective_plan_candidate_attempt1_*.json"))
     failure_files = sorted(tmp_path.glob("corrective_plan_validation_failed_attempt1_*.json"))
@@ -233,3 +265,19 @@ def test_workflow_stops_retry_and_persists_artifacts_when_corrective_plan_is_inv
     failure_payload = json.loads(failure_files[-1].read_text(encoding="utf-8"))
     assert failure_payload["validation_error"] == "extract_items missing required args: container_selector"
     assert failure_payload["offending_step"]["action"] == "extract_items"
+
+
+def test_workflow_continues_after_invalid_corrective_and_recovers():
+    manager = WorkflowManager(
+        planner=_StubPlanner(),
+        validator=_StrictValidator(),
+        executor=_StubExecutor(),
+        verifier=_StubVerifier(),
+        replanner=_FlakyCorrectiveReplanner(),
+        two_stage_planning=False,
+    )
+    result = asyncio.run(manager.run("Extract value"))
+    assert result["verdict"].verdict == "accept"
+    assert result["correction_attempt_count"] == 1
+    assert result["corrective_plan_invalid_count"] == 1
+    assert result["corrective_plan_valid_count"] == 0
