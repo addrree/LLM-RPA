@@ -13,8 +13,10 @@ from pydantic import BaseModel, Field
 from app.benchmark.scenario_loader import BenchmarkScenario, ScenarioSuite
 from app.config import BENCHMARKS_DIR
 from app.orchestrator.persistence import export_results, save_artifacts
+from app.orchestrator.workflow_manager import WorkflowStageError
 
 UTC = timezone.utc
+VALID_FAILURE_STAGES = {"planning", "validation", "execution", "verification", "export"}
 
 
 class BenchmarkScenarioResult(BaseModel):
@@ -25,6 +27,11 @@ class BenchmarkScenarioResult(BaseModel):
     verifier_verdict: str
     runtime_sec: float
     corrective_retry_used: bool
+    correction_attempt_count: int = 0
+    initial_plan_valid: bool | None = None
+    final_plan_valid: bool | None = None
+    action_oov_detected: bool = False
+    failure_stage: str | None = None
     export_success: bool
     final_url: str | None = None
     error_message: str | None = None
@@ -33,9 +40,11 @@ class BenchmarkScenarioResult(BaseModel):
 
 class BenchmarkMetrics(BaseModel):
     total_scenarios: int
-    execution_success_rate: float
-    verifier_accept_rate: float
-    correction_retry_usage_rate: float
+    positive_execution_success_rate: float
+    positive_verifier_accept_rate: float
+    negative_expected_reject_rate: float
+    plan_validation_pass_rate: float
+    correction_recovery_rate: float
     export_success_rate: float
     mean_runtime_sec: float
 
@@ -85,6 +94,11 @@ class BenchmarkRunner:
         execution_status = "failed"
         verifier_verdict = "error"
         corrective_retry_used = False
+        correction_attempt_count = 0
+        initial_plan_valid = None
+        final_plan_valid = None
+        action_oov_detected = False
+        failure_stage = None
         export_success = False
         final_url = None
         error_message = None
@@ -96,14 +110,38 @@ class BenchmarkRunner:
             execution_status = execution.status
             verifier_verdict = verdict.verdict
             corrective_retry_used = bool(result.get("corrective_retry_used", False))
+            correction_attempt_count = int(result.get("correction_attempt_count", result.get("corrective_retry_count", 0)))
+            initial_plan_valid = result.get("initial_plan_valid")
+            final_plan_valid = result.get("final_plan_valid")
+            action_oov_detected = bool(result.get("action_oov_detected", False))
             final_url = execution.final_url
             error_message = execution.error_message
 
             save_artifacts(result, run_id=run_id)
-            export_results(result, run_id=run_id, export_formats=self.export_formats)
-            export_success = True
+            try:
+                export_results(result, run_id=run_id, export_formats=self.export_formats)
+                export_success = True
+            except Exception as export_exc:  # noqa: BLE001
+                export_success = False
+                error_message = str(export_exc)
+                failure_stage = "export"
+
+            if failure_stage is None:
+                failure_stage = self._infer_failure_stage(
+                    should_succeed=scenario.should_succeed,
+                    execution_status=execution_status,
+                    verifier_verdict=verifier_verdict,
+                    initial_plan_valid=initial_plan_valid,
+                    final_plan_valid=final_plan_valid,
+                    export_success=export_success,
+                )
+        except WorkflowStageError as exc:
+            failure_stage = exc.stage if exc.stage in VALID_FAILURE_STAGES else "execution"
+            error_message = str(exc)
         except Exception as exc:  # noqa: BLE001
             error_message = str(exc)
+            if failure_stage is None:
+                failure_stage = "execution"
 
         runtime_sec = round(perf_counter() - started, 3)
         return BenchmarkScenarioResult(
@@ -114,6 +152,11 @@ class BenchmarkRunner:
             verifier_verdict=verifier_verdict,
             runtime_sec=runtime_sec,
             corrective_retry_used=corrective_retry_used,
+            correction_attempt_count=correction_attempt_count,
+            initial_plan_valid=initial_plan_valid,
+            final_plan_valid=final_plan_valid,
+            action_oov_detected=action_oov_detected,
+            failure_stage=failure_stage,
             export_success=export_success,
             final_url=final_url,
             error_message=error_message,
@@ -144,27 +187,80 @@ class BenchmarkRunner:
         if total == 0:
             return BenchmarkMetrics(
                 total_scenarios=0,
-                execution_success_rate=0.0,
-                verifier_accept_rate=0.0,
-                correction_retry_usage_rate=0.0,
+                positive_execution_success_rate=0.0,
+                positive_verifier_accept_rate=0.0,
+                negative_expected_reject_rate=0.0,
+                plan_validation_pass_rate=0.0,
+                correction_recovery_rate=0.0,
                 export_success_rate=0.0,
                 mean_runtime_sec=0.0,
             )
 
-        execution_success = sum(1 for item in results if item.execution_status == "success")
-        verifier_accept = sum(1 for item in results if item.verifier_verdict == "accept")
-        correction_used = sum(1 for item in results if item.corrective_retry_used)
+        positive = [item for item in results if item.should_succeed]
+        negative = [item for item in results if not item.should_succeed]
+        positive_execution_success = sum(1 for item in positive if item.execution_status == "success")
+        positive_verifier_accept = sum(1 for item in positive if item.verifier_verdict == "accept")
+        negative_expected_reject = sum(
+            1 for item in negative if item.execution_status == "success" and item.verifier_verdict == "reject"
+        )
+        plan_validation_pass = sum(
+            1
+            for item in results
+            if (item.initial_plan_valid in {None, True}) and (item.final_plan_valid in {None, True})
+        )
+        correction_attempted = [item for item in results if item.correction_attempt_count > 0]
+        correction_recovered = sum(
+            1
+            for item in correction_attempted
+            if BenchmarkRunner._is_expected_outcome(item)
+        )
         export_success = sum(1 for item in results if item.export_success)
         mean_runtime = sum(item.runtime_sec for item in results) / total
 
         return BenchmarkMetrics(
             total_scenarios=total,
-            execution_success_rate=execution_success / total,
-            verifier_accept_rate=verifier_accept / total,
-            correction_retry_usage_rate=correction_used / total,
+            positive_execution_success_rate=BenchmarkRunner._safe_ratio(positive_execution_success, len(positive)),
+            positive_verifier_accept_rate=BenchmarkRunner._safe_ratio(positive_verifier_accept, len(positive)),
+            negative_expected_reject_rate=BenchmarkRunner._safe_ratio(negative_expected_reject, len(negative)),
+            plan_validation_pass_rate=plan_validation_pass / total,
+            correction_recovery_rate=BenchmarkRunner._safe_ratio(correction_recovered, len(correction_attempted)),
             export_success_rate=export_success / total,
             mean_runtime_sec=round(mean_runtime, 3),
         )
+
+    @staticmethod
+    def _safe_ratio(numerator: int, denominator: int) -> float:
+        if denominator == 0:
+            return 0.0
+        return numerator / denominator
+
+    @staticmethod
+    def _is_expected_outcome(item: BenchmarkScenarioResult) -> bool:
+        if item.should_succeed:
+            return item.execution_status == "success" and item.verifier_verdict == "accept"
+        return item.execution_status == "success" and item.verifier_verdict == "reject"
+
+    @staticmethod
+    def _infer_failure_stage(
+        *,
+        should_succeed: bool,
+        execution_status: str,
+        verifier_verdict: str,
+        initial_plan_valid: bool | None,
+        final_plan_valid: bool | None,
+        export_success: bool,
+    ) -> str | None:
+        if initial_plan_valid is False or final_plan_valid is False:
+            return "validation"
+        if execution_status != "success":
+            return "execution"
+        if should_succeed and verifier_verdict != "accept":
+            return "verification"
+        if not should_succeed and verifier_verdict != "reject":
+            return "verification"
+        if not export_success:
+            return "export"
+        return None
 
 
 def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:
@@ -185,6 +281,11 @@ def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:
                 "verifier_verdict",
                 "runtime_sec",
                 "corrective_retry_used",
+                "correction_attempt_count",
+                "initial_plan_valid",
+                "final_plan_valid",
+                "action_oov_detected",
+                "failure_stage",
                 "export_success",
                 "final_url",
                 "error_message",

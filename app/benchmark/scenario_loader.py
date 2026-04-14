@@ -21,6 +21,10 @@ ExpectedOutputType = Literal["scalar", "object", "list", "mixed", "none"]
 class BenchmarkScenario(BaseModel):
     scenario_id: str
     goal: str
+    start_url: str
+    target_page_hint: str = ""
+    preconditions: list[str] = Field(default_factory=list)
+    page_expectations: list[str] = Field(default_factory=list)
     category: ScenarioCategory
     description: str
     expected_output_type: ExpectedOutputType

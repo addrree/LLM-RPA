@@ -49,6 +49,7 @@ PLANNER_SYSTEM_PROMPT = """
     - используй extract_pattern_from_page_text с полной группой, например [0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
+14. Используй ТОЛЬКО канонические action names из схемы. Запрещены синонимы вроде click_element или extract_value.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -103,6 +104,7 @@ REPLANNER_SYSTEM_PROMPT = """
    - save_as
 9) Не пропускай обязательные поля TaskSpec (goal, start_url, constraints, expected_result.description, steps[*].args).
 10) Никаких комментариев/markdown, только валидный JSON-объект.
+11) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -120,4 +122,5 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 4) Для open_url всегда задавай args.url.
 5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения.
 6) Никаких комментариев/markdown — только JSON.
+7) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
 """
