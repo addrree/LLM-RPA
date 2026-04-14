@@ -1,4 +1,5 @@
 from urllib.parse import urlparse
+import re
 
 from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_MAX_VERIFICATION_RETRIES, GLOBAL_TIMEOUT_SEC
 from app.planner.action_vocab import CANONICAL_ACTIONS
@@ -111,6 +112,12 @@ class PlanValidator:
             raise PlanValidationError(
                 f"extract_items field '{field_name}' has invalid 'pattern'"
             )
+        compiled_pattern = None
+        if isinstance(pattern, str) and pattern.strip():
+            compiled_pattern = PlanValidator._compile_pattern(
+                pattern,
+                action_name=f"extract_items field '{field_name}'",
+            )
         if anchor_text is not None and (not isinstance(anchor_text, str) or not anchor_text.strip()):
             raise PlanValidationError(
                 f"extract_items field '{field_name}' has invalid 'anchor_text'"
@@ -133,6 +140,13 @@ class PlanValidator:
         if "group_index" in rule and (not isinstance(rule["group_index"], int) or rule["group_index"] < 0):
             raise PlanValidationError(
                 f"extract_items field '{field_name}' requires non-negative integer 'group_index'"
+            )
+        if compiled_pattern is not None:
+            PlanValidator._validate_group_index_reference(
+                group_index=rule.get("group_index"),
+                compiled_pattern=compiled_pattern,
+                action_name="extract_items",
+                field_name=field_name,
             )
         if "normalize_number" in rule and not isinstance(rule["normalize_number"], bool):
             raise PlanValidationError(
@@ -157,6 +171,10 @@ class PlanValidator:
     def _validate_extract_pattern_from_page_text(args: dict, save_as: str | None) -> None:
         if "pattern" not in args or not str(args.get("pattern", "")).strip():
             raise PlanValidationError("extract_pattern_from_page_text requires non-empty 'pattern'")
+        compiled_pattern = PlanValidator._compile_pattern(
+            str(args.get("pattern")),
+            action_name="extract_pattern_from_page_text",
+        )
         occurrence = args.get("occurrence", 1)
         if not isinstance(occurrence, int) or occurrence <= 0:
             raise PlanValidationError("extract_pattern_from_page_text requires positive integer 'occurrence'")
@@ -165,6 +183,12 @@ class PlanValidator:
             raise PlanValidationError(
                 "extract_pattern_from_page_text requires non-negative integer 'group_index'"
             )
+        PlanValidator._validate_group_index_reference(
+            group_index=group_index,
+            compiled_pattern=compiled_pattern,
+            action_name="extract_pattern_from_page_text",
+            field_name=None,
+        )
         normalize_number = args.get("normalize_number")
         if normalize_number is not None and not isinstance(normalize_number, bool):
             raise PlanValidationError("extract_pattern_from_page_text requires boolean 'normalize_number'")
@@ -183,6 +207,10 @@ class PlanValidator:
     def _validate_extract_structured_items(args: dict, save_as: str | None) -> None:
         if "pattern" not in args or not str(args.get("pattern", "")).strip():
             raise PlanValidationError("extract_structured_items requires non-empty 'pattern'")
+        compiled_pattern = PlanValidator._compile_pattern(
+            str(args.get("pattern")),
+            action_name="extract_structured_items",
+        )
         limit = args.get("limit")
         if not isinstance(limit, int) or limit <= 0:
             raise PlanValidationError("extract_structured_items requires positive integer 'limit'")
@@ -205,6 +233,12 @@ class PlanValidator:
                 raise PlanValidationError(
                     f"extract_structured_items field '{field_name}' requires positive integer 'group_index'"
                 )
+            PlanValidator._validate_group_index_reference(
+                group_index=group_index,
+                compiled_pattern=compiled_pattern,
+                action_name="extract_structured_items",
+                field_name=str(field_name),
+            )
             if "normalize_number" in spec and not isinstance(spec["normalize_number"], bool):
                 raise PlanValidationError(
                     f"extract_structured_items field '{field_name}' requires boolean 'normalize_number'"
@@ -256,6 +290,18 @@ class PlanValidator:
         group_index = args.get("group_index")
         if group_index is not None and (not isinstance(group_index, int) or group_index < 0):
             raise PlanValidationError("extract_value_near_anchor requires non-negative integer 'group_index'")
+        value_pattern = str(args.get("value_pattern", "")).strip()
+        if value_pattern:
+            compiled_pattern = PlanValidator._compile_pattern(
+                value_pattern,
+                action_name="extract_value_near_anchor",
+            )
+            PlanValidator._validate_group_index_reference(
+                group_index=group_index,
+                compiled_pattern=compiled_pattern,
+                action_name="extract_value_near_anchor",
+                field_name=None,
+            )
         normalize_number = args.get("normalize_number")
         if normalize_number is not None and not isinstance(normalize_number, bool):
             raise PlanValidationError("extract_value_near_anchor requires boolean 'normalize_number'")
@@ -267,6 +313,35 @@ class PlanValidator:
             raise PlanValidationError("extract_value_near_anchor requires boolean 'strip_plus'")
         if not save_as:
             raise PlanValidationError("extract_value_near_anchor requires 'save_as'")
+
+    @staticmethod
+    def _compile_pattern(pattern: str, *, action_name: str) -> re.Pattern[str]:
+        try:
+            return re.compile(pattern)
+        except re.error as exc:
+            raise PlanValidationError(
+                f"{action_name} has invalid regex pattern: {exc}"
+            ) from exc
+
+    @staticmethod
+    def _validate_group_index_reference(
+        *,
+        group_index: int | None,
+        compiled_pattern: re.Pattern[str],
+        action_name: str,
+        field_name: str | None,
+    ) -> None:
+        if group_index is None:
+            return
+        if group_index == 0:
+            return
+        available_groups = compiled_pattern.groups
+        if group_index > available_groups:
+            field_suffix = f" field '{field_name}'" if field_name else ""
+            raise PlanValidationError(
+                f"{action_name}{field_suffix} references non-existent regex group_index={group_index}; "
+                f"pattern exposes only {available_groups} capture group(s)"
+            )
 
     def _validate_step_order(self, plan: TaskSpec) -> None:
         expected_ids = list(range(1, len(plan.steps) + 1))

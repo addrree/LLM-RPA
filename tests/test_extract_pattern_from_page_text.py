@@ -98,6 +98,21 @@ def test_extract_pattern_raises_when_match_not_found():
         )
 
 
+def test_extract_pattern_raises_diagnostic_when_group_index_out_of_range():
+    page = _FakePage("Users: 42")
+    handler = ActionHandlers()
+    with pytest.raises(ValueError) as exc:
+        asyncio.run(
+            handler.extract_pattern_from_page_text(
+                page,
+                {"pattern": r"Users:\s*(\d+)", "group_index": 2},
+                runtime_state={},
+            )
+        )
+    assert "out of range" in str(exc.value)
+    assert "available_groups=1" in str(exc.value)
+
+
 def test_extract_pattern_supports_repeated_structured_items_with_limit():
     page = _FakePage("Русский\n2 087 000+\nEnglish\n6 987 000+")
     handler = ActionHandlers()

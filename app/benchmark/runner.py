@@ -138,6 +138,11 @@ class BenchmarkRunner:
         except WorkflowStageError as exc:
             failure_stage = exc.stage if exc.stage in VALID_FAILURE_STAGES else "execution"
             error_message = str(exc)
+            if failure_stage == "validation":
+                if initial_plan_valid is None:
+                    initial_plan_valid = False
+                if final_plan_valid is None:
+                    final_plan_valid = False
         except Exception as exc:  # noqa: BLE001
             error_message = str(exc)
             if failure_stage is None:
@@ -203,11 +208,7 @@ class BenchmarkRunner:
         negative_expected_reject = sum(
             1 for item in negative if item.execution_status == "success" and item.verifier_verdict == "reject"
         )
-        plan_validation_pass = sum(
-            1
-            for item in results
-            if (item.initial_plan_valid in {None, True}) and (item.final_plan_valid in {None, True})
-        )
+        plan_validation_pass = sum(1 for item in results if BenchmarkRunner._plan_validation_passed(item))
         correction_attempted = [item for item in results if item.correction_attempt_count > 0]
         correction_recovered = sum(
             1
@@ -233,6 +234,14 @@ class BenchmarkRunner:
         if denominator == 0:
             return 0.0
         return numerator / denominator
+
+    @staticmethod
+    def _plan_validation_passed(item: BenchmarkScenarioResult) -> bool:
+        if item.failure_stage == "validation":
+            return False
+        if item.initial_plan_valid is False or item.final_plan_valid is False:
+            return False
+        return True
 
     @staticmethod
     def _is_expected_outcome(item: BenchmarkScenarioResult) -> bool:

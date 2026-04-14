@@ -162,6 +162,25 @@ def test_ensure_open_url_for_final_plan_fills_missing_args_url_from_start_url():
     assert fixed.steps[0].args["url"] == "https://example.com/"
 
 
+def test_normalize_plan_for_validation_fills_observe_page_save_as():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "g",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 3, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 20},
+            "expected_result": {"description": "d", "required_fields": ["page_snapshot"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "observe_page", "args": {}},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    fixed = WorkflowManager._normalize_plan_for_validation(plan)
+    assert fixed.steps[1].save_as == "page_snapshot"
+
+
 def test_identify_offending_step_for_extract_items_without_container_selector():
     plan = TaskSpec.model_validate(
         {
