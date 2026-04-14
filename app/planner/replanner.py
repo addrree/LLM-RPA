@@ -59,6 +59,7 @@ class Replanner:
         previous_plan: TaskSpec,
         execution_result: dict,
         verifier_verdict: dict,
+        prior_corrective_attempts: list[dict] | None = None,
     ) -> TaskSpec:
         payload = {
             "user_goal": user_goal,
@@ -66,6 +67,10 @@ class Replanner:
             "previous_plan": previous_plan.model_dump(mode="json"),
             "execution_result": execution_result,
             "verifier_verdict": verifier_verdict,
+            "extracted_data": execution_result.get("extracted_data", {}),
+            "verifier_issues": verifier_verdict.get("issues", []),
+            "verifier_summary": verifier_verdict.get("summary"),
+            "prior_corrective_attempts": prior_corrective_attempts or [],
         }
         artifact = self.llm_client.generate_planner_artifact(
             system_prompt=CORRECTIVE_REPLANNER_SYSTEM_PROMPT,
@@ -114,6 +119,18 @@ class Replanner:
             if current.get("action") == "open_url" and not str(current["args"].get("url", "")).strip():
                 logger.warning("Malformed open_url from model: missing args.url. Applying start_url normalization.")
                 current["args"]["url"] = context_start_url
+            if (
+                current.get("action") == "extract_value_near_anchor"
+                and Replanner._is_single_value_header_goal(user_goal)
+                and not str(current["args"].get("anchor_text", "")).strip()
+            ):
+                logger.warning("Routing fix: replacing extract_value_near_anchor with extract_text for title/header task.")
+                current = {
+                    "step_id": idx,
+                    "action": "extract_text",
+                    "args": {"selector": "h1"},
+                    "save_as": current.get("save_as") or "value",
+                }
 
             current["step_id"] = idx
             normalized_steps.append(current)
@@ -160,7 +177,7 @@ class Replanner:
             constraints = {
                 "max_steps": constraints.get("max_steps", 10),
                 "max_replans": constraints.get("max_replans", 1),
-                "max_verification_retries": constraints.get("max_verification_retries", 1),
+                "max_verification_retries": constraints.get("max_verification_retries", 3),
                 "timeout_sec": constraints.get("timeout_sec", 30),
             }
 
@@ -215,3 +232,8 @@ class Replanner:
             if mapped == name and mapped not in normalized_required_fields:
                 normalized_required_fields.append(mapped)
         return normalized_required_fields
+
+    @staticmethod
+    def _is_single_value_header_goal(user_goal: str) -> bool:
+        text = user_goal.lower()
+        return any(token in text for token in ["title", "heading", "header", "h1"]) and "near" not in text

@@ -9,6 +9,7 @@ from app.schemas.task_spec import TaskSpec
 ALLOWED_ACTIONS = CANONICAL_ACTIONS
 
 TECHNICAL_ARTIFACT_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
+TOO_BROAD_CLICK_SELECTORS = {"a", "button", "*", "[role='button']", '[role="button"]'}
 
 
 class PlanValidationError(Exception):
@@ -43,8 +44,8 @@ class PlanValidator:
                 raise PlanValidationError(
                     f"open_url requires non-empty 'url'. Problematic step: {step.model_dump(mode='json')}"
                 )
-            if step.action == "click" and "selector" not in step.args:
-                raise PlanValidationError("click requires 'selector'")
+            if step.action == "click":
+                self._validate_click_args(step.args)
             if step.action == "type" and ("selector" not in step.args or "text" not in step.args):
                 raise PlanValidationError("type requires 'selector' and 'text'")
             if step.action in {"extract_text", "extract_html"} and "selector" not in step.args:
@@ -61,6 +62,29 @@ class PlanValidator:
                 self._validate_extract_text_near_text(step.args, step.save_as)
             if step.action == "extract_value_near_anchor":
                 self._validate_extract_value_near_anchor(step.args, step.save_as)
+
+    @staticmethod
+    def _validate_click_args(args: dict) -> None:
+        selector = str(args.get("selector", "")).strip()
+        text = str(args.get("text", "")).strip()
+        role = str(args.get("role", "")).strip()
+        name = str(args.get("name", "")).strip()
+        href_contains = str(args.get("href_contains", "")).strip()
+
+        has_selector = bool(selector)
+        has_text = bool(text)
+        has_role_name = bool(role and name)
+        has_href_filter = bool(href_contains)
+
+        if not (has_selector or has_text or has_role_name or has_href_filter):
+            raise PlanValidationError(
+                "click requires one of: non-empty 'selector', 'text', 'role'+'name', or 'href_contains'"
+            )
+
+        if has_selector and selector.lower() in TOO_BROAD_CLICK_SELECTORS:
+            raise PlanValidationError(
+                f"click selector is too broad: {selector!r}. Use a more specific selector or text/role contract."
+            )
 
     @staticmethod
     def _validate_extract_items(args: dict, save_as: str | None) -> None:
@@ -274,6 +298,16 @@ class PlanValidator:
         has_type = bool(str(args.get("value_type", "")).strip())
         if not has_pattern and not has_type:
             raise PlanValidationError("extract_value_near_anchor requires non-empty 'value_pattern' or 'value_type'")
+        if has_type and str(args.get("value_type", "")).strip().lower() not in {
+            "article_count",
+            "count",
+            "number",
+            "float",
+            "rating",
+        }:
+            raise PlanValidationError(
+                "extract_value_near_anchor supports value_type in {'article_count','count','number','float','rating'}"
+            )
         direction = args.get("search_direction", "after")
         if direction not in {"after", "before", "around"}:
             raise PlanValidationError(

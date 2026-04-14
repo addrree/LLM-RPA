@@ -68,7 +68,7 @@ class Planner:
             "goal": user_goal,
             "start_url": url,
             "allowed_domains": [domain],
-            "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 3, "timeout_sec": 30},
             "expected_result": {
                 "description": "Observe landing page context",
                 "required_fields": ["page_snapshot"],
@@ -147,12 +147,12 @@ class Planner:
 
         constraints = plan.get("constraints")
         if not isinstance(constraints, dict):
-            constraints = {"max_steps": 4, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30}
+            constraints = {"max_steps": 4, "max_replans": 1, "max_verification_retries": 3, "timeout_sec": 30}
         else:
             constraints = {
                 "max_steps": constraints.get("max_steps", 4),
                 "max_replans": constraints.get("max_replans", 1),
-                "max_verification_retries": constraints.get("max_verification_retries", 1),
+                "max_verification_retries": constraints.get("max_verification_retries", 3),
                 "timeout_sec": constraints.get("timeout_sec", 30),
             }
 

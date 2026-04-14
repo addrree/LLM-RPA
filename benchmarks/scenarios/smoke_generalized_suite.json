@@ -1,0 +1,54 @@
+{
+  "suite_id": "generalized_smoke_suite_v1",
+  "description": "Fast pre-check subset covering core generalized extraction task classes.",
+  "scenarios": [
+    {
+      "scenario_id": "single_value_title_or_header",
+      "goal": "Open https://www.python.org/ and extract one primary page value (title or main heading) as a single scalar field.",
+      "start_url": "https://www.python.org/",
+      "target_page_hint": "Python homepage hero/header",
+      "preconditions": ["Landing page is publicly accessible without authentication."],
+      "page_expectations": ["A visible main heading or unambiguous primary title exists."],
+      "category": "single_value_extraction",
+      "description": "Smoke: single obvious scalar extraction.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": ["value"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Smoke subset of generalized suite."
+    },
+    {
+      "scenario_id": "anchored_support_email_or_phone",
+      "goal": "Open https://pypi.org/help/ and extract the value that appears near a textual anchor such as 'Email' or 'Contact'.",
+      "start_url": "https://pypi.org/help/",
+      "target_page_hint": "PyPI Help / contact-related sections",
+      "preconditions": ["Page contains support/contact-related prose."],
+      "page_expectations": ["At least one contact-like anchor is present near an extractable value."],
+      "category": "anchored_value_extraction",
+      "description": "Smoke: anchored extraction.",
+      "expected_output_type": "object",
+      "required_top_level_fields": ["anchor", "value"],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Smoke subset of generalized suite."
+    },
+    {
+      "scenario_id": "repeated_listing_cards",
+      "goal": "Open https://www.python.org/downloads/ and extract a repeated structured list of at least 3 release items with multiple fields per item.",
+      "start_url": "https://www.python.org/downloads/",
+      "target_page_hint": "Python downloads release list",
+      "preconditions": ["Listing page exposes repeated release blocks/cards."],
+      "page_expectations": ["At least 3 repeated items are available with name and detail/date-like fields."],
+      "category": "repeated_structured_items",
+      "description": "Smoke: repeated structured extraction.",
+      "expected_output_type": "list",
+      "required_top_level_fields": ["items"],
+      "expected_min_items": 3,
+      "expected_item_fields": ["name", "detail"],
+      "should_succeed": true,
+      "notes": "Smoke subset of generalized suite."
+    }
+  ]
+}

@@ -63,6 +63,8 @@ class WorkflowManager:
         shared_page_snapshot = None
         corrective_retry_used = False
         corrective_retry_count = 0
+        corrective_plan_valid_count = 0
+        corrective_plan_invalid_count = 0
         initial_plan_valid: bool | None = None
         final_plan_valid: bool | None = None
         action_oov_detected = False
@@ -82,7 +84,7 @@ class WorkflowManager:
                 initial_plan_valid = False
                 final_plan_valid = False
                 raise WorkflowStageError("validation", str(exc)) from exc
-            execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count = await self._execute_verify_with_correction_loop(
+            execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count, corrective_plan_valid_count, corrective_plan_invalid_count = await self._execute_verify_with_correction_loop(
                 user_goal=user_goal,
                 initial_plan=plan,
                 session=None,
@@ -180,7 +182,7 @@ class WorkflowManager:
                         )
                         raise WorkflowStageError("validation", str(second_error)) from second_error
 
-                execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count = await self._execute_verify_with_correction_loop(
+                execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count, corrective_plan_valid_count, corrective_plan_invalid_count = await self._execute_verify_with_correction_loop(
                     user_goal=user_goal,
                     initial_plan=final_plan,
                     session=session,
@@ -207,6 +209,8 @@ class WorkflowManager:
             "corrective_retry_used": corrective_retry_used,
             "corrective_retry_count": corrective_retry_count,
             "correction_attempt_count": corrective_retry_count,
+            "corrective_plan_valid_count": corrective_plan_valid_count,
+            "corrective_plan_invalid_count": corrective_plan_invalid_count,
             "initial_plan_valid": initial_plan_valid,
             "final_plan_valid": final_plan_valid,
             "action_oov_detected": action_oov_detected,
@@ -223,18 +227,41 @@ class WorkflowManager:
     ):
         current_plan = initial_plan
         max_retries = max(0, int(current_plan.constraints.max_verification_retries))
-        attempt = 0
+        corrective_attempt_count = 0
+        corrective_plan_valid_count = 0
+        corrective_plan_invalid_count = 0
         replanner_artifact = self.replanner.last_artifact if self.replanner else None
+        prior_corrective_attempts: list[dict] = []
+        prior_signatures: set[str] = set()
 
         while True:
             execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
             verdict = self.verifier.verify(current_plan, execution_result)
             if verdict.verdict == "accept":
-                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
+                return (
+                    execution_result,
+                    verdict,
+                    current_plan,
+                    replanner_artifact,
+                    corrective_attempt_count > 0,
+                    corrective_attempt_count,
+                    corrective_plan_valid_count,
+                    corrective_plan_invalid_count,
+                )
 
-            if attempt >= max_retries or self.replanner is None:
-                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
+            if corrective_attempt_count >= max_retries or self.replanner is None:
+                return (
+                    execution_result,
+                    verdict,
+                    current_plan,
+                    replanner_artifact,
+                    corrective_attempt_count > 0,
+                    corrective_attempt_count,
+                    corrective_plan_valid_count,
+                    corrective_plan_invalid_count,
+                )
 
+            corrective_attempt_count += 1
             effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
             try:
                 corrective_plan = self.replanner.build_corrective_plan(
@@ -243,11 +270,13 @@ class WorkflowManager:
                     previous_plan=current_plan,
                     execution_result=execution_result.model_dump(mode="json"),
                     verifier_verdict=verdict.model_dump(mode="json"),
+                    prior_corrective_attempts=prior_corrective_attempts,
                 )
             except Exception as corrective_error:  # noqa: BLE001
                 logger.error("Corrective plan generation failed: %s", corrective_error)
+                corrective_plan_invalid_count += 1
                 self._persist_corrective_plan_generation_failure(
-                    attempt=attempt + 1,
+                    attempt=corrective_attempt_count,
                     generation_error=str(corrective_error),
                     execution_result=execution_result.model_dump(mode="json"),
                     verifier_verdict=verdict.model_dump(mode="json"),
@@ -257,12 +286,19 @@ class WorkflowManager:
                         else None
                     ),
                 )
-                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
+                prior_corrective_attempts.append(
+                    {
+                        "attempt": corrective_attempt_count,
+                        "status": "generation_failed",
+                        "error": str(corrective_error),
+                    }
+                )
+                continue
 
             corrective_plan = self._normalize_plan_for_validation(corrective_plan)
             self._persist_corrective_plan_candidate(
                 corrective_plan=corrective_plan,
-                attempt=attempt + 1,
+                attempt=corrective_attempt_count,
                 execution_result=execution_result.model_dump(mode="json"),
                 verifier_verdict=verdict.model_dump(mode="json"),
                 replanner_raw_response=(
@@ -273,25 +309,54 @@ class WorkflowManager:
             )
             unsupported_actions = self._unsupported_corrective_actions(corrective_plan)
             if unsupported_actions:
-                logger.error(
-                    "Corrective plan contains unsupported actions for retry policy: %s",
-                    unsupported_actions,
+                corrective_plan_invalid_count += 1
+                error_message = (
+                    "Corrective retry policy rejected plan due to unsupported actions: "
+                    f"{', '.join(unsupported_actions)}"
                 )
+                logger.error(error_message)
                 self._persist_corrective_plan_validation_failure(
                     corrective_plan=corrective_plan,
-                    attempt=attempt + 1,
-                    validation_error=(
-                        "Corrective retry policy rejected plan due to unsupported actions: "
-                        f"{', '.join(unsupported_actions)}"
-                    ),
+                    attempt=corrective_attempt_count,
+                    validation_error=error_message,
                     offending_step=None,
                     execution_result=execution_result.model_dump(mode="json"),
                     verifier_verdict=verdict.model_dump(mode="json"),
                 )
-                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
+                prior_corrective_attempts.append(
+                    {
+                        "attempt": corrective_attempt_count,
+                        "status": "invalid",
+                        "error": error_message,
+                    }
+                )
+                continue
+
+            signature = self._plan_signature(corrective_plan)
+            if signature in prior_signatures:
+                corrective_plan_invalid_count += 1
+                duplicate_error = "Corrective plan duplicates a previously failed corrective attempt."
+                self._persist_corrective_plan_validation_failure(
+                    corrective_plan=corrective_plan,
+                    attempt=corrective_attempt_count,
+                    validation_error=duplicate_error,
+                    offending_step=None,
+                    execution_result=execution_result.model_dump(mode="json"),
+                    verifier_verdict=verdict.model_dump(mode="json"),
+                )
+                prior_corrective_attempts.append(
+                    {
+                        "attempt": corrective_attempt_count,
+                        "status": "invalid",
+                        "error": duplicate_error,
+                    }
+                )
+                continue
+
             try:
                 self.validator.validate(corrective_plan)
             except PlanValidationError as validation_error:
+                corrective_plan_invalid_count += 1
                 offending_step = self._identify_offending_step(
                     corrective_plan=corrective_plan,
                     validation_error=str(validation_error),
@@ -303,16 +368,32 @@ class WorkflowManager:
                 )
                 self._persist_corrective_plan_validation_failure(
                     corrective_plan=corrective_plan,
-                    attempt=attempt + 1,
+                    attempt=corrective_attempt_count,
                     validation_error=str(validation_error),
                     offending_step=offending_step,
                     execution_result=execution_result.model_dump(mode="json"),
                     verifier_verdict=verdict.model_dump(mode="json"),
                 )
-                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
+                prior_corrective_attempts.append(
+                    {
+                        "attempt": corrective_attempt_count,
+                        "status": "invalid",
+                        "error": str(validation_error),
+                    }
+                )
+                continue
+
+            corrective_plan_valid_count += 1
+            prior_signatures.add(signature)
+            prior_corrective_attempts.append(
+                {
+                    "attempt": corrective_attempt_count,
+                    "status": "valid",
+                    "plan_signature": signature,
+                }
+            )
             current_plan = corrective_plan
             replanner_artifact = self.replanner.last_artifact
-            attempt += 1
 
     @staticmethod
     def _build_page_snapshot_from_execution(execution_result):
@@ -394,6 +475,15 @@ class WorkflowManager:
             "repaired_raw_response": repaired_raw_response,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _plan_signature(plan: TaskSpec) -> str:
+        material = {
+            "start_url": str(plan.start_url),
+            "steps": [step.model_dump(mode="json") for step in plan.steps],
+            "required_fields": list(plan.expected_result.required_fields),
+        }
+        return json.dumps(material, ensure_ascii=False, sort_keys=True)
 
     @staticmethod
     def _identify_offending_step(corrective_plan: TaskSpec, validation_error: str) -> dict | None:
