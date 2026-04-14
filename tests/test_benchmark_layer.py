@@ -101,3 +101,39 @@ def test_failure_stage_inference_for_negative_semantic_reject():
         export_success=True,
     )
     assert stage is None
+
+
+def test_plan_validation_pass_rate_respects_validation_failures():
+    results = [
+        BenchmarkScenarioResult(
+            scenario_id="ok",
+            category="single_value_extraction",
+            should_succeed=True,
+            execution_status="success",
+            verifier_verdict="accept",
+            runtime_sec=0.5,
+            corrective_retry_used=False,
+            correction_attempt_count=0,
+            initial_plan_valid=True,
+            final_plan_valid=True,
+            failure_stage=None,
+            export_success=True,
+        ),
+        BenchmarkScenarioResult(
+            scenario_id="bad_validation",
+            category="single_value_extraction",
+            should_succeed=True,
+            execution_status="failed",
+            verifier_verdict="error",
+            runtime_sec=0.4,
+            corrective_retry_used=False,
+            correction_attempt_count=0,
+            initial_plan_valid=None,
+            final_plan_valid=None,
+            failure_stage="validation",
+            export_success=False,
+        ),
+    ]
+
+    metrics = BenchmarkRunner._compute_metrics(results)
+    assert metrics.plan_validation_pass_rate == 0.5

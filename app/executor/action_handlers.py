@@ -409,9 +409,18 @@ class ActionHandlers:
 
     @staticmethod
     def _extract_match_value(match: re.Match[str], group_index: int | None):
-        if group_index is not None:
-            return match.group(int(group_index))
-        return match.group(1) if match.groups() else match.group(0)
+        try:
+            if group_index is not None:
+                return match.group(int(group_index))
+            return match.group(1) if match.groups() else match.group(0)
+        except IndexError as exc:
+            requested = int(group_index) if group_index is not None else 1
+            available_groups = len(match.groups())
+            raise ValueError(
+                "Regex group reference is out of range during extraction: "
+                f"requested_group={requested}, available_groups={available_groups}. "
+                "Check pattern/group_index consistency."
+            ) from exc
 
     async def _collect_anchor_candidates(
         self,

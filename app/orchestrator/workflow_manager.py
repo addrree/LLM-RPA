@@ -22,6 +22,22 @@ class WorkflowStageError(Exception):
 
 
 class WorkflowManager:
+    SAFE_CORRECTIVE_ACTIONS = {
+        "open_url",
+        "click",
+        "type",
+        "wait_for",
+        "extract_text",
+        "extract_html",
+        "extract_items",
+        "extract_structured_items",
+        "observe_page",
+        "extract_pattern_from_page_text",
+        "extract_text_near_text",
+        "extract_value_near_anchor",
+        "finish",
+    }
+
     def __init__(
         self,
         planner: Planner,
@@ -56,6 +72,7 @@ class WorkflowManager:
                 plan = self.planner.build_plan(user_goal)
             except Exception as exc:  # noqa: BLE001
                 raise WorkflowStageError("planning", str(exc)) from exc
+            plan = self._normalize_plan_for_validation(plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
                 self.validator.validate(plan)
@@ -80,6 +97,7 @@ class WorkflowManager:
                 initial_plan = self.planner.build_initial_plan(user_goal)
             except Exception as exc:  # noqa: BLE001
                 raise WorkflowStageError("planning", str(exc)) from exc
+            initial_plan = self._normalize_plan_for_validation(initial_plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
                 self.validator.validate(initial_plan)
@@ -132,7 +150,7 @@ class WorkflowManager:
                     getattr(self.replanner, "last_action_oov_detected", False)
                 )
                 replanner_artifact = self.replanner.last_artifact
-                final_plan = self._ensure_open_url_for_final_plan(final_plan)
+                final_plan = self._normalize_plan_for_validation(final_plan)
                 try:
                     self.validator.validate(final_plan)
                     final_plan_valid = True
@@ -150,7 +168,7 @@ class WorkflowManager:
                         getattr(self.replanner, "last_action_oov_detected", False)
                     )
                     replanner_artifact = self.replanner.last_artifact
-                    final_plan = self._ensure_open_url_for_final_plan(repaired_plan)
+                    final_plan = self._normalize_plan_for_validation(repaired_plan)
                     try:
                         self.validator.validate(final_plan)
                         final_plan_valid = True
@@ -218,14 +236,30 @@ class WorkflowManager:
                 return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
 
             effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
-            corrective_plan = self.replanner.build_corrective_plan(
-                user_goal=user_goal,
-                page_snapshot=effective_snapshot,
-                previous_plan=current_plan,
-                execution_result=execution_result.model_dump(mode="json"),
-                verifier_verdict=verdict.model_dump(mode="json"),
-            )
-            corrective_plan = self._ensure_open_url_for_final_plan(corrective_plan)
+            try:
+                corrective_plan = self.replanner.build_corrective_plan(
+                    user_goal=user_goal,
+                    page_snapshot=effective_snapshot,
+                    previous_plan=current_plan,
+                    execution_result=execution_result.model_dump(mode="json"),
+                    verifier_verdict=verdict.model_dump(mode="json"),
+                )
+            except Exception as corrective_error:  # noqa: BLE001
+                logger.error("Corrective plan generation failed: %s", corrective_error)
+                self._persist_corrective_plan_generation_failure(
+                    attempt=attempt + 1,
+                    generation_error=str(corrective_error),
+                    execution_result=execution_result.model_dump(mode="json"),
+                    verifier_verdict=verdict.model_dump(mode="json"),
+                    replanner_raw_response=(
+                        self.replanner.last_artifact.raw_response
+                        if self.replanner and self.replanner.last_artifact is not None
+                        else None
+                    ),
+                )
+                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
+
+            corrective_plan = self._normalize_plan_for_validation(corrective_plan)
             self._persist_corrective_plan_candidate(
                 corrective_plan=corrective_plan,
                 attempt=attempt + 1,
@@ -237,6 +271,24 @@ class WorkflowManager:
                     else None
                 ),
             )
+            unsupported_actions = self._unsupported_corrective_actions(corrective_plan)
+            if unsupported_actions:
+                logger.error(
+                    "Corrective plan contains unsupported actions for retry policy: %s",
+                    unsupported_actions,
+                )
+                self._persist_corrective_plan_validation_failure(
+                    corrective_plan=corrective_plan,
+                    attempt=attempt + 1,
+                    validation_error=(
+                        "Corrective retry policy rejected plan due to unsupported actions: "
+                        f"{', '.join(unsupported_actions)}"
+                    ),
+                    offending_step=None,
+                    execution_result=execution_result.model_dump(mode="json"),
+                    verifier_verdict=verdict.model_dump(mode="json"),
+                )
+                return execution_result, verdict, current_plan, replanner_artifact, attempt > 0, attempt
             try:
                 self.validator.validate(corrective_plan)
             except PlanValidationError as validation_error:
@@ -305,6 +357,30 @@ class WorkflowManager:
         })
 
     @staticmethod
+    def _normalize_plan_for_validation(plan: TaskSpec) -> TaskSpec:
+        normalized = WorkflowManager._ensure_open_url_for_final_plan(plan)
+        payload = normalized.model_dump(mode="json")
+        changed = False
+        for step in payload.get("steps", []):
+            if step.get("action") == "observe_page":
+                save_as = step.get("save_as")
+                if not isinstance(save_as, str) or not save_as.strip():
+                    step["save_as"] = "page_snapshot"
+                    changed = True
+        if not changed:
+            return normalized
+        return normalized.model_validate(payload)
+
+    @classmethod
+    def _unsupported_corrective_actions(cls, corrective_plan: TaskSpec) -> list[str]:
+        unsupported = {
+            step.action
+            for step in corrective_plan.steps
+            if step.action not in cls.SAFE_CORRECTIVE_ACTIONS
+        }
+        return sorted(unsupported)
+
+    @staticmethod
     def _persist_final_plan_repair_failure(
         invalid_plan: dict,
         validation_error: str,
@@ -366,5 +442,25 @@ class WorkflowManager:
             "corrective_plan": corrective_plan.model_dump(mode="json"),
             "execution_result": execution_result,
             "verifier_verdict": verifier_verdict,
+        }
+        path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    @staticmethod
+    def _persist_corrective_plan_generation_failure(
+        *,
+        attempt: int,
+        generation_error: str,
+        execution_result: dict,
+        verifier_verdict: dict,
+        replanner_raw_response: str | None,
+    ) -> None:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S_%f")
+        path = RAW_LLM_DIR / f"corrective_plan_generation_failed_attempt{attempt}_{timestamp}.json"
+        payload = {
+            "attempt": attempt,
+            "generation_error": generation_error,
+            "execution_result": execution_result,
+            "verifier_verdict": verifier_verdict,
+            "replanner_raw_response": replanner_raw_response,
         }
         path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
