@@ -347,6 +347,15 @@ class PlanValidator:
             raise PlanValidationError("extract_value_near_anchor requires boolean 'strip_plus'")
         if not save_as:
             raise PlanValidationError("extract_value_near_anchor requires 'save_as'")
+        anchor_candidates = args.get("anchor_candidates")
+        if anchor_candidates is not None:
+            if not isinstance(anchor_candidates, list) or not all(
+                isinstance(item, str) and item.strip() for item in anchor_candidates
+            ):
+                raise PlanValidationError("extract_value_near_anchor requires non-empty string entries in 'anchor_candidates'")
+        anchor_matching_mode = args.get("anchor_matching_mode")
+        if anchor_matching_mode is not None and anchor_matching_mode not in {"auto", "exact", "contains"}:
+            raise PlanValidationError("extract_value_near_anchor supports anchor_matching_mode in {'auto','exact','contains'}")
 
     @staticmethod
     def _compile_pattern(pattern: str, *, action_name: str) -> re.Pattern[str]:

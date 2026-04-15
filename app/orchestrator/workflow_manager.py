@@ -232,7 +232,7 @@ class WorkflowManager:
         page_snapshot: PageSnapshot | None,
     ):
         current_plan = initial_plan
-        max_retries = min(3, max(0, int(current_plan.constraints.max_verification_retries)))
+        max_retries = self._effective_max_retries(current_plan.constraints.max_verification_retries)
         corrective_attempt_count = 0
         corrective_plan_valid_count = 0
         corrective_plan_invalid_count = 0
@@ -433,19 +433,34 @@ class WorkflowManager:
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:
         data = execution_result.extracted_data
-        left = data.get("section_a_data", data.get("source_a"))
-        right = data.get("section_b_data", data.get("source_b"))
+        if "section_a_data" not in data and "source_a" in data:
+            data["section_a_data"] = data.get("source_a")
+        if "section_b_data" not in data and "source_b" in data:
+            data["section_b_data"] = data.get("source_b")
+
+        left = data.get("section_a_data")
+        right = data.get("section_b_data")
         if left is None or right is None:
             return
+        left_keys = sorted(left.keys()) if isinstance(left, dict) else []
+        right_keys = sorted(right.keys()) if isinstance(right, dict) else []
         comparison = {
             "left_present": left is not None,
             "right_present": right is not None,
             "left_type": type(left).__name__,
             "right_type": type(right).__name__,
+            "left_keys": left_keys,
+            "right_keys": right_keys,
+            "shared_keys": sorted(set(left_keys).intersection(right_keys)),
             "exact_match": left == right,
         }
         data["structured_comparison"] = comparison
         data.setdefault("combined_result", comparison)
+
+    @staticmethod
+    def _effective_max_retries(raw_max_retries: int) -> int:
+        bounded = min(3, max(0, int(raw_max_retries)))
+        return max(1, bounded)
 
     @staticmethod
     def _build_page_snapshot_from_execution(execution_result):

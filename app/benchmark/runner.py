@@ -218,7 +218,9 @@ class BenchmarkRunner:
         positive_execution_success = sum(1 for item in positive if item.execution_status == "success")
         positive_verifier_accept = sum(1 for item in positive if item.verifier_verdict == "accept")
         negative_expected_reject = sum(
-            1 for item in negative if BenchmarkRunner._is_expected_negative_reject(item)
+            1
+            for item in negative
+            if BenchmarkRunner._classify_negative_outcome(item) == "expected_reject"
         )
         plan_validation_pass = sum(1 for item in results if BenchmarkRunner._plan_validation_passed(item))
         correction_attempted = [item for item in results if item.correction_attempt_count > 0]
@@ -269,9 +271,17 @@ class BenchmarkRunner:
 
     @staticmethod
     def _is_expected_negative_reject(item: BenchmarkScenarioResult) -> bool:
+        return BenchmarkRunner._classify_negative_outcome(item) == "expected_reject"
+
+    @staticmethod
+    def _classify_negative_outcome(item: BenchmarkScenarioResult) -> str:
         if item.execution_status != "success":
-            return False
-        return item.verifier_verdict == "reject"
+            return "technical_failure"
+        if item.verifier_verdict == "reject":
+            return "expected_reject"
+        if item.verifier_verdict == "accept":
+            return "unexpected_accept"
+        return "unexpected_uncertain"
 
     @staticmethod
     def _infer_failure_stage(
@@ -300,13 +310,20 @@ class BenchmarkRunner:
         parts = [scenario.goal.strip()]
         if scenario.task_family:
             parts.append(f"Task family: {scenario.task_family}.")
-        if scenario.page_language:
+        normalized_language = str(scenario.page_language or "").strip().lower()
+        if normalized_language and normalized_language != "auto":
             parts.append(f"Page language hint: {scenario.page_language}.")
+        else:
+            parts.append("Page language is unknown before navigation; detect from visible content first.")
         if scenario.target_page_hint:
             parts.append(f"Target page hint: {scenario.target_page_hint}.")
         if scenario.anchor_candidates:
             anchors = ", ".join(scenario.anchor_candidates[:5])
             parts.append(f"Anchor candidates: {anchors}.")
+            parts.append(
+                f"Anchor matching mode: {scenario.anchor_matching_mode}. "
+                "Use visible anchor candidates from the current page and avoid cross-language anchor mismatch."
+            )
         if scenario.expected_navigation:
             transitions = " -> ".join(scenario.expected_navigation)
             parts.append(f"Expected navigation flow: {transitions}.")

@@ -57,7 +57,11 @@ PLANNER_SYSTEM_PROMPT = """
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
    - navigation_then_extraction: сначала click (text/href/role+name), затем wait_for, затем extraction.
-   - multi_step_information_retrieval: используй несколько save_as (source_a/source_b) и финальный structured synthesis.
+   - multi_step_information_retrieval: используй формальный pipeline:
+     1) extract/save_as=section_a_data,
+     2) extract/save_as=section_b_data,
+     3) детерминированный comparison в combined_result/structured_comparison (без regex-group контрактов между шагами).
+18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -116,6 +120,8 @@ REPLANNER_SYSTEM_PROMPT = """
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
 13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй text/role+name/href_contains.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
+15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
+16) Для anchored extraction учитывай page_language + anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -143,4 +149,6 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
    - не повторяй invalid/duplicate corrective plans;
    - соблюдай disallowed_next_patterns (например broad_click_selector, missing_required_args).
 12) Для click после неудачи сужай target (text, href_contains, role+name, visible_only), не повторяй общий selector.
+13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
+14) Для multi_step compare corrective-план должен извлекать section_a_data и section_b_data отдельно; не полагаться на regex group reference как на контракт сравнения.
 """
