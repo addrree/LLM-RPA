@@ -307,7 +307,18 @@ def test_multi_step_comparison_is_augmented_deterministically():
     assert "structured_comparison" in execution.extracted_data
     assert execution.extracted_data["section_a_data"] == {"x": 1}
     assert execution.extracted_data["section_b_data"] == {"x": 2}
-    assert execution.extracted_data["combined_result"]["exact_match"] is False
+    assert execution.extracted_data["combined_result"]["comparison"]["exact_match"] is False
+    assert execution.extracted_data["structured_comparison"]["status"] == "different"
+
+
+def test_corrective_retry_is_disabled_for_browser_failures():
+    allowed = WorkflowManager._should_retry_corrective(
+        failure_type="browser_operation_failed",
+        prior_corrective_attempts=[],
+        max_retries=3,
+        corrective_attempt_count=0,
+    )
+    assert allowed is False
 
 
 def test_effective_max_retries_keeps_corrective_loop_active():

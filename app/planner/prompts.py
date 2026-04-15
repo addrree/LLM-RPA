@@ -62,6 +62,7 @@ PLANNER_SYSTEM_PROMPT = """
      2) extract/save_as=section_b_data,
      3) детерминированный comparison в combined_result/structured_comparison (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
+19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]) и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -122,6 +123,7 @@ REPLANNER_SYSTEM_PROMPT = """
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
 16) Для anchored extraction учитывай page_language + anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
+17) Для contact/support/email/phone задач предпочтительно value_type=email|phone и anchor_candidates вместо одного жесткого anchor_text.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -151,4 +153,5 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 12) Для click после неудачи сужай target (text, href_contains, role+name, visible_only), не повторяй общий selector.
 13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
 14) Для multi_step compare corrective-план должен извлекать section_a_data и section_b_data отдельно; не полагаться на regex group reference как на контракт сравнения.
+15) Коррективный replanning не используй для transient browser timeout/click/wait ошибок: это покрывается executor-level retries.
 """

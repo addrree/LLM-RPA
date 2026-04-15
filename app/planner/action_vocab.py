@@ -22,7 +22,6 @@ CANONICAL_ACTIONS = {
 # Safe 1:1 aliases only (no semantic remapping).
 ACTION_ALIASES = {
     "click_element": "click",
-    "extract_value": "extract_value_near_anchor",
 }
 
 

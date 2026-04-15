@@ -390,6 +390,20 @@ class ActionHandlers:
             group_index=group_index,
         )
 
+        strict_context_disabled = False
+        if best_match is None and (required_left_context or required_right_context):
+            strict_context_disabled = True
+            best_match = self._select_best_value_near_anchor(
+                candidates=candidates,
+                value_pattern=value_pattern,
+                search_direction=search_direction,
+                required_right_context=None,
+                required_left_context=None,
+                max_distance_chars=max_distance_chars,
+                flags_value=flags_value,
+                group_index=group_index,
+            )
+
         if best_match is None and same_block_only:
             fallback_used = True
             relaxed_candidates = await self._collect_anchor_candidates(
@@ -410,6 +424,18 @@ class ActionHandlers:
                 flags_value=flags_value,
                 group_index=group_index,
             )
+            if best_match is None and (required_left_context or required_right_context):
+                strict_context_disabled = True
+                best_match = self._select_best_value_near_anchor(
+                    candidates=relaxed_candidates,
+                    value_pattern=value_pattern,
+                    search_direction=search_direction,
+                    required_right_context=None,
+                    required_left_context=None,
+                    max_distance_chars=max_distance_chars,
+                    flags_value=flags_value,
+                    group_index=group_index,
+                )
 
         if best_match is None:
             raise ValueError(
@@ -430,7 +456,8 @@ class ActionHandlers:
         args["_executor_note"] = (
             f"extract_value_near_anchor matched near anchor={anchor_text!r}; "
             f"raw_match={extracted_value!r}; distance={best_match['distance']}; "
-            f"source={best_match['source']}; fallback_used={fallback_used}"
+            f"source={best_match['source']}; fallback_used={fallback_used}; "
+            f"strict_context_disabled={strict_context_disabled}"
         )
         return result
 
@@ -527,6 +554,10 @@ class ActionHandlers:
             return r"([0-9][0-9\s,\.\u00A0\u202F\+]*)"
         if value_type in {"float", "rating"}:
             return r"([0-9]+(?:[.,][0-9]+)?)"
+        if value_type == "email":
+            return r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})"
+        if value_type == "phone":
+            return r"(\+?\d[\d\-\(\)\s]{6,}\d)"
         return None
 
     async def _load_source_text(self, page, runtime_state=None) -> str:
@@ -573,6 +604,7 @@ class ActionHandlers:
             """
             ({ anchorText, direction, sameBlockOnly, windowChars }) => {
               const normalizeText = (text) => (text || "").replace(/\\s+/g, " ").trim();
+              const sectionSelector = "section, article, main, aside, footer, header, nav, form, div, li, tr, td, th, dl";
               const reasonableSelector = "li, tr, td, th, p, dt, dd, article, section, div, span, a";
               const collect = [];
               const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
@@ -585,7 +617,7 @@ class ActionHandlers:
                 if (!host) continue;
                 let container = host;
                 if (sameBlockOnly) {
-                  container = host.closest(reasonableSelector) || host.parentElement || host;
+                  container = host.closest(sectionSelector) || host.closest(reasonableSelector) || host.parentElement || host;
                 } else {
                   container = document.body;
                 }
@@ -607,6 +639,7 @@ class ActionHandlers:
                 }
                 collect.push({
                   source: sameBlockOnly ? "dom_same_block" : "dom_page",
+                  block_selector: container.tagName ? container.tagName.toLowerCase() : "unknown",
                   full_text: text,
                   anchor_idx: anchorIdx,
                   window_start: start,

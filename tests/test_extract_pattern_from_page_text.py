@@ -239,3 +239,30 @@ def test_extract_items_field_rule_pattern_inside_selector_text():
         )
     )
     assert value == 2115000
+
+
+def test_extract_value_near_anchor_relaxes_overly_strict_context():
+    observed_text = "Contact support at support@example.org for urgent issues"
+    page = _FakePage(
+        observed_text,
+        evaluate_payload=[
+            {
+                "source": "dom_same_block",
+                "window_text": observed_text,
+                "anchor_idx_in_window": observed_text.index("Contact"),
+            }
+        ],
+    )
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_value_near_anchor(
+            page,
+            {
+                "anchor_text": "Contact",
+                "value_type": "email",
+                "required_right_context": "@@@",  # intentionally impossible strict context
+            },
+            runtime_state={},
+        )
+    )
+    assert value == "support@example.org"
