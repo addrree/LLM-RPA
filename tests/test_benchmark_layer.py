@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, BenchmarkSelection
-from app.benchmark.scenario_loader import load_scenario_suite
+from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
 from app.planner.action_vocab import normalize_plan_action_aliases
 
 
@@ -188,3 +188,20 @@ def test_smoke_suite_contains_three_core_categories():
         "anchored_value_extraction",
         "repeated_structured_items",
     }
+
+
+def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
+    scenario = BenchmarkScenario.model_validate(
+        {
+            "scenario_id": "s",
+            "goal": "Open site and extract value",
+            "start_url": "https://example.com",
+            "category": "single_value_extraction",
+            "description": "d",
+            "expected_output_type": "scalar",
+            "page_language": "auto",
+        }
+    )
+    goal = BenchmarkRunner._build_grounded_goal(scenario)
+    assert "Page language hint:" not in goal
+    assert "Page language is unknown before navigation" in goal
