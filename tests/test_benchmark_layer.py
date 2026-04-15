@@ -158,7 +158,7 @@ def test_action_alias_normalization_is_safe_and_explicit():
     payload = {
         "steps": [
             {"action": "click_element", "args": {"selector": "#go"}},
-            {"action": "extract_value", "args": {"anchor_text": "Users", "value_type": "number"}},
+            {"action": "extract_value_near_anchor", "args": {"anchor_text": "Users", "value_type": "number"}},
             {"action": "finish", "args": {}},
         ]
     }
@@ -166,6 +166,22 @@ def test_action_alias_normalization_is_safe_and_explicit():
     assert oov_detected is True
     assert normalized["steps"][0]["action"] == "click"
     assert normalized["steps"][1]["action"] == "extract_value_near_anchor"
+
+
+def test_negative_outcome_classification_respects_technical_failure_flag():
+    technical = BenchmarkScenarioResult(
+        scenario_id="neg_browser",
+        category="negative_or_ambiguous_case",
+        should_succeed=False,
+        execution_status="success",
+        verifier_verdict="reject",
+        runtime_sec=1.0,
+        corrective_retry_used=False,
+        correction_attempt_count=0,
+        technical_failure=True,
+        export_success=True,
+    )
+    assert BenchmarkRunner._classify_negative_outcome(technical) == "technical_failure"
 
 
 def test_failure_stage_inference_for_negative_semantic_reject():

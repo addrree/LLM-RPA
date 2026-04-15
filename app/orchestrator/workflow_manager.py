@@ -41,7 +41,6 @@ class WorkflowManager:
         "verification_reject",
         "missing_required_field",
         "schema_mismatch",
-        "browser_operation_failed",
     }
 
     def __init__(
@@ -444,6 +443,17 @@ class WorkflowManager:
             return
         left_keys = sorted(left.keys()) if isinstance(left, dict) else []
         right_keys = sorted(right.keys()) if isinstance(right, dict) else []
+        differing_keys: list[str] = []
+        differing_values: dict[str, dict] = {}
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(set(left.keys()).union(right.keys())):
+                if left.get(key) != right.get(key):
+                    differing_keys.append(str(key))
+                    differing_values[str(key)] = {
+                        "section_a": left.get(key),
+                        "section_b": right.get(key),
+                    }
+
         comparison = {
             "left_present": left is not None,
             "right_present": right is not None,
@@ -453,9 +463,16 @@ class WorkflowManager:
             "right_keys": right_keys,
             "shared_keys": sorted(set(left_keys).intersection(right_keys)),
             "exact_match": left == right,
+            "differing_keys": differing_keys,
+            "differing_values": differing_values,
+            "status": "equal" if left == right else "different",
         }
         data["structured_comparison"] = comparison
-        data.setdefault("combined_result", comparison)
+        data["combined_result"] = {
+            "section_a_data": left,
+            "section_b_data": right,
+            "comparison": comparison,
+        }
 
     @staticmethod
     def _effective_max_retries(raw_max_retries: int) -> int:

@@ -37,6 +37,10 @@ class BenchmarkScenarioResult(BaseModel):
     export_success: bool
     final_url: str | None = None
     error_message: str | None = None
+    execution_failure_type: str | None = None
+    technical_failure: bool = False
+    negative_outcome: str | None = None
+    failure_bucket: str | None = None
     notes: str = ""
 
 
@@ -108,6 +112,8 @@ class BenchmarkRunner:
         export_success = False
         final_url = None
         error_message = None
+        execution_failure_type = None
+        technical_failure = False
 
         try:
             result = await workflow.run(self._build_grounded_goal(scenario))
@@ -124,6 +130,8 @@ class BenchmarkRunner:
             action_oov_detected = bool(result.get("action_oov_detected", False))
             final_url = execution.final_url
             error_message = execution.error_message
+            execution_failure_type = execution.failure_type
+            technical_failure = bool(execution.technical_failure)
 
             save_artifacts(result, run_id=run_id)
             try:
@@ -157,7 +165,7 @@ class BenchmarkRunner:
                 failure_stage = "execution"
 
         runtime_sec = round(perf_counter() - started, 3)
-        return BenchmarkScenarioResult(
+        scenario_result = BenchmarkScenarioResult(
             scenario_id=scenario.scenario_id,
             category=scenario.category,
             should_succeed=scenario.should_succeed,
@@ -175,8 +183,17 @@ class BenchmarkRunner:
             export_success=export_success,
             final_url=final_url,
             error_message=error_message,
+            execution_failure_type=execution_failure_type,
+            technical_failure=technical_failure,
             notes=scenario.notes,
         )
+        scenario_result.negative_outcome = (
+            self._classify_negative_outcome(scenario_result)
+            if not scenario.should_succeed
+            else None
+        )
+        scenario_result.failure_bucket = self._classify_failure_bucket(scenario_result)
+        return scenario_result
 
     @staticmethod
     def _filter_scenarios(
@@ -275,13 +292,29 @@ class BenchmarkRunner:
 
     @staticmethod
     def _classify_negative_outcome(item: BenchmarkScenarioResult) -> str:
-        if item.execution_status != "success":
+        if item.execution_status != "success" or item.technical_failure:
             return "technical_failure"
         if item.verifier_verdict == "reject":
             return "expected_reject"
         if item.verifier_verdict == "accept":
             return "unexpected_accept"
         return "unexpected_uncertain"
+
+    @staticmethod
+    def _classify_failure_bucket(item: BenchmarkScenarioResult) -> str:
+        if item.failure_stage is None:
+            return "none"
+        if item.failure_stage in {"planning", "validation"}:
+            return "plan_failure"
+        if item.failure_stage == "execution":
+            if item.technical_failure or str(item.execution_failure_type).startswith("browser_"):
+                return "browser_flaky_failure"
+            return "execution_failure"
+        if item.failure_stage == "verification":
+            return "semantic_failure"
+        if item.failure_stage == "export":
+            return "export_failure"
+        return "unknown_failure"
 
     @staticmethod
     def _infer_failure_stage(
@@ -361,6 +394,10 @@ def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:
                 "export_success",
                 "final_url",
                 "error_message",
+                "execution_failure_type",
+                "technical_failure",
+                "negative_outcome",
+                "failure_bucket",
                 "notes",
             ],
         )

@@ -292,8 +292,15 @@ class PlanValidator:
 
     @staticmethod
     def _validate_extract_value_near_anchor(args: dict, save_as: str | None) -> None:
-        if "anchor_text" not in args or not str(args.get("anchor_text", "")).strip():
-            raise PlanValidationError("extract_value_near_anchor requires non-empty 'anchor_text'")
+        has_anchor_text = bool(str(args.get("anchor_text", "")).strip())
+        anchor_candidates = args.get("anchor_candidates")
+        has_anchor_candidates = isinstance(anchor_candidates, list) and any(
+            isinstance(item, str) and item.strip() for item in anchor_candidates
+        )
+        if not has_anchor_text and not has_anchor_candidates:
+            raise PlanValidationError(
+                "extract_value_near_anchor requires non-empty 'anchor_text' or non-empty 'anchor_candidates'"
+            )
         has_pattern = bool(str(args.get("value_pattern", "")).strip())
         has_type = bool(str(args.get("value_type", "")).strip())
         if not has_pattern and not has_type:
@@ -304,9 +311,12 @@ class PlanValidator:
             "number",
             "float",
             "rating",
+            "email",
+            "phone",
         }:
             raise PlanValidationError(
-                "extract_value_near_anchor supports value_type in {'article_count','count','number','float','rating'}"
+                "extract_value_near_anchor supports value_type in "
+                "{'article_count','count','number','float','rating','email','phone'}"
             )
         direction = args.get("search_direction", "after")
         if direction not in {"after", "before", "around"}:
@@ -347,7 +357,6 @@ class PlanValidator:
             raise PlanValidationError("extract_value_near_anchor requires boolean 'strip_plus'")
         if not save_as:
             raise PlanValidationError("extract_value_near_anchor requires 'save_as'")
-        anchor_candidates = args.get("anchor_candidates")
         if anchor_candidates is not None:
             if not isinstance(anchor_candidates, list) or not all(
                 isinstance(item, str) and item.strip() for item in anchor_candidates
