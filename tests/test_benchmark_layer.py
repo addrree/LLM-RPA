@@ -19,6 +19,8 @@ def test_scenario_suite_contains_required_categories():
     assert all(scenario.start_url for scenario in suite.scenarios)
     assert all(isinstance(scenario.preconditions, list) for scenario in suite.scenarios)
     assert all(isinstance(scenario.page_expectations, list) for scenario in suite.scenarios)
+    assert all(scenario.task_family for scenario in suite.scenarios)
+    assert all(isinstance(scenario.anchor_candidates, list) for scenario in suite.scenarios)
 
 
 def test_benchmark_selection_filters_by_id_and_category():
@@ -81,6 +83,35 @@ def test_metrics_are_computed_from_scenario_results():
     assert metrics.corrective_plan_invalid_count == 0
     assert metrics.export_success_rate == 0.5
     assert metrics.mean_runtime_sec == 1.8
+
+
+def test_negative_expected_reject_ignores_technical_failures():
+    results = [
+        BenchmarkScenarioResult(
+            scenario_id="neg_ok",
+            category="negative_or_ambiguous_case",
+            should_succeed=False,
+            execution_status="success",
+            verifier_verdict="reject",
+            runtime_sec=1.0,
+            corrective_retry_used=False,
+            correction_attempt_count=0,
+            export_success=True,
+        ),
+        BenchmarkScenarioResult(
+            scenario_id="neg_tech",
+            category="negative_or_ambiguous_case",
+            should_succeed=False,
+            execution_status="failed",
+            verifier_verdict="reject",
+            runtime_sec=1.0,
+            corrective_retry_used=False,
+            correction_attempt_count=0,
+            export_success=False,
+        ),
+    ]
+    metrics = BenchmarkRunner._compute_metrics(results)
+    assert metrics.negative_expected_reject_rate == 0.5
 
 
 def test_action_alias_normalization_is_safe_and_explicit():
