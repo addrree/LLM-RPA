@@ -37,6 +37,12 @@ class WorkflowManager:
         "extract_value_near_anchor",
         "finish",
     }
+    RECOVERABLE_FAILURE_TYPES = {
+        "verification_reject",
+        "missing_required_field",
+        "schema_mismatch",
+        "browser_operation_failed",
+    }
 
     def __init__(
         self,
@@ -226,7 +232,7 @@ class WorkflowManager:
         page_snapshot: PageSnapshot | None,
     ):
         current_plan = initial_plan
-        max_retries = max(0, int(current_plan.constraints.max_verification_retries))
+        max_retries = min(3, max(0, int(current_plan.constraints.max_verification_retries)))
         corrective_attempt_count = 0
         corrective_plan_valid_count = 0
         corrective_plan_invalid_count = 0
@@ -236,6 +242,7 @@ class WorkflowManager:
 
         while True:
             execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
+            self._augment_multi_step_comparison(execution_result)
             verdict = self.verifier.verify(current_plan, execution_result)
             if verdict.verdict == "accept":
                 return (
@@ -261,6 +268,24 @@ class WorkflowManager:
                     corrective_plan_invalid_count,
                 )
 
+            failure_context = self._build_failure_context(execution_result=execution_result, verdict=verdict)
+            if not self._should_retry_corrective(
+                failure_type=failure_context["failure_type"],
+                prior_corrective_attempts=prior_corrective_attempts,
+                max_retries=max_retries,
+                corrective_attempt_count=corrective_attempt_count,
+            ):
+                return (
+                    execution_result,
+                    verdict,
+                    current_plan,
+                    replanner_artifact,
+                    corrective_attempt_count > 0,
+                    corrective_attempt_count,
+                    corrective_plan_valid_count,
+                    corrective_plan_invalid_count,
+                )
+
             corrective_attempt_count += 1
             effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
             try:
@@ -271,6 +296,11 @@ class WorkflowManager:
                     execution_result=execution_result.model_dump(mode="json"),
                     verifier_verdict=verdict.model_dump(mode="json"),
                     prior_corrective_attempts=prior_corrective_attempts,
+                    failure_type=failure_context["failure_type"],
+                    failed_action=failure_context["failed_action"],
+                    failed_args=failure_context["failed_args"],
+                    verifier_issues=failure_context["verifier_issues"],
+                    disallowed_next_patterns=self._build_disallowed_patterns(prior_corrective_attempts),
                 )
             except Exception as corrective_error:  # noqa: BLE001
                 logger.error("Corrective plan generation failed: %s", corrective_error)
@@ -291,6 +321,7 @@ class WorkflowManager:
                         "attempt": corrective_attempt_count,
                         "status": "generation_failed",
                         "error": str(corrective_error),
+                        "failure_type": failure_context["failure_type"],
                     }
                 )
                 continue
@@ -328,6 +359,7 @@ class WorkflowManager:
                         "attempt": corrective_attempt_count,
                         "status": "invalid",
                         "error": error_message,
+                        "failure_type": failure_context["failure_type"],
                     }
                 )
                 continue
@@ -349,6 +381,7 @@ class WorkflowManager:
                         "attempt": corrective_attempt_count,
                         "status": "invalid",
                         "error": duplicate_error,
+                        "failure_type": failure_context["failure_type"],
                     }
                 )
                 continue
@@ -379,6 +412,7 @@ class WorkflowManager:
                         "attempt": corrective_attempt_count,
                         "status": "invalid",
                         "error": str(validation_error),
+                        "failure_type": failure_context["failure_type"],
                     }
                 )
                 continue
@@ -390,10 +424,28 @@ class WorkflowManager:
                     "attempt": corrective_attempt_count,
                     "status": "valid",
                     "plan_signature": signature,
+                    "failure_type": failure_context["failure_type"],
                 }
             )
             current_plan = corrective_plan
             replanner_artifact = self.replanner.last_artifact
+
+    @staticmethod
+    def _augment_multi_step_comparison(execution_result) -> None:
+        data = execution_result.extracted_data
+        left = data.get("section_a_data", data.get("source_a"))
+        right = data.get("section_b_data", data.get("source_b"))
+        if left is None or right is None:
+            return
+        comparison = {
+            "left_present": left is not None,
+            "right_present": right is not None,
+            "left_type": type(left).__name__,
+            "right_type": type(right).__name__,
+            "exact_match": left == right,
+        }
+        data["structured_comparison"] = comparison
+        data.setdefault("combined_result", comparison)
 
     @staticmethod
     def _build_page_snapshot_from_execution(execution_result):
@@ -406,6 +458,62 @@ class WorkflowManager:
                 "timestamp": datetime.now(UTC).isoformat(),
             }
         )
+
+    @classmethod
+    def _build_failure_context(cls, *, execution_result, verdict) -> dict:
+        failure_type = execution_result.failure_type or "verification_reject"
+        if verdict.verdict == "reject" and execution_result.status == "success":
+            failure_type = cls._classify_verifier_failure(verdict.issues)
+        return {
+            "failure_type": failure_type,
+            "failed_action": execution_result.failed_action,
+            "failed_args": execution_result.failed_args or {},
+            "verifier_issues": list(verdict.issues or []),
+        }
+
+    @classmethod
+    def _classify_verifier_failure(cls, issues: list[str]) -> str:
+        text = " ".join(issues).lower()
+        if "required" in text or "missing" in text:
+            return "missing_required_field"
+        if "schema" in text or "format" in text or "structure" in text:
+            return "schema_mismatch"
+        return "verification_reject"
+
+    @classmethod
+    def _should_retry_corrective(
+        cls,
+        *,
+        failure_type: str,
+        prior_corrective_attempts: list[dict],
+        max_retries: int,
+        corrective_attempt_count: int,
+    ) -> bool:
+        if corrective_attempt_count >= max_retries:
+            return False
+        if failure_type not in cls.RECOVERABLE_FAILURE_TYPES:
+            return False
+        previous_failure_types = [
+            attempt.get("failure_type")
+            for attempt in prior_corrective_attempts
+            if attempt.get("failure_type")
+        ]
+        if len(previous_failure_types) >= 2 and previous_failure_types[-1] == failure_type == previous_failure_types[-2]:
+            return False
+        return True
+
+    @staticmethod
+    def _build_disallowed_patterns(prior_corrective_attempts: list[dict]) -> list[str]:
+        disallowed: list[str] = []
+        for attempt in prior_corrective_attempts:
+            error = str(attempt.get("error", "")).lower()
+            if "too broad" in error and "click" in error:
+                disallowed.append("broad_click_selector")
+            if "missing required args" in error:
+                disallowed.append("missing_required_args")
+            if "duplicate" in error:
+                disallowed.append("duplicate_plan_signature")
+        return sorted(set(disallowed))
 
     @staticmethod
     def _ensure_open_url_for_final_plan(plan: TaskSpec) -> TaskSpec:

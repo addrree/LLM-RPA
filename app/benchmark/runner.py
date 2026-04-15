@@ -110,7 +110,7 @@ class BenchmarkRunner:
         error_message = None
 
         try:
-            result = await workflow.run(scenario.goal)
+            result = await workflow.run(self._build_grounded_goal(scenario))
             execution = result["execution_result"]
             verdict = result["verdict"]
             execution_status = execution.status
@@ -218,7 +218,7 @@ class BenchmarkRunner:
         positive_execution_success = sum(1 for item in positive if item.execution_status == "success")
         positive_verifier_accept = sum(1 for item in positive if item.verifier_verdict == "accept")
         negative_expected_reject = sum(
-            1 for item in negative if item.verifier_verdict == "reject" and item.failure_stage in {None, "verification"}
+            1 for item in negative if BenchmarkRunner._is_expected_negative_reject(item)
         )
         plan_validation_pass = sum(1 for item in results if BenchmarkRunner._plan_validation_passed(item))
         correction_attempted = [item for item in results if item.correction_attempt_count > 0]
@@ -265,7 +265,13 @@ class BenchmarkRunner:
     def _is_expected_outcome(item: BenchmarkScenarioResult) -> bool:
         if item.should_succeed:
             return item.execution_status == "success" and item.verifier_verdict == "accept"
-        return item.verifier_verdict == "reject" and item.failure_stage in {None, "verification"}
+        return BenchmarkRunner._is_expected_negative_reject(item)
+
+    @staticmethod
+    def _is_expected_negative_reject(item: BenchmarkScenarioResult) -> bool:
+        if item.execution_status != "success":
+            return False
+        return item.verifier_verdict == "reject"
 
     @staticmethod
     def _infer_failure_stage(
@@ -288,6 +294,31 @@ class BenchmarkRunner:
         if not export_success:
             return "export"
         return None
+
+    @staticmethod
+    def _build_grounded_goal(scenario: BenchmarkScenario) -> str:
+        parts = [scenario.goal.strip()]
+        if scenario.task_family:
+            parts.append(f"Task family: {scenario.task_family}.")
+        page_language = str(scenario.page_language or "").strip().lower()
+        if page_language and page_language != "auto":
+            parts.append(f"Page language hint: {scenario.page_language}.")
+        else:
+            parts.append(
+                "Page language is unknown before navigation. Detect visible page language first and align anchors/locators to that language."
+            )
+        if scenario.target_page_hint:
+            parts.append(f"Target page hint: {scenario.target_page_hint}.")
+        if scenario.anchor_candidates:
+            anchors = ", ".join(scenario.anchor_candidates[:5])
+            parts.append(f"Anchor candidates: {anchors}.")
+        if scenario.expected_navigation:
+            transitions = " -> ".join(scenario.expected_navigation)
+            parts.append(f"Expected navigation flow: {transitions}.")
+        if scenario.page_expectations:
+            expectations = "; ".join(scenario.page_expectations[:3])
+            parts.append(f"Page expectations: {expectations}.")
+        return "\n".join(parts)
 
 
 def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:

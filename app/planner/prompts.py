@@ -52,6 +52,13 @@ PLANNER_SYSTEM_PROMPT = """
 14. Используй ТОЛЬКО канонические action names из схемы. Запрещены синонимы вроде click_element или extract_value.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
 16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
+17. Task-family routing policy:
+   - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
+   - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
+   - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
+   - navigation_then_extraction: сначала click (text/href/role+name), затем wait_for, затем extraction.
+   - multi_step_information_retrieval: используй несколько save_as (source_a/source_b) и финальный structured synthesis.
+18. Если язык страницы заранее неизвестен, сначала ориентируйся на видимый текст страницы и выбирай anchor/click target на языке фактического UI.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -109,6 +116,8 @@ REPLANNER_SYSTEM_PROMPT = """
 11) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
 13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй text/role+name/href_contains.
+14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
+15) Если goal сообщает, что язык страницы неизвестен, извлекай/кликай по фактическим видимым якорям текущего языка страницы, а не по предположениям.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -130,4 +139,10 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 8) Учитывай prior corrective attempts и НЕ повторяй уже проваленные решения (тот же action+args, тот же regex/group mismatch, тот же широкий click locator).
 9) Запрещено генерировать шаги с пустыми обязательными аргументами.
 10) Для single_value_title_or_header не применяй extract_value_near_anchor, если нет явного anchor.
+11) corrective retries policy-driven:
+   - учитывай failure_type, failed_action, failed_args, verifier_issues;
+   - retry только для recoverable ошибок;
+   - не повторяй invalid/duplicate corrective plans;
+   - соблюдай disallowed_next_patterns (например broad_click_selector, missing_required_args).
+12) Для click после неудачи сужай target (text, href_contains, role+name, visible_only), не повторяй общий selector.
 """

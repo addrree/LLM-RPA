@@ -281,3 +281,28 @@ def test_workflow_continues_after_invalid_corrective_and_recovers():
     assert result["correction_attempt_count"] == 1
     assert result["corrective_plan_invalid_count"] == 1
     assert result["corrective_plan_valid_count"] == 0
+
+
+def test_corrective_retry_stops_on_repeated_failure_class():
+    attempts = [
+        {"attempt": 1, "failure_type": "missing_required_field"},
+        {"attempt": 2, "failure_type": "missing_required_field"},
+    ]
+    allowed = WorkflowManager._should_retry_corrective(
+        failure_type="missing_required_field",
+        prior_corrective_attempts=attempts,
+        max_retries=3,
+        corrective_attempt_count=2,
+    )
+    assert allowed is False
+
+
+def test_multi_step_comparison_is_augmented_deterministically():
+    execution = ExecutionResult(
+        status="success",
+        extracted_data={"source_a": {"x": 1}, "source_b": {"x": 2}},
+        logs=[],
+    )
+    WorkflowManager._augment_multi_step_comparison(execution)
+    assert "structured_comparison" in execution.extracted_data
+    assert execution.extracted_data["combined_result"]["exact_match"] is False

@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, BenchmarkSelection
-from app.benchmark.scenario_loader import load_scenario_suite
+from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
 from app.planner.action_vocab import normalize_plan_action_aliases
 
 
@@ -19,6 +19,8 @@ def test_scenario_suite_contains_required_categories():
     assert all(scenario.start_url for scenario in suite.scenarios)
     assert all(isinstance(scenario.preconditions, list) for scenario in suite.scenarios)
     assert all(isinstance(scenario.page_expectations, list) for scenario in suite.scenarios)
+    assert all(scenario.task_family for scenario in suite.scenarios)
+    assert all(isinstance(scenario.anchor_candidates, list) for scenario in suite.scenarios)
 
 
 def test_benchmark_selection_filters_by_id_and_category():
@@ -81,6 +83,35 @@ def test_metrics_are_computed_from_scenario_results():
     assert metrics.corrective_plan_invalid_count == 0
     assert metrics.export_success_rate == 0.5
     assert metrics.mean_runtime_sec == 1.8
+
+
+def test_negative_expected_reject_ignores_technical_failures():
+    results = [
+        BenchmarkScenarioResult(
+            scenario_id="neg_ok",
+            category="negative_or_ambiguous_case",
+            should_succeed=False,
+            execution_status="success",
+            verifier_verdict="reject",
+            runtime_sec=1.0,
+            corrective_retry_used=False,
+            correction_attempt_count=0,
+            export_success=True,
+        ),
+        BenchmarkScenarioResult(
+            scenario_id="neg_tech",
+            category="negative_or_ambiguous_case",
+            should_succeed=False,
+            execution_status="failed",
+            verifier_verdict="reject",
+            runtime_sec=1.0,
+            corrective_retry_used=False,
+            correction_attempt_count=0,
+            export_success=False,
+        ),
+    ]
+    metrics = BenchmarkRunner._compute_metrics(results)
+    assert metrics.negative_expected_reject_rate == 0.5
 
 
 def test_action_alias_normalization_is_safe_and_explicit():
@@ -157,3 +188,20 @@ def test_smoke_suite_contains_three_core_categories():
         "anchored_value_extraction",
         "repeated_structured_items",
     }
+
+
+def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
+    scenario = BenchmarkScenario.model_validate(
+        {
+            "scenario_id": "s",
+            "goal": "Open site and extract value",
+            "start_url": "https://example.com",
+            "category": "single_value_extraction",
+            "description": "d",
+            "expected_output_type": "scalar",
+            "page_language": "auto",
+        }
+    )
+    goal = BenchmarkRunner._build_grounded_goal(scenario)
+    assert "Page language hint:" not in goal
+    assert "Page language is unknown before navigation" in goal

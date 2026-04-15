@@ -7,96 +7,175 @@
       "goal": "Open https://www.python.org/ and extract one primary page value (title or main heading) as a single scalar field.",
       "start_url": "https://www.python.org/",
       "target_page_hint": "Python homepage hero/header",
-      "preconditions": ["Landing page is publicly accessible without authentication."],
-      "page_expectations": ["A visible main heading or unambiguous primary title exists."],
+      "preconditions": [
+        "Landing page is publicly accessible without authentication."
+      ],
+      "page_expectations": [
+        "A visible main heading or unambiguous primary title exists."
+      ],
       "category": "single_value_extraction",
       "description": "Checks if planner+executor can extract a single obvious value without overfitting to one domain.",
       "expected_output_type": "scalar",
-      "required_top_level_fields": ["value"],
+      "required_top_level_fields": [
+        "value"
+      ],
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": true,
-      "notes": "Use a stable public site; avoid login-walled pages."
+      "notes": "Use a stable public site; avoid login-walled pages.",
+      "task_family": "single_value_extraction",
+      "page_language": "auto",
+      "anchor_candidates": [],
+      "expected_navigation": []
     },
     {
       "scenario_id": "anchored_support_email_or_phone",
       "goal": "Open https://pypi.org/help/ and extract the value that appears near a textual anchor such as 'Email' or 'Contact'.",
       "start_url": "https://pypi.org/help/",
       "target_page_hint": "PyPI Help / contact-related sections",
-      "preconditions": ["Page contains support/contact-related prose."],
-      "page_expectations": ["At least one contact-like anchor is present near an extractable value."],
+      "preconditions": [
+        "Page contains support/contact-related prose."
+      ],
+      "page_expectations": [
+        "At least one contact-like anchor is present near an extractable value."
+      ],
       "category": "anchored_value_extraction",
       "description": "Checks anchored extraction instead of global search.",
       "expected_output_type": "object",
-      "required_top_level_fields": ["anchor", "value"],
+      "required_top_level_fields": [
+        "anchor",
+        "value"
+      ],
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": true,
-      "notes": "Anchor/value may appear in footer or contact section."
+      "notes": "Anchor/value may appear in footer or contact section.",
+      "task_family": "anchored_value_extraction",
+      "page_language": "auto",
+      "anchor_candidates": [
+        "Email",
+        "Contact",
+        "Support"
+      ],
+      "expected_navigation": []
     },
     {
       "scenario_id": "repeated_listing_cards",
       "goal": "Open https://www.python.org/downloads/ and extract a repeated structured list of at least 3 release items with multiple fields per item.",
       "start_url": "https://www.python.org/downloads/",
       "target_page_hint": "Python downloads release list",
-      "preconditions": ["Listing page exposes repeated release blocks/cards."],
-      "page_expectations": ["At least 3 repeated items are available with name and detail/date-like fields."],
+      "preconditions": [
+        "Listing page exposes repeated release blocks/cards."
+      ],
+      "page_expectations": [
+        "At least 3 repeated items are available with name and detail/date-like fields."
+      ],
       "category": "repeated_structured_items",
       "description": "Checks extraction of list[object] rather than one-off scalar.",
       "expected_output_type": "list",
-      "required_top_level_fields": ["items"],
+      "required_top_level_fields": [
+        "items"
+      ],
       "expected_min_items": 3,
-      "expected_item_fields": ["name", "detail"],
+      "expected_item_fields": [
+        "name",
+        "detail"
+      ],
       "should_succeed": true,
-      "notes": "Suitable targets include docs indexes, directories, catalogs, or public datasets."
+      "notes": "Suitable targets include docs indexes, directories, catalogs, or public datasets.",
+      "task_family": "repeated_structured_items",
+      "page_language": "auto",
+      "anchor_candidates": [],
+      "expected_navigation": []
     },
     {
       "scenario_id": "navigate_then_extract_policy_or_pricing",
       "goal": "Open https://docs.python.org/3/ homepage, navigate via one click to another section page, then extract a key value from the new page.",
       "start_url": "https://docs.python.org/3/",
       "target_page_hint": "Python documentation subsection reached via one internal click",
-      "preconditions": ["At least one stable internal nav link is visible on landing page."],
-      "page_expectations": ["Final URL differs from start URL and target page has an extractable key value."],
+      "preconditions": [
+        "At least one stable internal nav link is visible on landing page."
+      ],
+      "page_expectations": [
+        "Final URL differs from start URL and target page has an extractable key value."
+      ],
       "category": "navigation_then_extraction",
       "description": "Checks cross-page execution and final-page extraction.",
       "expected_output_type": "object",
-      "required_top_level_fields": ["source_page", "target_page", "value"],
+      "required_top_level_fields": [
+        "source_page",
+        "target_page",
+        "value"
+      ],
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": true,
-      "notes": "Final URL should differ from initial URL in normal successful runs."
+      "notes": "Final URL should differ from initial URL in normal successful runs.",
+      "task_family": "navigation_then_extraction",
+      "page_language": "auto",
+      "anchor_candidates": [],
+      "expected_navigation": [
+        "start_page",
+        "internal_section_page"
+      ]
     },
     {
       "scenario_id": "multi_step_compare_two_sections",
       "goal": "On https://www.python.org/, retrieve information from two different sections or pages and produce one merged structured output.",
       "start_url": "https://www.python.org/",
       "target_page_hint": "Two distinct content areas or one additional page plus source page",
-      "preconditions": ["Both sections are public and reachable without login."],
-      "page_expectations": ["Scenario can gather source_a and source_b before composing combined_result."],
+      "preconditions": [
+        "Both sections are public and reachable without login."
+      ],
+      "page_expectations": [
+        "Scenario can gather source_a and source_b before composing combined_result."
+      ],
       "category": "multi_step_information_retrieval",
       "description": "Checks planner ability to combine multi-hop retrieval into one result schema.",
       "expected_output_type": "object",
-      "required_top_level_fields": ["source_a", "source_b", "combined_result"],
+      "required_top_level_fields": [
+        "source_a",
+        "source_b",
+        "combined_result"
+      ],
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": true,
-      "notes": "Use deterministic sections when possible."
+      "notes": "Use deterministic sections when possible.",
+      "task_family": "multi_step_information_retrieval",
+      "page_language": "auto",
+      "anchor_candidates": [],
+      "expected_navigation": [
+        "source_a",
+        "source_b"
+      ]
     },
     {
       "scenario_id": "missing_or_ambiguous_field",
       "goal": "Open https://www.iana.org/domains/reserved and attempt to extract a field that is likely absent or ambiguous, returning explicit uncertainty or not-found.",
       "start_url": "https://www.iana.org/domains/reserved",
       "target_page_hint": "IANA reserved domains informational page (negative test)",
-      "preconditions": ["Requested field is intentionally underspecified for this page instance."],
-      "page_expectations": ["Execution should complete, but verifier is expected to reject semantic completion."],
+      "preconditions": [
+        "Requested field is intentionally underspecified for this page instance."
+      ],
+      "page_expectations": [
+        "Execution should complete, but verifier is expected to reject semantic completion."
+      ],
       "category": "negative_or_ambiguous_case",
       "description": "Checks graceful handling of absent/ambiguous targets and verifier behavior.",
       "expected_output_type": "none",
-      "required_top_level_fields": ["status", "reason"],
+      "required_top_level_fields": [
+        "status",
+        "reason"
+      ],
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": false,
-      "notes": "Expected behavior may be verifier reject with a clear explanation."
+      "notes": "Expected behavior may be verifier reject with a clear explanation.",
+      "task_family": "negative_or_ambiguous_case",
+      "page_language": "auto",
+      "anchor_candidates": [],
+      "expected_navigation": []
     }
   ]
 }
