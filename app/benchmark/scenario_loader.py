@@ -16,6 +16,7 @@ ScenarioCategory = Literal[
 ]
 
 ExpectedOutputType = Literal["scalar", "object", "list", "mixed", "none"]
+AnchorMatchingMode = Literal["auto", "exact", "contains"]
 
 
 class BenchmarkScenario(BaseModel):
@@ -25,6 +26,7 @@ class BenchmarkScenario(BaseModel):
     target_page_hint: str = ""
     page_language: str = ""
     anchor_candidates: list[str] = Field(default_factory=list)
+    anchor_matching_mode: AnchorMatchingMode = "auto"
     expected_navigation: list[str] = Field(default_factory=list)
     task_family: ScenarioCategory | None = None
     preconditions: list[str] = Field(default_factory=list)

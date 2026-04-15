@@ -325,7 +325,22 @@ class ActionHandlers:
         return extracted_value
 
     async def extract_value_near_anchor(self, page, args, runtime_state=None):
-        anchor_text = str(args["anchor_text"])
+        anchor_text = str(args.get("anchor_text", "")).strip()
+        anchor_candidates = [str(item).strip() for item in args.get("anchor_candidates", []) if str(item).strip()]
+        anchor_matching_mode = str(args.get("anchor_matching_mode", "auto")).strip().lower()
+        page_language = str(args.get("page_language", "")).strip().lower()
+        if anchor_matching_mode not in {"auto", "exact", "contains"}:
+            anchor_matching_mode = "auto"
+        if anchor_candidates:
+            anchor_text = await self._resolve_anchor_text(
+                page=page,
+                preferred_anchor=anchor_text,
+                anchor_candidates=anchor_candidates,
+                anchor_matching_mode=anchor_matching_mode,
+                page_language=page_language,
+                runtime_state=runtime_state,
+            )
+            args["anchor_text"] = anchor_text
         value_pattern = args.get("value_pattern")
         value_type = str(args.get("value_type", "")).strip().lower()
         if not value_pattern:
@@ -418,6 +433,93 @@ class ActionHandlers:
             f"source={best_match['source']}; fallback_used={fallback_used}"
         )
         return result
+
+    async def _resolve_anchor_text(
+        self,
+        *,
+        page,
+        preferred_anchor: str,
+        anchor_candidates: list[str],
+        anchor_matching_mode: str,
+        page_language: str,
+        runtime_state=None,
+    ) -> str:
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        visible_anchors = await self._collect_visible_anchor_texts(page)
+        ranked = [preferred_anchor] + anchor_candidates if preferred_anchor else list(anchor_candidates)
+
+        for candidate in ranked:
+            if self._anchor_present(
+                source_text=source_text,
+                visible_anchors=visible_anchors,
+                candidate=candidate,
+                matching_mode=anchor_matching_mode,
+                page_language=page_language,
+            ):
+                return candidate
+
+        if preferred_anchor:
+            return preferred_anchor
+        raise ValueError(f"Anchor text not found for candidates={anchor_candidates}")
+
+    async def _collect_visible_anchor_texts(self, page) -> list[str]:
+        anchors = await page.evaluate(
+            """
+            () => {
+              const nodes = document.querySelectorAll("a, button, dt, dd, th, td, h1, h2, h3, h4, label, p, li, span");
+              const result = [];
+              for (const node of nodes) {
+                const text = (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
+                if (!text) continue;
+                result.push(text);
+                if (result.length >= 300) break;
+              }
+              return result;
+            }
+            """
+        )
+        return [str(item).strip() for item in anchors if str(item).strip()]
+
+    @classmethod
+    def _anchor_present(
+        cls,
+        *,
+        source_text: str,
+        visible_anchors: list[str],
+        candidate: str,
+        matching_mode: str,
+        page_language: str,
+    ) -> bool:
+        normalized_candidate = candidate.strip()
+        if not normalized_candidate:
+            return False
+        if page_language in {"en", "english"} and cls._contains_cyrillic(normalized_candidate):
+            return False
+        if page_language in {"ru", "russian"} and cls._contains_latin(normalized_candidate):
+            return False
+
+        candidate_lower = normalized_candidate.lower()
+        corpus = [source_text] + visible_anchors
+        for text in corpus:
+            haystack = str(text).lower()
+            if matching_mode == "exact" and candidate_lower == haystack:
+                return True
+            if matching_mode == "contains" and candidate_lower in haystack:
+                return True
+            if matching_mode == "auto":
+                if candidate_lower in haystack:
+                    return True
+                if haystack in candidate_lower and len(haystack) >= 4:
+                    return True
+        return False
+
+    @staticmethod
+    def _contains_cyrillic(text: str) -> bool:
+        return bool(re.search(r"[А-Яа-яЁё]", text))
+
+    @staticmethod
+    def _contains_latin(text: str) -> bool:
+        return bool(re.search(r"[A-Za-z]", text))
 
     @staticmethod
     def _resolve_value_pattern(value_type: str) -> str | None:

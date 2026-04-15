@@ -73,3 +73,32 @@ def test_validator_rejects_too_broad_click_selector():
     )
     with pytest.raises(PlanValidationError):
         PlanValidator().validate(plan)
+
+
+def test_validator_rejects_invalid_anchor_matching_mode_for_extract_value_near_anchor():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "g",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 3, "timeout_sec": 20},
+            "expected_result": {"description": "d", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_value_near_anchor",
+                    "args": {
+                        "anchor_text": "Email",
+                        "value_type": "number",
+                        "anchor_candidates": ["Email", "Contact"],
+                        "anchor_matching_mode": "fuzzy",
+                    },
+                    "save_as": "value",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(plan)

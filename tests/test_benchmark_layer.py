@@ -114,6 +114,46 @@ def test_negative_expected_reject_ignores_technical_failures():
     assert metrics.negative_expected_reject_rate == 0.5
 
 
+def test_negative_outcome_classification_distinguishes_expected_and_unexpected():
+    expected = BenchmarkScenarioResult(
+        scenario_id="neg_expected",
+        category="negative_or_ambiguous_case",
+        should_succeed=False,
+        execution_status="success",
+        verifier_verdict="reject",
+        runtime_sec=1.0,
+        corrective_retry_used=False,
+        correction_attempt_count=0,
+        export_success=True,
+    )
+    unexpected_accept = BenchmarkScenarioResult(
+        scenario_id="neg_unexpected_accept",
+        category="negative_or_ambiguous_case",
+        should_succeed=False,
+        execution_status="success",
+        verifier_verdict="accept",
+        runtime_sec=1.0,
+        corrective_retry_used=False,
+        correction_attempt_count=0,
+        export_success=True,
+    )
+    technical = BenchmarkScenarioResult(
+        scenario_id="neg_technical",
+        category="negative_or_ambiguous_case",
+        should_succeed=False,
+        execution_status="failed",
+        verifier_verdict="reject",
+        runtime_sec=1.0,
+        corrective_retry_used=False,
+        correction_attempt_count=0,
+        export_success=False,
+    )
+
+    assert BenchmarkRunner._classify_negative_outcome(expected) == "expected_reject"
+    assert BenchmarkRunner._classify_negative_outcome(unexpected_accept) == "unexpected_accept"
+    assert BenchmarkRunner._classify_negative_outcome(technical) == "technical_failure"
+
+
 def test_action_alias_normalization_is_safe_and_explicit():
     payload = {
         "steps": [
