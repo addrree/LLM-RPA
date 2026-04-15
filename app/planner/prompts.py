@@ -58,7 +58,6 @@ PLANNER_SYSTEM_PROMPT = """
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
    - navigation_then_extraction: сначала click (text/href/role+name), затем wait_for, затем extraction.
    - multi_step_information_retrieval: используй несколько save_as (source_a/source_b) и финальный structured synthesis.
-18. Если язык страницы заранее неизвестен, сначала ориентируйся на видимый текст страницы и выбирай anchor/click target на языке фактического UI.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -117,7 +116,6 @@ REPLANNER_SYSTEM_PROMPT = """
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
 13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй text/role+name/href_contains.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
-15) Если goal сообщает, что язык страницы неизвестен, извлекай/кликай по фактическим видимым якорям текущего языка страницы, а не по предположениям.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """

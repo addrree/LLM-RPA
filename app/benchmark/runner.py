@@ -300,13 +300,8 @@ class BenchmarkRunner:
         parts = [scenario.goal.strip()]
         if scenario.task_family:
             parts.append(f"Task family: {scenario.task_family}.")
-        page_language = str(scenario.page_language or "").strip().lower()
-        if page_language and page_language != "auto":
+        if scenario.page_language:
             parts.append(f"Page language hint: {scenario.page_language}.")
-        else:
-            parts.append(
-                "Page language is unknown before navigation. Detect visible page language first and align anchors/locators to that language."
-            )
         if scenario.target_page_hint:
             parts.append(f"Target page hint: {scenario.target_page_hint}.")
         if scenario.anchor_candidates:
