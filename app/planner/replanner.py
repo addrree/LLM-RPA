@@ -60,6 +60,11 @@ class Replanner:
         execution_result: dict,
         verifier_verdict: dict,
         prior_corrective_attempts: list[dict] | None = None,
+        failure_type: str | None = None,
+        failed_action: str | None = None,
+        failed_args: dict | None = None,
+        verifier_issues: list[str] | None = None,
+        disallowed_next_patterns: list[str] | None = None,
     ) -> TaskSpec:
         payload = {
             "user_goal": user_goal,
@@ -68,9 +73,13 @@ class Replanner:
             "execution_result": execution_result,
             "verifier_verdict": verifier_verdict,
             "extracted_data": execution_result.get("extracted_data", {}),
-            "verifier_issues": verifier_verdict.get("issues", []),
+            "failure_type": failure_type,
+            "failed_action": failed_action,
+            "failed_args": failed_args or execution_result.get("failed_args", {}),
+            "verifier_issues": verifier_issues or verifier_verdict.get("issues", []),
             "verifier_summary": verifier_verdict.get("summary"),
             "prior_corrective_attempts": prior_corrective_attempts or [],
+            "disallowed_next_patterns": disallowed_next_patterns or [],
         }
         artifact = self.llm_client.generate_planner_artifact(
             system_prompt=CORRECTIVE_REPLANNER_SYSTEM_PROMPT,

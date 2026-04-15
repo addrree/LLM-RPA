@@ -12,6 +12,8 @@ UTC = timezone.utc
 
 
 class PlaywrightExecutor:
+    BROWSER_RETRYABLE_ACTIONS = {"open_url", "click", "wait_for"}
+
     def __init__(self, *, headless: bool = True, slow_mo: int = 0, record_video: bool = False):
         self.handlers = ActionHandlers()
         self.headless = headless
@@ -73,12 +75,16 @@ class PlaywrightExecutor:
                     screenshot_path=None,
                     logs=logs,
                     error_message=str(launch_error),
+                    failure_type="browser_launch_error",
+                    technical_failure=True,
                 )
 
         page = session["page"]
+        current_step = None
 
         try:
             for step in plan.steps:
+                current_step = step
                 try:
                     if step.action == "finish":
                         logs.append(
@@ -94,8 +100,12 @@ class PlaywrightExecutor:
                     if step.action == "screenshot" and "path" not in step.args:
                         step.args["path"] = str(SCREENSHOTS_DIR / f"step_{step.step_id}.png")
 
-                    handler = getattr(self.handlers, step.action)
-                    result = await handler(page, step.args, runtime_state)
+                    result = await self._run_step_with_browser_retries(
+                        page=page,
+                        step=step,
+                        runtime_state=runtime_state,
+                        logs=logs,
+                    )
 
                     if step.save_as:
                         extracted_data[step.save_as] = result
@@ -196,4 +206,48 @@ class PlaywrightExecutor:
                 screenshot_path=screenshot_path,
                 logs=logs,
                 error_message=str(e),
+                failure_type=self._classify_failure_type(str(e)),
+                failed_action=current_step.action if current_step else (logs[-1].action if logs else None),
+                failed_args=dict(current_step.args) if current_step else {},
+                technical_failure=self._is_technical_failure(str(e)),
             )
+
+    async def _run_step_with_browser_retries(self, *, page, step, runtime_state, logs):
+        handler = getattr(self.handlers, step.action)
+        if step.action not in self.BROWSER_RETRYABLE_ACTIONS:
+            return await handler(page, step.args, runtime_state)
+
+        max_attempts = 3
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                return await handler(page, step.args, runtime_state)
+            except Exception as exc:  # noqa: BLE001
+                last_error = exc
+                if not self._is_retryable_browser_error(str(exc)) or attempt >= max_attempts:
+                    raise
+                logs.append(
+                    StepLog(
+                        step_id=step.step_id,
+                        action=step.action,
+                        status="success",
+                        message=f"Transient browser failure on attempt {attempt}, retrying: {exc}",
+                    )
+                )
+        raise last_error if last_error else RuntimeError("Unknown step execution error")
+
+    @staticmethod
+    def _is_retryable_browser_error(message: str) -> bool:
+        text = message.lower()
+        return any(token in text for token in ["timeout", "net::", "navigation", "target closed", "detached"])
+
+    @staticmethod
+    def _is_technical_failure(message: str) -> bool:
+        text = message.lower()
+        return any(token in text for token in ["timeout", "net::", "navigation", "target closed", "detached", "browser"])
+
+    @classmethod
+    def _classify_failure_type(cls, message: str) -> str:
+        if cls._is_technical_failure(message):
+            return "browser_operation_failed"
+        return "execution_step_failed"

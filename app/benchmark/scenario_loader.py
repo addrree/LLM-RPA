@@ -23,6 +23,10 @@ class BenchmarkScenario(BaseModel):
     goal: str
     start_url: str
     target_page_hint: str = ""
+    page_language: str = ""
+    anchor_candidates: list[str] = Field(default_factory=list)
+    expected_navigation: list[str] = Field(default_factory=list)
+    task_family: ScenarioCategory | None = None
     preconditions: list[str] = Field(default_factory=list)
     page_expectations: list[str] = Field(default_factory=list)
     category: ScenarioCategory

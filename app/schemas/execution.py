@@ -32,3 +32,7 @@ class ExecutionResult(BaseModel):
     screenshot_path: Optional[str] = None
     logs: List[StepLog] = Field(default_factory=list)
     error_message: Optional[str] = None
+    failure_type: Optional[str] = None
+    failed_action: Optional[str] = None
+    failed_args: Dict[str, Any] = Field(default_factory=dict)
+    technical_failure: bool = False
