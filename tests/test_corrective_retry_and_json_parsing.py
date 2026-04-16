@@ -267,6 +267,48 @@ def test_workflow_stops_retry_and_persists_artifacts_when_corrective_plan_is_inv
     assert failure_payload["offending_step"]["action"] == "extract_items"
 
 
+def test_failure_context_marks_anchor_not_found_as_recoverable():
+    execution = ExecutionResult(
+        status="failed",
+        extracted_data={},
+        logs=[],
+        failure_type="execution_step_failed",
+        failed_action="extract_value_near_anchor",
+        failed_args={"anchor_text": "Поддержка"},
+        error_message="Anchor text not found: Поддержка",
+    )
+    verdict = _Verdict("reject")
+    ctx = WorkflowManager._build_failure_context(execution_result=execution, verdict=verdict)
+    assert ctx["failure_type"] == "anchor_not_found"
+    assert WorkflowManager._should_retry_corrective(
+        failure_type=ctx["failure_type"],
+        prior_corrective_attempts=[],
+        max_retries=2,
+        corrective_attempt_count=0,
+    )
+
+
+def test_failure_context_marks_bad_click_locator_as_recoverable():
+    execution = ExecutionResult(
+        status="failed",
+        extracted_data={},
+        logs=[],
+        failure_type="browser_operation_failed",
+        failed_action="click",
+        failed_args={"text": "More"},
+        error_message="Timeout 30000ms exceeded while waiting for locator",
+    )
+    verdict = _Verdict("reject")
+    ctx = WorkflowManager._build_failure_context(execution_result=execution, verdict=verdict)
+    assert ctx["failure_type"] == "bad_locator_choice"
+    assert WorkflowManager._should_retry_corrective(
+        failure_type=ctx["failure_type"],
+        prior_corrective_attempts=[],
+        max_retries=2,
+        corrective_attempt_count=0,
+    )
+
+
 def test_workflow_continues_after_invalid_corrective_and_recovers():
     manager = WorkflowManager(
         planner=_StubPlanner(),

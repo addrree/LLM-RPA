@@ -17,6 +17,9 @@ class ActionHandlers:
         role = str(args.get("role", "")).strip()
         name = str(args.get("name", "")).strip()
         href_contains = str(args.get("href_contains", "")).strip()
+        scope_selector = str(args.get("scope_selector", "")).strip()
+        exact = bool(args.get("exact", False))
+        visible_only = bool(args.get("visible_only", True))
 
         if selector:
             if self._is_too_broad_click_selector(selector):
@@ -24,25 +27,44 @@ class ActionHandlers:
                     f"Click selector is too broad: {selector!r}. Use specific selector or text/role/href filter."
                 )
             resolved_selector = selector
-            if bool(args.get("visible_only", True)):
+            if visible_only:
                 resolved_selector = f"{selector}:visible"
             locator = page.locator(resolved_selector)
             await locator.first.click()
             return
 
-        if text:
-            await page.get_by_text(text, exact=bool(args.get("exact", False))).first.click()
-            return
+        scope = page.locator(scope_selector) if scope_selector else page
 
         if role and name:
-            await page.get_by_role(role, name=name, exact=bool(args.get("exact", False))).first.click()
+            locator = scope.get_by_role(role, name=name, exact=exact)
+            await locator.first.click()
             return
 
         if href_contains:
-            await page.locator(f'a[href*="{href_contains}"]').first.click()
+            href_selector = f'a[href*="{href_contains}"]'
+            if visible_only:
+                href_selector = f"{href_selector}:visible"
+            locator = scope.locator(href_selector)
+            if text:
+                locator = locator.filter(has_text=text)
+            await locator.first.click()
             return
 
-        raise ValueError("click requires selector or text/role+name/href_contains")
+        if text:
+            if not exact and not scope_selector:
+                raise ValueError(
+                    "Ambiguous or weak click target: text-based click requires exact=true or scope_selector."
+                )
+            target_selector = "a, button, [role='button'], [role='link']"
+            if visible_only:
+                target_selector = "a:visible, button:visible, [role='button']:visible, [role='link']:visible"
+            locator = scope.locator(target_selector).filter(has_text=text)
+            await locator.first.click()
+            return
+
+        raise ValueError(
+            "click requires selector or text/role+name/href_contains (optionally with scope_selector/exact)"
+        )
 
     async def type(self, page, args, runtime_state=None):
         await page.fill(args["selector"], args["text"])
@@ -329,6 +351,10 @@ class ActionHandlers:
         anchor_candidates = [str(item).strip() for item in args.get("anchor_candidates", []) if str(item).strip()]
         anchor_matching_mode = str(args.get("anchor_matching_mode", "auto")).strip().lower()
         page_language = str(args.get("page_language", "")).strip().lower()
+        value_pattern = args.get("value_pattern")
+        value_type = str(args.get("value_type", "")).strip().lower()
+        if not value_pattern:
+            value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
         if anchor_candidates:
@@ -338,13 +364,10 @@ class ActionHandlers:
                 anchor_candidates=anchor_candidates,
                 anchor_matching_mode=anchor_matching_mode,
                 page_language=page_language,
+                value_pattern=str(value_pattern) if value_pattern else None,
                 runtime_state=runtime_state,
             )
             args["anchor_text"] = anchor_text
-        value_pattern = args.get("value_pattern")
-        value_type = str(args.get("value_type", "")).strip().lower()
-        if not value_pattern:
-            value_pattern = self._resolve_value_pattern(value_type)
         if not value_pattern:
             raise ValueError("extract_value_near_anchor requires value_pattern or supported value_type")
         value_pattern = str(value_pattern)
@@ -469,25 +492,55 @@ class ActionHandlers:
         anchor_candidates: list[str],
         anchor_matching_mode: str,
         page_language: str,
+        value_pattern: str | None,
         runtime_state=None,
     ) -> str:
         source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
         visible_anchors = await self._collect_visible_anchor_texts(page)
         ranked = [preferred_anchor] + anchor_candidates if preferred_anchor else list(anchor_candidates)
+        score_best: tuple[int, str] | None = None
 
         for candidate in ranked:
-            if self._anchor_present(
+            if not self._anchor_present(
                 source_text=source_text,
                 visible_anchors=visible_anchors,
                 candidate=candidate,
                 matching_mode=anchor_matching_mode,
                 page_language=page_language,
             ):
+                continue
+            if not value_pattern:
                 return candidate
+            candidate_score = await self._score_anchor_candidate_block_match(
+                page=page,
+                anchor_text=candidate,
+                value_pattern=value_pattern,
+            )
+            if score_best is None or candidate_score > score_best[0]:
+                score_best = (candidate_score, candidate)
 
-        if preferred_anchor:
-            return preferred_anchor
-        raise ValueError(f"Anchor text not found for candidates={anchor_candidates}")
+        if score_best is not None:
+            return score_best[1]
+        raise ValueError(f"Anchor text not found for candidates={ranked}")
+
+    async def _score_anchor_candidate_block_match(self, *, page, anchor_text: str, value_pattern: str) -> int:
+        candidates = await self._collect_anchor_candidates(
+            page=page,
+            anchor_text=anchor_text,
+            search_direction="around",
+            same_block_only=True,
+            max_distance_chars=None,
+        )
+        if not candidates:
+            return 0
+        score = 0
+        for candidate in candidates:
+            scope_text = str(candidate.get("scope_text") or "")
+            if re.search(value_pattern, scope_text, flags=re.IGNORECASE):
+                score += 2
+            elif re.search(value_pattern, str(candidate.get("window_text") or ""), flags=re.IGNORECASE):
+                score += 1
+        return score
 
     async def _collect_visible_anchor_texts(self, page) -> list[str]:
         anchors = await page.evaluate(
@@ -555,9 +608,9 @@ class ActionHandlers:
         if value_type in {"float", "rating"}:
             return r"([0-9]+(?:[.,][0-9]+)?)"
         if value_type == "email":
-            return r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,})"
+            return r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,63})"
         if value_type == "phone":
-            return r"(\+?\d[\d\-\(\)\s]{6,}\d)"
+            return r"(\+?\d[\d\-\(\)\s\.]{6,}\d)"
         return None
 
     async def _load_source_text(self, page, runtime_state=None) -> str:
@@ -599,7 +652,7 @@ class ActionHandlers:
         max_distance_chars: int | None,
         runtime_state=None,
     ) -> list[dict[str, Any]]:
-        window_chars = max_distance_chars if isinstance(max_distance_chars, int) and max_distance_chars > 0 else 400
+        window_chars = max_distance_chars if isinstance(max_distance_chars, int) and max_distance_chars > 0 else 600
         candidates = await page.evaluate(
             """
             ({ anchorText, direction, sameBlockOnly, windowChars }) => {
@@ -640,6 +693,8 @@ class ActionHandlers:
                 collect.push({
                   source: sameBlockOnly ? "dom_same_block" : "dom_page",
                   block_selector: container.tagName ? container.tagName.toLowerCase() : "unknown",
+                  scope_text: text,
+                  anchor_idx_in_scope: anchorIdx,
                   full_text: text,
                   anchor_idx: anchorIdx,
                   window_start: start,
@@ -681,6 +736,8 @@ class ActionHandlers:
         return [
             {
                 "source": "text_fallback",
+                "scope_text": source_text,
+                "anchor_idx_in_scope": anchor_match.start(),
                 "window_text": source_text[start:end],
                 "anchor_idx_in_window": anchor_match.start() - start,
             }
@@ -702,10 +759,11 @@ class ActionHandlers:
 
         for candidate in candidates:
             window_text = str(candidate.get("window_text") or "")
-            anchor_idx = int(candidate.get("anchor_idx_in_window", 0))
-            for match in re.finditer(value_pattern, window_text, flags=flags_value):
+            scope_text = str(candidate.get("scope_text") or window_text)
+            anchor_idx = int(candidate.get("anchor_idx_in_scope", candidate.get("anchor_idx_in_window", 0)))
+            for match in re.finditer(value_pattern, scope_text, flags=flags_value):
                 if not self._contexts_match(
-                    window_text=window_text,
+                    window_text=scope_text,
                     match=match,
                     required_left_context=required_left_context,
                     required_right_context=required_right_context,

@@ -70,6 +70,8 @@ class PlanValidator:
         role = str(args.get("role", "")).strip()
         name = str(args.get("name", "")).strip()
         href_contains = str(args.get("href_contains", "")).strip()
+        scope_selector = str(args.get("scope_selector", "")).strip()
+        exact = args.get("exact")
 
         has_selector = bool(selector)
         has_text = bool(text)
@@ -84,6 +86,10 @@ class PlanValidator:
         if has_selector and selector.lower() in TOO_BROAD_CLICK_SELECTORS:
             raise PlanValidationError(
                 f"click selector is too broad: {selector!r}. Use a more specific selector or text/role contract."
+            )
+        if has_text and not (has_role_name or has_href_filter or scope_selector or bool(exact)):
+            raise PlanValidationError(
+                "click with bare text is too weak; add exact=true, scope_selector, role+name, or href_contains"
             )
 
     @staticmethod
