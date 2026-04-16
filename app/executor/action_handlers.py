@@ -4,6 +4,13 @@ from typing import Any
 from app.observer.page_observer import PageObserver
 
 
+class StructuredExtractionError(ValueError):
+    def __init__(self, *, code: str, message: str, details: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.code = code
+        self.details = details or {}
+
+
 class ActionHandlers:
     def __init__(self):
         self.page_observer = PageObserver()
@@ -398,6 +405,7 @@ class ActionHandlers:
             search_direction=search_direction,
             same_block_only=same_block_only,
             max_distance_chars=max_distance_chars,
+            matching_mode=anchor_matching_mode,
             runtime_state=runtime_state,
         )
 
@@ -435,6 +443,7 @@ class ActionHandlers:
                 search_direction=search_direction,
                 same_block_only=False,
                 max_distance_chars=max_distance_chars,
+                matching_mode=anchor_matching_mode,
                 runtime_state=runtime_state,
             )
             best_match = self._select_best_value_near_anchor(
@@ -636,10 +645,14 @@ class ActionHandlers:
         except IndexError as exc:
             requested = int(group_index) if group_index is not None else 1
             available_groups = len(match.groups())
-            raise ValueError(
-                "Regex group reference is out of range during extraction: "
-                f"requested_group={requested}, available_groups={available_groups}. "
-                "Check pattern/group_index consistency."
+            raise StructuredExtractionError(
+                code="regex_group_mismatch",
+                message=(
+                    "Regex group reference is out of range during extraction: "
+                    f"requested_group={requested}, available_groups={available_groups}. "
+                    "Check pattern/group_index consistency."
+                ),
+                details={"requested_group": requested, "available_groups": available_groups},
             ) from exc
 
     async def _collect_anchor_candidates(
@@ -650,58 +663,77 @@ class ActionHandlers:
         search_direction: str,
         same_block_only: bool,
         max_distance_chars: int | None,
+        matching_mode: str = "auto",
         runtime_state=None,
     ) -> list[dict[str, Any]]:
         window_chars = max_distance_chars if isinstance(max_distance_chars, int) and max_distance_chars > 0 else 600
         candidates = await page.evaluate(
             """
-            ({ anchorText, direction, sameBlockOnly, windowChars }) => {
-              const normalizeText = (text) => (text || "").replace(/\\s+/g, " ").trim();
-              const sectionSelector = "section, article, main, aside, footer, header, nav, form, div, li, tr, td, th, dl";
+            ({ anchorText, direction, sameBlockOnly, windowChars, matchingMode }) => {
+              const normalizeText = (text) => (text || "").replace(/\s+/g, " ").trim();
+              const sectionSelector = "section, article, main, aside, footer, header, nav, form, dl, table";
+              const blockSelector = "p, li, dt, dd, td, th, div, article, section";
               const reasonableSelector = "li, tr, td, th, p, dt, dd, article, section, div, span, a";
               const collect = [];
               const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT);
+              const anchorLower = (anchorText || "").toLowerCase();
               let node;
               while ((node = walker.nextNode())) {
-                const value = node.nodeValue || "";
-                const idx = value.toLowerCase().indexOf((anchorText || "").toLowerCase());
-                if (idx < 0) continue;
+                const value = normalizeText(node.nodeValue || "");
+                if (!value) continue;
+                if (!value.toLowerCase().includes(anchorLower)) continue;
                 const host = node.parentElement;
                 if (!host) continue;
-                let container = host;
+
+                const containerChain = [];
                 if (sameBlockOnly) {
-                  container = host.closest(sectionSelector) || host.closest(reasonableSelector) || host.parentElement || host;
+                  const localBlock = host.closest(blockSelector) || host.closest(reasonableSelector) || host;
+                  const sectionBlock = host.closest(sectionSelector);
+                  if (localBlock) containerChain.push({ node: localBlock, source: "dom_local_block", sourceRank: 0 });
+                  if (sectionBlock && sectionBlock !== localBlock) {
+                    containerChain.push({ node: sectionBlock, source: "dom_section_block", sourceRank: 1 });
+                  }
                 } else {
-                  container = document.body;
+                  const broad = host.closest(sectionSelector) || document.body;
+                  containerChain.push({ node: broad, source: "dom_broad_block", sourceRank: 1 });
+                  containerChain.push({ node: document.body, source: "dom_page", sourceRank: 2 });
                 }
-                const text = normalizeText(container.innerText || container.textContent || "");
-                if (!text) continue;
-                const anchorIdx = text.toLowerCase().indexOf((anchorText || "").toLowerCase());
-                if (anchorIdx < 0) continue;
-                let start = 0;
-                let end = text.length;
-                if (direction === "after") {
-                  start = anchorIdx;
-                  end = Math.min(text.length, anchorIdx + (anchorText || "").length + windowChars);
-                } else if (direction === "before") {
-                  start = Math.max(0, anchorIdx - windowChars);
-                  end = anchorIdx + (anchorText || "").length;
-                } else {
-                  start = Math.max(0, anchorIdx - windowChars);
-                  end = Math.min(text.length, anchorIdx + (anchorText || "").length + windowChars);
+
+                for (const entry of containerChain) {
+                  const container = entry.node;
+                  const text = normalizeText(container?.innerText || container?.textContent || "");
+                  if (!text) continue;
+                  const lower = text.toLowerCase();
+                  let anchorIdx = lower.indexOf(anchorLower);
+                  if (anchorIdx < 0 && matchingMode === "contains") {
+                    const token = anchorLower.split(" ").filter(Boolean)[0] || "";
+                    anchorIdx = token ? lower.indexOf(token) : -1;
+                  }
+                  if (anchorIdx < 0) continue;
+
+                  let start = 0;
+                  let end = text.length;
+                  if (direction === "after") {
+                    start = anchorIdx;
+                    end = Math.min(text.length, anchorIdx + (anchorText || "").length + windowChars);
+                  } else if (direction === "before") {
+                    start = Math.max(0, anchorIdx - windowChars);
+                    end = anchorIdx + (anchorText || "").length;
+                  } else {
+                    start = Math.max(0, anchorIdx - windowChars);
+                    end = Math.min(text.length, anchorIdx + (anchorText || "").length + windowChars);
+                  }
+
+                  collect.push({
+                    source: entry.source,
+                    source_rank: entry.sourceRank,
+                    block_selector: container.tagName ? container.tagName.toLowerCase() : "unknown",
+                    scope_text: text,
+                    anchor_idx_in_scope: anchorIdx,
+                    window_text: text.slice(start, end),
+                    anchor_idx_in_window: anchorIdx - start,
+                  });
                 }
-                collect.push({
-                  source: sameBlockOnly ? "dom_same_block" : "dom_page",
-                  block_selector: container.tagName ? container.tagName.toLowerCase() : "unknown",
-                  scope_text: text,
-                  anchor_idx_in_scope: anchorIdx,
-                  full_text: text,
-                  anchor_idx: anchorIdx,
-                  window_start: start,
-                  window_end: end,
-                  window_text: text.slice(start, end),
-                  anchor_idx_in_window: anchorIdx - start
-                });
               }
               return collect;
             }
@@ -711,11 +743,18 @@ class ActionHandlers:
                 "direction": search_direction,
                 "sameBlockOnly": same_block_only,
                 "windowChars": window_chars,
+                "matchingMode": matching_mode,
             },
         )
 
         if candidates:
-            return candidates
+            return sorted(
+                candidates,
+                key=lambda item: (
+                    int(item.get("source_rank", 3)),
+                    0 if str(item.get("source", "")).startswith("dom_") else 1,
+                ),
+            )
 
         source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
         flags = re.IGNORECASE
@@ -736,6 +775,7 @@ class ActionHandlers:
         return [
             {
                 "source": "text_fallback",
+                "source_rank": 3,
                 "scope_text": source_text,
                 "anchor_idx_in_scope": anchor_match.start(),
                 "window_text": source_text[start:end],
@@ -782,7 +822,11 @@ class ActionHandlers:
                     continue
 
                 extracted_value = self._extract_match_value(match, group_index=group_index)
-                score = (distance, 0 if candidate.get("source") == "dom_same_block" else 1)
+                score = (
+                    distance,
+                    int(candidate.get("source_rank", 3)),
+                    0 if str(candidate.get("source", "")).startswith("dom_") else 1,
+                )
                 if best is None or score < best["score"]:
                     best = {
                         "value": extracted_value,

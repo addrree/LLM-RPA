@@ -4,7 +4,7 @@ from typing import Any
 from playwright.async_api import async_playwright
 
 from app.config import SCREENSHOTS_DIR, VIDEOS_DIR
-from app.executor.action_handlers import ActionHandlers
+from app.executor.action_handlers import ActionHandlers, StructuredExtractionError
 from app.schemas.execution import ExecutionResult, StepLog
 from app.schemas.task_spec import TaskSpec
 
@@ -133,6 +133,13 @@ class PlaywrightExecutor:
                             )
                         )
                 except Exception as step_error:
+                    if isinstance(step_error, StructuredExtractionError):
+                        diagnostic = {
+                            "code": step_error.code,
+                            "details": step_error.details,
+                        }
+                        if runtime_state is not None:
+                            runtime_state.setdefault("structured_diagnostics", []).append(diagnostic)
                     logs.append(
                         StepLog(
                             step_id=step.step_id,
@@ -248,6 +255,9 @@ class PlaywrightExecutor:
 
     @classmethod
     def _classify_failure_type(cls, message: str) -> str:
+        lowered = message.lower()
+        if "regex group reference is out of range" in lowered:
+            return "regex_group_mismatch"
         if cls._is_technical_failure(message):
             return "browser_operation_failed"
         return "execution_step_failed"
