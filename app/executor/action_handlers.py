@@ -670,7 +670,7 @@ class ActionHandlers:
         candidates = await page.evaluate(
             """
             ({ anchorText, direction, sameBlockOnly, windowChars, matchingMode }) => {
-              const normalizeText = (text) => (text || "").replace(/\\s+/g, " ").trim();
+              const normalizeText = (text) => (text || "").replace(/\s+/g, " ").trim();
               const sectionSelector = "section, article, main, aside, footer, header, nav, form, dl, table";
               const blockSelector = "p, li, dt, dd, td, th, div, article, section";
               const reasonableSelector = "li, tr, td, th, p, dt, dd, article, section, div, span, a";
