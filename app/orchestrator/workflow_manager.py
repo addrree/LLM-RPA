@@ -43,6 +43,7 @@ class WorkflowManager:
         "schema_mismatch",
         "anchor_not_found",
         "value_not_found_near_anchor",
+        "regex_group_mismatch",
         "ambiguous_click_target",
         "weak_click_target",
         "bad_locator_choice",
@@ -303,7 +304,9 @@ class WorkflowManager:
                     failure_type=failure_context["failure_type"],
                     failed_action=failure_context["failed_action"],
                     failed_args=failure_context["failed_args"],
+                    error_message=failure_context["error_message"],
                     verifier_issues=failure_context["verifier_issues"],
+                    previous_attempt_signatures=sorted(prior_signatures),
                     disallowed_next_patterns=self._build_disallowed_patterns(prior_corrective_attempts),
                 )
             except Exception as corrective_error:  # noqa: BLE001
@@ -437,10 +440,15 @@ class WorkflowManager:
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:
         data = execution_result.extracted_data
-        if "section_a_data" not in data and "source_a" in data:
-            data["section_a_data"] = data.get("source_a")
-        if "section_b_data" not in data and "source_b" in data:
-            data["section_b_data"] = data.get("source_b")
+        alias_pairs = (
+            ("section_a_data", "source_a"),
+            ("section_a_data", "extract_section_a_data"),
+            ("section_b_data", "source_b"),
+            ("section_b_data", "extract_section_b_data"),
+        )
+        for canonical_name, alias in alias_pairs:
+            if canonical_name not in data and alias in data:
+                data[canonical_name] = data.get(alias)
 
         left = data.get("section_a_data")
         right = data.get("section_b_data")
@@ -460,6 +468,7 @@ class WorkflowManager:
                     }
 
         comparison = {
+            "compared": True,
             "left_present": left is not None,
             "right_present": right is not None,
             "left_type": type(left).__name__,
@@ -511,6 +520,8 @@ class WorkflowManager:
                 failure_type = "ambiguous_click_target"
             elif "too broad" in error_message and failed_action == "click":
                 failure_type = "weak_click_target"
+            elif "regex group reference is out of range" in error_message:
+                failure_type = "regex_group_mismatch"
             elif execution_result.failure_type == "browser_operation_failed" and failed_action == "click":
                 failure_type = "bad_locator_choice"
         if verdict.verdict == "reject" and execution_result.status == "success":
@@ -519,6 +530,7 @@ class WorkflowManager:
             "failure_type": failure_type,
             "failed_action": failed_action,
             "failed_args": failed_args,
+            "error_message": str(execution_result.error_message or ""),
             "verifier_issues": list(verdict.issues or []),
         }
 
@@ -569,6 +581,8 @@ class WorkflowManager:
             failure_type = str(attempt.get("failure_type", "")).lower()
             if failure_type in {"anchor_not_found", "value_not_found_near_anchor"}:
                 disallowed.append("same_anchor_retry_without_candidates")
+            if failure_type == "regex_group_mismatch":
+                disallowed.append("same_regex_group_mismatch")
             if failure_type in {"ambiguous_click_target", "weak_click_target", "bad_locator_choice"}:
                 disallowed.append("generic_click_target")
         return sorted(set(disallowed))

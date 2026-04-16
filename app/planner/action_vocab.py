@@ -19,12 +19,6 @@ CANONICAL_ACTIONS = {
     "finish",
 }
 
-# Safe 1:1 aliases only (no semantic remapping).
-ACTION_ALIASES = {
-    "click_element": "click",
-}
-
-
 def normalize_plan_action_aliases(payload: dict[str, Any]) -> tuple[dict[str, Any], bool]:
     plan = dict(payload) if isinstance(payload, dict) else {}
     steps = plan.get("steps")
@@ -39,10 +33,7 @@ def normalize_plan_action_aliases(payload: dict[str, Any]) -> tuple[dict[str, An
             continue
         step = dict(raw_step)
         action = step.get("action")
-        if isinstance(action, str) and action in ACTION_ALIASES:
-            step["action"] = ACTION_ALIASES[action]
-            action_oov_detected = True
-        elif isinstance(action, str) and action not in CANONICAL_ACTIONS:
+        if isinstance(action, str) and action not in CANONICAL_ACTIONS:
             action_oov_detected = True
         normalized_steps.append(step)
 

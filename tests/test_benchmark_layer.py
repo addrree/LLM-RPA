@@ -146,6 +146,7 @@ def test_negative_outcome_classification_distinguishes_expected_and_unexpected()
         runtime_sec=1.0,
         corrective_retry_used=False,
         correction_attempt_count=0,
+        technical_failure=True,
         export_success=False,
     )
 
@@ -154,7 +155,7 @@ def test_negative_outcome_classification_distinguishes_expected_and_unexpected()
     assert BenchmarkRunner._classify_negative_outcome(technical) == "technical_failure"
 
 
-def test_action_alias_normalization_is_safe_and_explicit():
+def test_action_alias_normalization_reports_oov_without_rewriting_actions():
     payload = {
         "steps": [
             {"action": "click_element", "args": {"selector": "#go"}},
@@ -164,7 +165,7 @@ def test_action_alias_normalization_is_safe_and_explicit():
     }
     normalized, oov_detected = normalize_plan_action_aliases(payload)
     assert oov_detected is True
-    assert normalized["steps"][0]["action"] == "click"
+    assert normalized["steps"][0]["action"] == "click_element"
     assert normalized["steps"][1]["action"] == "extract_value_near_anchor"
 
 

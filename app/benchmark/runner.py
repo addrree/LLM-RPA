@@ -289,11 +289,11 @@ class BenchmarkRunner:
 
     @staticmethod
     def _is_semantic_negative_trial(item: BenchmarkScenarioResult) -> bool:
-        return item.execution_status == "success" and not item.technical_failure
+        return not item.technical_failure
 
     @staticmethod
     def _classify_negative_outcome(item: BenchmarkScenarioResult) -> str:
-        if item.execution_status != "success" or item.technical_failure:
+        if item.technical_failure:
             return "technical_failure"
         if item.verifier_verdict == "reject":
             return "expected_reject"
