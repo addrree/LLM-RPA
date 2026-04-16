@@ -77,10 +77,15 @@ class PlanValidator:
         has_text = bool(text)
         has_role_name = bool(role and name)
         has_href_filter = bool(href_contains)
+        strategy_count = sum([has_selector, has_role_name, has_href_filter, has_text])
 
         if not (has_selector or has_text or has_role_name or has_href_filter):
             raise PlanValidationError(
                 "click requires one of: non-empty 'selector', 'text', 'role'+'name', or 'href_contains'"
+            )
+        if strategy_count > 2:
+            raise PlanValidationError(
+                "click mixes too many target strategies; keep it deterministic (prefer role+name or href/text within scope)"
             )
 
         if has_selector and selector.lower() in TOO_BROAD_CLICK_SELECTORS:

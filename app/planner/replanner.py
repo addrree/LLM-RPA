@@ -63,7 +63,9 @@ class Replanner:
         failure_type: str | None = None,
         failed_action: str | None = None,
         failed_args: dict | None = None,
+        error_message: str | None = None,
         verifier_issues: list[str] | None = None,
+        previous_attempt_signatures: list[str] | None = None,
         disallowed_next_patterns: list[str] | None = None,
     ) -> TaskSpec:
         payload = {
@@ -76,8 +78,10 @@ class Replanner:
             "failure_type": failure_type,
             "failed_action": failed_action,
             "failed_args": failed_args or execution_result.get("failed_args", {}),
+            "error_message": error_message or execution_result.get("error_message"),
             "verifier_issues": verifier_issues or verifier_verdict.get("issues", []),
             "verifier_summary": verifier_verdict.get("summary"),
+            "previous_attempt_signatures": previous_attempt_signatures or [],
             "prior_corrective_attempts": prior_corrective_attempts or [],
             "disallowed_next_patterns": disallowed_next_patterns or [],
         }
@@ -128,19 +132,6 @@ class Replanner:
             if current.get("action") == "open_url" and not str(current["args"].get("url", "")).strip():
                 logger.warning("Malformed open_url from model: missing args.url. Applying start_url normalization.")
                 current["args"]["url"] = context_start_url
-            if (
-                current.get("action") == "extract_value_near_anchor"
-                and Replanner._is_single_value_header_goal(user_goal)
-                and not str(current["args"].get("anchor_text", "")).strip()
-            ):
-                logger.warning("Routing fix: replacing extract_value_near_anchor with extract_text for title/header task.")
-                current = {
-                    "step_id": idx,
-                    "action": "extract_text",
-                    "args": {"selector": "h1"},
-                    "save_as": current.get("save_as") or "value",
-                }
-
             current["step_id"] = idx
             normalized_steps.append(current)
 
@@ -241,8 +232,3 @@ class Replanner:
             if mapped == name and mapped not in normalized_required_fields:
                 normalized_required_fields.append(mapped)
         return normalized_required_fields
-
-    @staticmethod
-    def _is_single_value_header_goal(user_goal: str) -> bool:
-        text = user_goal.lower()
-        return any(token in text for token in ["title", "heading", "header", "h1"]) and "near" not in text
