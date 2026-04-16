@@ -52,6 +52,11 @@ PLANNER_SYSTEM_PROMPT = """
 14. Используй ТОЛЬКО канонические action names из схемы. Запрещены синонимы вроде click_element или extract_value.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
 16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
+16.1) Для click избегай слабой формы get_by_text(...).first без уточнения. Предпочитай:
+   - role+name (например link/button),
+   - href_contains (+опционально text),
+   - scope_selector + text + exact=true,
+   - selector только если он специфичный и привязан к блоку.
 17. Task-family routing policy:
    - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
@@ -62,7 +67,7 @@ PLANNER_SYSTEM_PROMPT = """
      2) extract/save_as=section_b_data,
      3) детерминированный comparison в combined_result/structured_comparison (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
-19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]) и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
+19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), page_language, anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -119,7 +124,7 @@ REPLANNER_SYSTEM_PROMPT = """
 10) Никаких комментариев/markdown, только валидный JSON-объект.
 11) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
-13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй text/role+name/href_contains.
+13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй role+name/href_contains. Для text-click всегда уточняй exact=true или scope_selector.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
 16) Для anchored extraction учитывай page_language + anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
@@ -153,5 +158,5 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 12) Для click после неудачи сужай target (text, href_contains, role+name, visible_only), не повторяй общий selector.
 13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
 14) Для multi_step compare corrective-план должен извлекать section_a_data и section_b_data отдельно; не полагаться на regex group reference как на контракт сравнения.
-15) Коррективный replanning не используй для transient browser timeout/click/wait ошибок: это покрывается executor-level retries.
+15) Коррективный replanning используй для recoverable execution ошибок (anchor_not_found, value_not_found_near_anchor, ambiguous/weak click target, bad locator choice при browser_operation_failed), но не для чисто transient timeout без признака плохого locator.
 """

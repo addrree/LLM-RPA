@@ -42,6 +42,8 @@ def normalize_plan_action_aliases(payload: dict[str, Any]) -> tuple[dict[str, An
         if isinstance(action, str) and action in ACTION_ALIASES:
             step["action"] = ACTION_ALIASES[action]
             action_oov_detected = True
+        elif isinstance(action, str) and action not in CANONICAL_ACTIONS:
+            action_oov_detected = True
         normalized_steps.append(step)
 
     plan["steps"] = normalized_steps

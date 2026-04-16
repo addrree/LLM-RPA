@@ -234,11 +234,8 @@ class BenchmarkRunner:
         negative = [item for item in results if not item.should_succeed]
         positive_execution_success = sum(1 for item in positive if item.execution_status == "success")
         positive_verifier_accept = sum(1 for item in positive if item.verifier_verdict == "accept")
-        negative_expected_reject = sum(
-            1
-            for item in negative
-            if BenchmarkRunner._classify_negative_outcome(item) == "expected_reject"
-        )
+        semantic_negative = [item for item in negative if BenchmarkRunner._is_semantic_negative_trial(item)]
+        negative_expected_reject = sum(1 for item in semantic_negative if BenchmarkRunner._is_expected_negative_reject(item))
         plan_validation_pass = sum(1 for item in results if BenchmarkRunner._plan_validation_passed(item))
         correction_attempted = [item for item in results if item.correction_attempt_count > 0]
         correction_recovered = sum(
@@ -255,7 +252,7 @@ class BenchmarkRunner:
             total_scenarios=total,
             positive_execution_success_rate=BenchmarkRunner._safe_ratio(positive_execution_success, len(positive)),
             positive_verifier_accept_rate=BenchmarkRunner._safe_ratio(positive_verifier_accept, len(positive)),
-            negative_expected_reject_rate=BenchmarkRunner._safe_ratio(negative_expected_reject, len(negative)),
+            negative_expected_reject_rate=BenchmarkRunner._safe_ratio(negative_expected_reject, len(semantic_negative)),
             plan_validation_pass_rate=plan_validation_pass / total,
             correction_recovery_rate=BenchmarkRunner._safe_ratio(correction_recovered, len(correction_attempted)),
             corrective_plan_valid_count=corrective_plan_valid_total,
@@ -289,6 +286,10 @@ class BenchmarkRunner:
     @staticmethod
     def _is_expected_negative_reject(item: BenchmarkScenarioResult) -> bool:
         return BenchmarkRunner._classify_negative_outcome(item) == "expected_reject"
+
+    @staticmethod
+    def _is_semantic_negative_trial(item: BenchmarkScenarioResult) -> bool:
+        return item.execution_status == "success" and not item.technical_failure
 
     @staticmethod
     def _classify_negative_outcome(item: BenchmarkScenarioResult) -> str:

@@ -41,6 +41,11 @@ class WorkflowManager:
         "verification_reject",
         "missing_required_field",
         "schema_mismatch",
+        "anchor_not_found",
+        "value_not_found_near_anchor",
+        "ambiguous_click_target",
+        "weak_click_target",
+        "bad_locator_choice",
     }
 
     def __init__(
@@ -494,12 +499,26 @@ class WorkflowManager:
     @classmethod
     def _build_failure_context(cls, *, execution_result, verdict) -> dict:
         failure_type = execution_result.failure_type or "verification_reject"
+        error_message = str(execution_result.error_message or "").lower()
+        failed_action = execution_result.failed_action
+        failed_args = execution_result.failed_args or {}
+        if execution_result.status != "success":
+            if "anchor text not found" in error_message:
+                failure_type = "anchor_not_found"
+            elif "value not found near anchor" in error_message or "pattern not found near anchor_text" in error_message:
+                failure_type = "value_not_found_near_anchor"
+            elif "ambiguous or weak click target" in error_message:
+                failure_type = "ambiguous_click_target"
+            elif "too broad" in error_message and failed_action == "click":
+                failure_type = "weak_click_target"
+            elif execution_result.failure_type == "browser_operation_failed" and failed_action == "click":
+                failure_type = "bad_locator_choice"
         if verdict.verdict == "reject" and execution_result.status == "success":
             failure_type = cls._classify_verifier_failure(verdict.issues)
         return {
             "failure_type": failure_type,
-            "failed_action": execution_result.failed_action,
-            "failed_args": execution_result.failed_args or {},
+            "failed_action": failed_action,
+            "failed_args": failed_args,
             "verifier_issues": list(verdict.issues or []),
         }
 
@@ -541,10 +560,17 @@ class WorkflowManager:
             error = str(attempt.get("error", "")).lower()
             if "too broad" in error and "click" in error:
                 disallowed.append("broad_click_selector")
+            if "ambiguous or weak click target" in error:
+                disallowed.append("ambiguous_click_target")
             if "missing required args" in error:
                 disallowed.append("missing_required_args")
             if "duplicate" in error:
                 disallowed.append("duplicate_plan_signature")
+            failure_type = str(attempt.get("failure_type", "")).lower()
+            if failure_type in {"anchor_not_found", "value_not_found_near_anchor"}:
+                disallowed.append("same_anchor_retry_without_candidates")
+            if failure_type in {"ambiguous_click_target", "weak_click_target", "bad_locator_choice"}:
+                disallowed.append("generic_click_target")
         return sorted(set(disallowed))
 
     @staticmethod

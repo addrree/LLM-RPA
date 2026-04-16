@@ -111,7 +111,7 @@ def test_negative_expected_reject_ignores_technical_failures():
         ),
     ]
     metrics = BenchmarkRunner._compute_metrics(results)
-    assert metrics.negative_expected_reject_rate == 0.5
+    assert metrics.negative_expected_reject_rate == 1.0
 
 
 def test_negative_outcome_classification_distinguishes_expected_and_unexpected():
