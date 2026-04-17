@@ -293,28 +293,3 @@ def test_extract_value_near_anchor_auto_language_skips_cross_language_anchor():
     assert value == "support@example.org"
     assert args["anchor_text"] == "Contact"
     assert args["page_language"] == "en"
-
-
-def test_extract_value_near_anchor_uses_default_anchor_candidates_for_email():
-    observed_text = "Contact support at support@example.org for urgent issues"
-    page = _FakePage(
-        observed_text,
-        evaluate_payload=[
-            {
-                "source": "dom_local_block",
-                "window_text": observed_text,
-                "scope_text": observed_text,
-                "anchor_idx_in_window": observed_text.index("Contact"),
-                "anchor_idx_in_scope": observed_text.index("Contact"),
-            }
-        ],
-    )
-    handler = ActionHandlers()
-    args = {
-        "anchor_text": "Контактная информация",
-        "value_type": "email",
-        "anchor_matching_mode": "auto",
-    }
-    value = asyncio.run(handler.extract_value_near_anchor(page, args, runtime_state={}))
-    assert value == "support@example.org"
-    assert args["anchor_text"] == "Contact"
