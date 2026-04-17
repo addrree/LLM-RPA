@@ -24,7 +24,6 @@
       "should_succeed": true,
       "notes": "Use a stable public site; avoid login-walled pages.",
       "task_family": "single_value_extraction",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": []
     },
@@ -51,7 +50,6 @@
       "should_succeed": true,
       "notes": "Anchor/value may appear in footer or contact section.",
       "task_family": "anchored_value_extraction",
-      "page_language": "en",
       "anchor_candidates": [
         "Email",
         "Contact",
@@ -84,7 +82,6 @@
       "should_succeed": true,
       "notes": "Suitable targets include docs indexes, directories, catalogs, or public datasets.",
       "task_family": "repeated_structured_items",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": []
     },
@@ -112,7 +109,6 @@
       "should_succeed": true,
       "notes": "Final URL should differ from initial URL in normal successful runs.",
       "task_family": "navigation_then_extraction",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": [
         "start_page",
@@ -143,7 +139,6 @@
       "should_succeed": true,
       "notes": "Use deterministic sections when possible.",
       "task_family": "multi_step_information_retrieval",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": [
         "source_a",
@@ -173,7 +168,6 @@
       "should_succeed": false,
       "notes": "Expected behavior may be verifier reject with a clear explanation.",
       "task_family": "negative_or_ambiguous_case",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": []
     }
