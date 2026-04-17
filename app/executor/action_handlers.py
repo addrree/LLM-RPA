@@ -360,6 +360,13 @@ class ActionHandlers:
         page_language = str(args.get("page_language", "")).strip().lower()
         value_pattern = args.get("value_pattern")
         value_type = str(args.get("value_type", "")).strip().lower()
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        effective_page_language = await self._resolve_page_language(
+            page=page,
+            source_text=source_text,
+            provided_language=page_language,
+        )
+        args["page_language"] = effective_page_language
         if not value_pattern:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
@@ -370,7 +377,7 @@ class ActionHandlers:
                 preferred_anchor=anchor_text,
                 anchor_candidates=anchor_candidates,
                 anchor_matching_mode=anchor_matching_mode,
-                page_language=page_language,
+                page_language=effective_page_language,
                 value_pattern=str(value_pattern) if value_pattern else None,
                 runtime_state=runtime_state,
             )
@@ -550,6 +557,33 @@ class ActionHandlers:
             elif re.search(value_pattern, str(candidate.get("window_text") or ""), flags=re.IGNORECASE):
                 score += 1
         return score
+
+    async def _resolve_page_language(self, *, page, source_text: str, provided_language: str) -> str:
+        normalized = provided_language.strip().lower()
+        if normalized and normalized != "auto":
+            return normalized
+
+        html_lang = ""
+        try:
+            lang_attr = await page.evaluate(
+                """
+                () => (document.documentElement && document.documentElement.lang) || ""
+                """
+            )
+            html_lang = str(lang_attr or "").strip().lower()
+        except Exception:
+            html_lang = ""
+
+        if html_lang.startswith("en"):
+            return "en"
+        if html_lang.startswith("ru"):
+            return "ru"
+
+        latin = len(re.findall(r"[A-Za-z]", source_text))
+        cyrillic = len(re.findall(r"[А-Яа-яЁё]", source_text))
+        if latin == 0 and cyrillic == 0:
+            return ""
+        return "en" if latin >= cyrillic else "ru"
 
     async def _collect_visible_anchor_texts(self, page) -> list[str]:
         anchors = await page.evaluate(
