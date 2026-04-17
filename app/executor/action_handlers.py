@@ -375,7 +375,7 @@ class ActionHandlers:
         resolved_candidates = list(anchor_candidates)
         if not resolved_candidates:
             resolved_candidates = self._default_anchor_candidates(
-                value_type=inferred_value_type,
+                value_type=value_type,
                 page_language=effective_page_language,
             )
         if resolved_candidates:
@@ -670,17 +670,6 @@ class ActionHandlers:
         if page_language in {"ru", "russian"}:
             return ["Контакты", "Поддержка", "Электронная почта", "Почта", "Телефон", "Помощь"]
         return ["Contact", "Support", "Email", "Help", "Phone"]
-
-    @staticmethod
-    def _infer_value_type_from_pattern(value_pattern: str) -> str:
-        pattern = value_pattern.strip().lower()
-        if not pattern:
-            return ""
-        if "@" in pattern and "\\." in pattern:
-            return "email"
-        if "\\+?" in pattern and "\\d" in pattern:
-            return "phone"
-        return ""
 
     async def _load_source_text(self, page, runtime_state=None) -> str:
         source_text = ""
