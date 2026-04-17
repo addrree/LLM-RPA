@@ -38,6 +38,9 @@ class BenchmarkScenarioResult(BaseModel):
     final_url: str | None = None
     error_message: str | None = None
     execution_failure_type: str | None = None
+    failed_action: str | None = None
+    failed_args: dict = Field(default_factory=dict)
+    execution_logs_tail: list[str] = Field(default_factory=list)
     technical_failure: bool = False
     negative_outcome: str | None = None
     failure_bucket: str | None = None
@@ -113,6 +116,9 @@ class BenchmarkRunner:
         final_url = None
         error_message = None
         execution_failure_type = None
+        failed_action = None
+        failed_args = {}
+        execution_logs_tail: list[str] = []
         technical_failure = False
 
         try:
@@ -131,6 +137,12 @@ class BenchmarkRunner:
             final_url = execution.final_url
             error_message = execution.error_message
             execution_failure_type = execution.failure_type
+            failed_action = execution.failed_action
+            failed_args = execution.failed_args
+            execution_logs_tail = [
+                f"{entry.step_id}:{entry.action}:{entry.status}:{(entry.message or '').strip()}"
+                for entry in execution.logs[-5:]
+            ]
             technical_failure = bool(execution.technical_failure)
 
             save_artifacts(result, run_id=run_id)
@@ -184,6 +196,9 @@ class BenchmarkRunner:
             final_url=final_url,
             error_message=error_message,
             execution_failure_type=execution_failure_type,
+            failed_action=failed_action,
+            failed_args=failed_args,
+            execution_logs_tail=execution_logs_tail,
             technical_failure=technical_failure,
             notes=scenario.notes,
         )
@@ -396,6 +411,9 @@ def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:
                 "final_url",
                 "error_message",
                 "execution_failure_type",
+                "failed_action",
+                "failed_args",
+                "execution_logs_tail",
                 "technical_failure",
                 "negative_outcome",
                 "failure_bucket",
