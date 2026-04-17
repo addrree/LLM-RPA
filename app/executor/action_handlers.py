@@ -371,11 +371,17 @@ class ActionHandlers:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
-        if anchor_candidates:
+        resolved_candidates = list(anchor_candidates)
+        if not resolved_candidates:
+            resolved_candidates = self._default_anchor_candidates(
+                value_type=value_type,
+                page_language=effective_page_language,
+            )
+        if resolved_candidates:
             anchor_text = await self._resolve_anchor_text(
                 page=page,
                 preferred_anchor=anchor_text,
-                anchor_candidates=anchor_candidates,
+                anchor_candidates=resolved_candidates,
                 anchor_matching_mode=anchor_matching_mode,
                 page_language=effective_page_language,
                 value_pattern=str(value_pattern) if value_pattern else None,
@@ -655,6 +661,14 @@ class ActionHandlers:
         if value_type == "phone":
             return r"(\+?\d[\d\-\(\)\s\.]{6,}\d)"
         return None
+
+    @staticmethod
+    def _default_anchor_candidates(*, value_type: str, page_language: str) -> list[str]:
+        if value_type not in {"email", "phone"}:
+            return []
+        if page_language in {"ru", "russian"}:
+            return ["Контакты", "Поддержка", "Электронная почта", "Почта", "Телефон", "Помощь"]
+        return ["Contact", "Support", "Email", "Help", "Phone"]
 
     async def _load_source_text(self, page, runtime_state=None) -> str:
         source_text = ""
