@@ -56,7 +56,7 @@ class _FakePage:
         assert selector == "body"
         return _FakeBodyLocator(self._text)
 
-    async def evaluate(self, _script, _payload):
+    async def evaluate(self, _script, _payload=None):
         return self._evaluate_payload
 
 
@@ -266,3 +266,30 @@ def test_extract_value_near_anchor_relaxes_overly_strict_context():
         )
     )
     assert value == "support@example.org"
+
+
+def test_extract_value_near_anchor_auto_language_skips_cross_language_anchor():
+    observed_text = "Contact support at support@example.org for urgent issues"
+    page = _FakePage(
+        observed_text,
+        evaluate_payload=[
+            {
+                "source": "dom_local_block",
+                "window_text": observed_text,
+                "scope_text": observed_text,
+                "anchor_idx_in_window": observed_text.index("Contact"),
+                "anchor_idx_in_scope": observed_text.index("Contact"),
+            }
+        ],
+    )
+    handler = ActionHandlers()
+    args = {
+        "anchor_text": "Контактная информация",
+        "anchor_candidates": ["Контактная информация", "Contact", "Support"],
+        "value_type": "email",
+        "anchor_matching_mode": "auto",
+    }
+    value = asyncio.run(handler.extract_value_near_anchor(page, args, runtime_state={}))
+    assert value == "support@example.org"
+    assert args["anchor_text"] == "Contact"
+    assert args["page_language"] == "en"

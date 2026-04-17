@@ -149,3 +149,31 @@ def test_validator_accepts_anchor_candidates_without_anchor_text_for_email_value
         }
     )
     PlanValidator().validate(plan)
+
+
+def test_validator_rejects_typed_anchor_extraction_group_out_of_range():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "g",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 3, "timeout_sec": 20},
+            "expected_result": {"description": "d", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_value_near_anchor",
+                    "args": {
+                        "anchor_candidates": ["Contact"],
+                        "value_type": "email",
+                        "group_index": 2,
+                    },
+                    "save_as": "value",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(plan)
