@@ -24,7 +24,6 @@
       "should_succeed": true,
       "notes": "Smoke subset of generalized suite.",
       "task_family": "single_value_extraction",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": []
     },
@@ -51,7 +50,6 @@
       "should_succeed": true,
       "notes": "Smoke subset of generalized suite.",
       "task_family": "anchored_value_extraction",
-      "page_language": "en",
       "anchor_candidates": [
         "Email",
         "Contact",
@@ -84,7 +82,6 @@
       "should_succeed": true,
       "notes": "Smoke subset of generalized suite.",
       "task_family": "repeated_structured_items",
-      "page_language": "en",
       "anchor_candidates": [],
       "expected_navigation": []
     }

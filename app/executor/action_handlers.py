@@ -360,17 +360,31 @@ class ActionHandlers:
         page_language = str(args.get("page_language", "")).strip().lower()
         value_pattern = args.get("value_pattern")
         value_type = str(args.get("value_type", "")).strip().lower()
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        effective_page_language = await self._resolve_page_language(
+            page=page,
+            source_text=source_text,
+            provided_language=page_language,
+        )
+        args["page_language"] = effective_page_language
         if not value_pattern:
             value_pattern = self._resolve_value_pattern(value_type)
+        inferred_value_type = value_type or self._infer_value_type_from_pattern(str(value_pattern) if value_pattern else "")
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
-        if anchor_candidates:
+        resolved_candidates = list(anchor_candidates)
+        if not resolved_candidates:
+            resolved_candidates = self._default_anchor_candidates(
+                value_type=inferred_value_type,
+                page_language=effective_page_language,
+            )
+        if resolved_candidates:
             anchor_text = await self._resolve_anchor_text(
                 page=page,
                 preferred_anchor=anchor_text,
-                anchor_candidates=anchor_candidates,
+                anchor_candidates=resolved_candidates,
                 anchor_matching_mode=anchor_matching_mode,
-                page_language=page_language,
+                page_language=effective_page_language,
                 value_pattern=str(value_pattern) if value_pattern else None,
                 runtime_state=runtime_state,
             )
@@ -383,7 +397,7 @@ class ActionHandlers:
         required_right_context = args.get("required_right_context")
         required_left_context = args.get("required_left_context")
         max_distance_chars = args.get("max_distance_chars")
-        group_index = args.get("group_index", 1)
+        group_index = args.get("group_index")
         normalize_number = bool(args.get("normalize_number", False))
         number_type = args.get("number_type")
         strip_plus = bool(args.get("strip_plus", False))
@@ -551,6 +565,33 @@ class ActionHandlers:
                 score += 1
         return score
 
+    async def _resolve_page_language(self, *, page, source_text: str, provided_language: str) -> str:
+        normalized = provided_language.strip().lower()
+        if normalized and normalized != "auto":
+            return normalized
+
+        html_lang = ""
+        try:
+            lang_attr = await page.evaluate(
+                """
+                () => (document.documentElement && document.documentElement.lang) || ""
+                """
+            )
+            html_lang = str(lang_attr or "").strip().lower()
+        except Exception:
+            html_lang = ""
+
+        if html_lang.startswith("en"):
+            return "en"
+        if html_lang.startswith("ru"):
+            return "ru"
+
+        latin = len(re.findall(r"[A-Za-z]", source_text))
+        cyrillic = len(re.findall(r"[А-Яа-яЁё]", source_text))
+        if latin == 0 and cyrillic == 0:
+            return ""
+        return "en" if latin >= cyrillic else "ru"
+
     async def _collect_visible_anchor_texts(self, page) -> list[str]:
         anchors = await page.evaluate(
             """
@@ -622,6 +663,25 @@ class ActionHandlers:
             return r"(\+?\d[\d\-\(\)\s\.]{6,}\d)"
         return None
 
+    @staticmethod
+    def _default_anchor_candidates(*, value_type: str, page_language: str) -> list[str]:
+        if value_type not in {"email", "phone"}:
+            return []
+        if page_language in {"ru", "russian"}:
+            return ["Контакты", "Поддержка", "Электронная почта", "Почта", "Телефон", "Помощь"]
+        return ["Contact", "Support", "Email", "Help", "Phone"]
+
+    @staticmethod
+    def _infer_value_type_from_pattern(value_pattern: str) -> str:
+        pattern = value_pattern.strip().lower()
+        if not pattern:
+            return ""
+        if "@" in pattern and "\\." in pattern:
+            return "email"
+        if "\\+?" in pattern and "\\d" in pattern:
+            return "phone"
+        return ""
+
     async def _load_source_text(self, page, runtime_state=None) -> str:
         source_text = ""
         if runtime_state is not None:
@@ -668,7 +728,7 @@ class ActionHandlers:
     ) -> list[dict[str, Any]]:
         window_chars = max_distance_chars if isinstance(max_distance_chars, int) and max_distance_chars > 0 else 600
         candidates = await page.evaluate(
-            """
+            r"""
             ({ anchorText, direction, sameBlockOnly, windowChars, matchingMode }) => {
               const normalizeText = (text) => (text || "").replace(/\s+/g, " ").trim();
               const sectionSelector = "section, article, main, aside, footer, header, nav, form, dl, table";

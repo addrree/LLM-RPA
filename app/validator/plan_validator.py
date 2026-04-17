@@ -357,6 +357,10 @@ class PlanValidator:
                 action_name="extract_value_near_anchor",
                 field_name=None,
             )
+        elif has_type and group_index is not None and group_index > 1:
+            raise PlanValidationError(
+                "extract_value_near_anchor with typed value_type supports only group_index in {0,1}"
+            )
         normalize_number = args.get("normalize_number")
         if normalize_number is not None and not isinstance(normalize_number, bool):
             raise PlanValidationError("extract_value_near_anchor requires boolean 'normalize_number'")
