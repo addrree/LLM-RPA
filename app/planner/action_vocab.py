@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from typing import Any
 
+ACTION_ALIASES = {
+    "click_element": "click",
+}
+
 CANONICAL_ACTIONS = {
     "open_url",
     "click",
@@ -33,8 +37,12 @@ def normalize_plan_action_aliases(payload: dict[str, Any]) -> tuple[dict[str, An
             continue
         step = dict(raw_step)
         action = step.get("action")
-        if isinstance(action, str) and action not in CANONICAL_ACTIONS:
-            action_oov_detected = True
+        if isinstance(action, str):
+            canonical = ACTION_ALIASES.get(action, action)
+            if canonical != action:
+                step["action"] = canonical
+            if canonical not in CANONICAL_ACTIONS:
+                action_oov_detected = True
         normalized_steps.append(step)
 
     plan["steps"] = normalized_steps
