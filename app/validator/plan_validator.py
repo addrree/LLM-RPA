@@ -48,12 +48,22 @@ class PlanValidator:
                 self._validate_click_args(step.args)
             if step.action == "type" and ("selector" not in step.args or "text" not in step.args):
                 raise PlanValidationError("type requires 'selector' and 'text'")
+            if step.action == "navigate_to_relevant_section":
+                self._validate_click_args(step.args)
             if step.action in {"extract_text", "extract_html"} and "selector" not in step.args:
                 raise PlanValidationError(f"{step.action} requires 'selector'")
             if step.action == "extract_items":
                 self._validate_extract_items(step.args, step.save_as)
             if step.action == "extract_structured_items":
                 self._validate_extract_structured_items(step.args, step.save_as)
+            if step.action == "extract_value_from_section":
+                self._validate_extract_value_from_section(step.args, step.save_as)
+            if step.action == "extract_structured_items_from_region":
+                self._validate_extract_structured_items_from_region(step.args, step.save_as)
+            if step.action == "compare_structured_values":
+                self._validate_compare_structured_values(step.args, step.save_as)
+            if step.action == "assert_page_contains":
+                self._validate_assert_page_contains(step.args)
             if step.action == "observe_page" and not step.save_as:
                 raise PlanValidationError("observe_page requires 'save_as'")
             if step.action == "extract_pattern_from_page_text":
@@ -300,6 +310,37 @@ class PlanValidator:
             raise PlanValidationError("extract_text_near_text requires positive integer 'window_chars'")
         if not save_as:
             raise PlanValidationError("extract_text_near_text requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_value_from_section(args: dict, save_as: str | None) -> None:
+        if not str(args.get("section_selector", "")).strip():
+            raise PlanValidationError("extract_value_from_section requires non-empty 'section_selector'")
+        if not (str(args.get("field_selector", "")).strip() or str(args.get("pattern", "")).strip()):
+            raise PlanValidationError("extract_value_from_section requires 'field_selector' or 'pattern'")
+        if not save_as:
+            raise PlanValidationError("extract_value_from_section requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_structured_items_from_region(args: dict, save_as: str | None) -> None:
+        if not str(args.get("region_selector", "")).strip():
+            raise PlanValidationError("extract_structured_items_from_region requires non-empty 'region_selector'")
+        if not str(args.get("container_selector", "")).strip():
+            raise PlanValidationError("extract_structured_items_from_region requires non-empty 'container_selector'")
+        PlanValidator._validate_extract_items(args, save_as)
+
+    @staticmethod
+    def _validate_compare_structured_values(args: dict, save_as: str | None) -> None:
+        left_key = str(args.get("left_key", "section_a_data")).strip()
+        right_key = str(args.get("right_key", "section_b_data")).strip()
+        if not left_key or not right_key:
+            raise PlanValidationError("compare_structured_values requires non-empty left_key/right_key")
+        if not save_as:
+            raise PlanValidationError("compare_structured_values requires 'save_as'")
+
+    @staticmethod
+    def _validate_assert_page_contains(args: dict) -> None:
+        if not any(str(args.get(field, "")).strip() for field in ("selector", "text", "pattern")):
+            raise PlanValidationError("assert_page_contains requires one of selector|text|pattern")
 
     @staticmethod
     def _validate_extract_value_near_anchor(args: dict, save_as: str | None) -> None:

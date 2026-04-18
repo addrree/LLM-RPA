@@ -20,7 +20,7 @@ PLANNER_SYSTEM_PROMPT = """
   "steps": [
     {
       "step_id": 1,
-      "action": "open_url|click|type|wait_for|extract_text|extract_html|extract_items|extract_structured_items|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
+      "action": "open_url|click|navigate_to_relevant_section|type|wait_for|extract_text|extract_html|extract_items|extract_structured_items|extract_value_from_section|extract_structured_items_from_region|compare_structured_values|assert_page_contains|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
       "args": {},
       "save_as": "optional_string"
     }
@@ -61,11 +61,11 @@ PLANNER_SYSTEM_PROMPT = """
    - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
-   - navigation_then_extraction: сначала click (text/href/role+name), затем wait_for, затем extraction.
+   - navigation_then_extraction: предпочитай navigate_to_relevant_section, затем extraction.
    - multi_step_information_retrieval: используй формальный pipeline:
      1) extract/save_as=section_a_data,
      2) extract/save_as=section_b_data,
-     3) детерминированный comparison в combined_result/structured_comparison (без regex-group контрактов между шагами).
+     3) compare_structured_values с save_as=structured_comparison (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), page_language, anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
 """

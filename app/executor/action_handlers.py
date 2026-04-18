@@ -1,4 +1,6 @@
+import asyncio
 import re
+from datetime import datetime, timezone
 from typing import Any
 
 from app.observer.page_observer import PageObserver
@@ -16,68 +18,141 @@ class ActionHandlers:
         self.page_observer = PageObserver()
 
     async def open_url(self, page, args, runtime_state=None):
-        await page.goto(args["url"])
+        wait_until = str(args.get("wait_until", "domcontentloaded"))
+        timeout_ms = int(args.get("timeout_ms", 30000))
+        await page.goto(args["url"], wait_until=wait_until, timeout=timeout_ms)
 
     async def click(self, page, args, runtime_state=None):
-        selector = str(args.get("selector", "")).strip()
-        text = str(args.get("text", "")).strip()
-        role = str(args.get("role", "")).strip()
-        name = str(args.get("name", "")).strip()
-        href_contains = str(args.get("href_contains", "")).strip()
-        scope_selector = str(args.get("scope_selector", "")).strip()
-        exact = bool(args.get("exact", False))
-        visible_only = bool(args.get("visible_only", True))
-
-        if selector:
-            if self._is_too_broad_click_selector(selector):
-                raise ValueError(
-                    f"Click selector is too broad: {selector!r}. Use specific selector or text/role/href filter."
-                )
-            resolved_selector = selector
-            if visible_only:
-                resolved_selector = f"{selector}:visible"
-            locator = page.locator(resolved_selector)
-            await locator.first.click()
-            return
-
-        scope = page.locator(scope_selector) if scope_selector else page
-
-        if role and name:
-            locator = scope.get_by_role(role, name=name, exact=exact)
-            await locator.first.click()
-            return
-
-        if href_contains:
-            href_selector = f'a[href*="{href_contains}"]'
-            if visible_only:
-                href_selector = f"{href_selector}:visible"
-            locator = scope.locator(href_selector)
-            if text:
-                locator = locator.filter(has_text=text)
-            await locator.first.click()
-            return
-
-        if text:
-            if not exact and not scope_selector:
-                raise ValueError(
-                    "Ambiguous or weak click target: text-based click requires exact=true or scope_selector."
-                )
-            target_selector = "a, button, [role='button'], [role='link']"
-            if visible_only:
-                target_selector = "a:visible, button:visible, [role='button']:visible, [role='link']:visible"
-            locator = scope.locator(target_selector).filter(has_text=text)
-            await locator.first.click()
-            return
-
-        raise ValueError(
-            "click requires selector or text/role+name/href_contains (optionally with scope_selector/exact)"
+        locator, candidate = await self._resolve_ranked_click_locator(page=page, args=args, runtime_state=runtime_state)
+        await self._wait_for_actionable(locator)
+        await locator.first.click()
+        args["_executor_note"] = (
+            f"click used ranked locator strategy={candidate.get('strategy')}; selector={candidate.get('selector')!r}; "
+            f"candidates_checked={candidate.get('candidates_checked', 0)}"
         )
 
     async def type(self, page, args, runtime_state=None):
         await page.fill(args["selector"], args["text"])
 
     async def wait_for(self, page, args, runtime_state=None):
-        await page.wait_for_selector(args["selector"])
+        if "selector" in args and str(args.get("selector", "")).strip():
+            await page.wait_for_selector(args["selector"], timeout=int(args.get("timeout_ms", 30000)))
+            return
+        if "url_contains" in args and str(args.get("url_contains", "")).strip():
+            await page.wait_for_url(f"**{args['url_contains']}**", timeout=int(args.get("timeout_ms", 30000)))
+            return
+        if "text" in args and str(args.get("text", "")).strip():
+            await page.get_by_text(str(args["text"]), exact=bool(args.get("exact", False))).first.wait_for(
+                state="visible",
+                timeout=int(args.get("timeout_ms", 30000)),
+            )
+            return
+        raise ValueError("wait_for requires one of selector | url_contains | text")
+
+    async def navigate_to_relevant_section(self, page, args, runtime_state=None):
+        await self.click(page, args, runtime_state)
+        wait_args = args.get("wait_for") if isinstance(args.get("wait_for"), dict) else {}
+        if wait_args:
+            await self.wait_for(page, wait_args, runtime_state)
+        elif args.get("post_click_wait_selector"):
+            await self.wait_for(page, {"selector": args["post_click_wait_selector"]}, runtime_state)
+        elif args.get("post_click_wait_ms"):
+            await asyncio.sleep(float(args["post_click_wait_ms"]) / 1000.0)
+        return {
+            "navigated": True,
+            "target": {
+                "text": args.get("text"),
+                "name": args.get("name"),
+                "href_contains": args.get("href_contains"),
+                "selector": args.get("selector"),
+            },
+            "final_url": page.url,
+        }
+
+    async def extract_value_from_section(self, page, args, runtime_state=None):
+        section_selector = str(args.get("section_selector", "")).strip()
+        if not section_selector:
+            raise ValueError("extract_value_from_section requires non-empty 'section_selector'")
+        section = page.locator(section_selector).first
+        await section.wait_for(state="visible", timeout=int(args.get("timeout_ms", 15000)))
+
+        field_selector = str(args.get("field_selector", "")).strip()
+        pattern = str(args.get("pattern", "")).strip()
+        if field_selector:
+            target = section.locator(field_selector).first
+            await target.wait_for(state="visible", timeout=int(args.get("timeout_ms", 15000)))
+            text = (await target.inner_text()).strip()
+        else:
+            text = (await section.inner_text()).strip()
+
+        if pattern:
+            match = re.search(pattern, text, flags=re.IGNORECASE if bool(args.get("ignore_case", True)) else 0)
+            if not match:
+                raise ValueError(f"Pattern not found in section: {pattern}")
+            value = self._extract_match_value(match, group_index=args.get("group_index"))
+        else:
+            value = text
+
+        if bool(args.get("normalize_number", False)):
+            value = self._normalize_number_token(
+                value,
+                number_type=str(args.get("number_type", "int")).lower(),
+                strip_plus=bool(args.get("strip_plus", True)),
+            )
+        return value
+
+    async def extract_structured_items_from_region(self, page, args, runtime_state=None):
+        region_selector = str(args.get("region_selector", "")).strip()
+        if not region_selector:
+            raise ValueError("extract_structured_items_from_region requires non-empty 'region_selector'")
+        container_selector = str(args.get("container_selector", "")).strip()
+        if not container_selector:
+            raise ValueError("extract_structured_items_from_region requires non-empty 'container_selector'")
+
+        delegated = dict(args)
+        delegated["container_selector"] = f"{region_selector} {container_selector}"
+        items = await self.extract_items(page, delegated, runtime_state)
+        args["_executor_note"] = (
+            f"extract_structured_items_from_region via region={region_selector!r}; "
+            f"container={container_selector!r}; extracted={len(items)}"
+        )
+        return items
+
+    async def compare_structured_values(self, page, args, runtime_state=None):
+        runtime = runtime_state if runtime_state is not None else {}
+        extracted = runtime.get("extracted_data", {})
+        left_key = str(args.get("left_key", "section_a_data"))
+        right_key = str(args.get("right_key", "section_b_data"))
+        left = extracted.get(left_key)
+        right = extracted.get(right_key)
+        if left is None or right is None:
+            raise ValueError(
+                f"compare_structured_values requires data for '{left_key}' and '{right_key}' in extracted_data"
+            )
+        comparison = self._build_structured_comparison(left=left, right=right, label_left=left_key, label_right=right_key)
+        return comparison
+
+    async def assert_page_contains(self, page, args, runtime_state=None):
+        text = str(args.get("text", "")).strip()
+        pattern = str(args.get("pattern", "")).strip()
+        selector = str(args.get("selector", "")).strip()
+        if selector:
+            count = await page.locator(selector).count()
+            if count < 1:
+                raise ValueError(f"assert_page_contains failed: selector not found {selector!r}")
+            return {"assertion": "selector", "matched": count}
+        body_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        if text:
+            matched = text.lower() in body_text.lower() if bool(args.get("ignore_case", True)) else text in body_text
+            if not matched:
+                raise ValueError(f"assert_page_contains failed: text not found {text!r}")
+            return {"assertion": "text", "matched": True}
+        if pattern:
+            match = re.search(pattern, body_text, flags=re.IGNORECASE if bool(args.get("ignore_case", True)) else 0)
+            if not match:
+                raise ValueError(f"assert_page_contains failed: pattern not found {pattern!r}")
+            return {"assertion": "pattern", "matched": True}
+        raise ValueError("assert_page_contains requires selector | text | pattern")
 
     async def extract_text(self, page, args, runtime_state=None):
         selector = args["selector"]
@@ -679,6 +754,112 @@ class ActionHandlers:
             if runtime_state is not None:
                 runtime_state["last_page_text"] = source_text
         return source_text
+
+    async def _resolve_ranked_click_locator(self, *, page, args, runtime_state=None):
+        selector = str(args.get("selector", "")).strip()
+        text = str(args.get("text", "")).strip()
+        role = str(args.get("role", "")).strip()
+        name = str(args.get("name", "")).strip()
+        href_contains = str(args.get("href_contains", "")).strip()
+        scope_selector = str(args.get("scope_selector", "")).strip()
+        label = str(args.get("label", "")).strip()
+        placeholder = str(args.get("placeholder", "")).strip()
+        exact = bool(args.get("exact", False))
+        visible_only = bool(args.get("visible_only", True))
+
+        scope = page.locator(scope_selector) if scope_selector else page
+        candidates: list[dict[str, Any]] = []
+        if role and name:
+            candidates.append({"strategy": "role_name", "locator": scope.get_by_role(role, name=name, exact=exact), "selector": f"role={role}, name={name}"})
+        if label:
+            candidates.append({"strategy": "label", "locator": scope.get_by_label(label, exact=exact), "selector": f"label={label}"})
+        if placeholder:
+            candidates.append({"strategy": "placeholder", "locator": scope.get_by_placeholder(placeholder), "selector": f"placeholder={placeholder}"})
+        if text:
+            candidates.append({"strategy": "visible_text", "locator": scope.get_by_text(text, exact=exact), "selector": f"text={text}"})
+        if href_contains:
+            href_selector = f'a[href*="{href_contains}"]'
+            candidates.append({"strategy": "href_filter", "locator": scope.locator(href_selector), "selector": href_selector})
+        if scope_selector and text:
+            scoped_selector = f"{scope_selector} a, {scope_selector} button, {scope_selector} [role='button'], {scope_selector} [role='link']"
+            candidates.append({"strategy": "scoped_selector", "locator": page.locator(scoped_selector).filter(has_text=text), "selector": scoped_selector})
+        if selector:
+            if self._is_too_broad_click_selector(selector):
+                raise ValueError(
+                    f"Click selector is too broad: {selector!r}. Use specific selector or text/role/href filter."
+                )
+            candidates.append({"strategy": "generic_selector_fallback", "locator": page.locator(selector), "selector": selector})
+
+        if not candidates:
+            raise ValueError("click requires selector or text/role+name/href_contains/label/placeholder")
+
+        diagnostics: list[dict[str, Any]] = []
+        for candidate in candidates:
+            locator = candidate["locator"]
+            count = await locator.count()
+            diagnostic_item = {
+                "strategy": candidate["strategy"],
+                "selector": candidate["selector"],
+                "count": count,
+            }
+            diagnostics.append(diagnostic_item)
+            if count > 0:
+                selected = {
+                    "strategy": candidate["strategy"],
+                    "selector": candidate["selector"],
+                    "count": count,
+                    "candidates_checked": len(diagnostics),
+                }
+                if runtime_state is not None:
+                    runtime_state["last_locator_diagnostics"] = diagnostics
+                    runtime_state["last_selected_candidate"] = selected
+                return locator, selected
+
+        if runtime_state is not None:
+            runtime_state["last_locator_diagnostics"] = diagnostics
+        raise ValueError(f"No locator candidates matched for click target. diagnostics={diagnostics}")
+
+    async def _wait_for_actionable(self, locator) -> None:
+        target = locator.first
+        await target.wait_for(state="visible", timeout=10000)
+        await target.scroll_into_view_if_needed(timeout=10000)
+        enabled = await target.is_enabled()
+        if not enabled:
+            raise ValueError("Resolved click target is disabled")
+        await asyncio.sleep(0.08)
+
+    @staticmethod
+    def _build_structured_comparison(*, left: Any, right: Any, label_left: str, label_right: str) -> dict[str, Any]:
+        left_keys = sorted(left.keys()) if isinstance(left, dict) else []
+        right_keys = sorted(right.keys()) if isinstance(right, dict) else []
+        differing_keys: list[str] = []
+        differing_values: dict[str, dict[str, Any]] = {}
+        if isinstance(left, dict) and isinstance(right, dict):
+            for key in sorted(set(left.keys()).union(right.keys())):
+                if left.get(key) != right.get(key):
+                    differing_keys.append(str(key))
+                    differing_values[str(key)] = {
+                        label_left: left.get(key),
+                        label_right: right.get(key),
+                    }
+
+        return {
+            "compared": True,
+            "compared_at": datetime.now(timezone.utc).isoformat(),
+            "left_key": label_left,
+            "right_key": label_right,
+            "left_present": left is not None,
+            "right_present": right is not None,
+            "left_type": type(left).__name__,
+            "right_type": type(right).__name__,
+            "left_keys": left_keys,
+            "right_keys": right_keys,
+            "shared_keys": sorted(set(left_keys).intersection(right_keys)),
+            "exact_match": left == right,
+            "differing_keys": differing_keys,
+            "differing_values": differing_values,
+            "status": "equal" if left == right else "different",
+        }
 
     @staticmethod
     def _is_too_broad_click_selector(selector: str) -> bool:

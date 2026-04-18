@@ -342,7 +342,7 @@ def test_corrective_retry_stops_on_repeated_failure_class():
 def test_multi_step_comparison_is_augmented_deterministically():
     execution = ExecutionResult(
         status="success",
-        extracted_data={"source_a": {"x": 1}, "source_b": {"x": 2}},
+        extracted_data={"section_a_data": {"x": 1}, "section_b_data": {"x": 2}},
         logs=[],
     )
     WorkflowManager._augment_multi_step_comparison(execution)

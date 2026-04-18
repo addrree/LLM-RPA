@@ -41,6 +41,8 @@ class BenchmarkScenarioResult(BaseModel):
     failed_action: str | None = None
     failed_args: dict = Field(default_factory=dict)
     execution_logs_tail: list[str] = Field(default_factory=list)
+    retry_artifact_count: int = 0
+    compare_status: str | None = None
     technical_failure: bool = False
     negative_outcome: str | None = None
     failure_bucket: str | None = None
@@ -119,6 +121,8 @@ class BenchmarkRunner:
         failed_action = None
         failed_args = {}
         execution_logs_tail: list[str] = []
+        retry_artifact_count = 0
+        compare_status = None
         technical_failure = False
 
         try:
@@ -144,6 +148,9 @@ class BenchmarkRunner:
                 for entry in execution.logs[-5:]
             ]
             technical_failure = bool(execution.technical_failure)
+            retry_artifact_count = len(execution.retry_artifacts)
+            if isinstance(execution.extracted_data.get("structured_comparison"), dict):
+                compare_status = execution.extracted_data["structured_comparison"].get("status")
 
             save_artifacts(result, run_id=run_id)
             try:
@@ -200,6 +207,8 @@ class BenchmarkRunner:
             failed_args=failed_args,
             execution_logs_tail=execution_logs_tail,
             technical_failure=technical_failure,
+            retry_artifact_count=retry_artifact_count,
+            compare_status=compare_status,
             notes=scenario.notes,
         )
         scenario_result.negative_outcome = (
@@ -415,6 +424,8 @@ def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:
                 "failed_args",
                 "execution_logs_tail",
                 "technical_failure",
+                "retry_artifact_count",
+                "compare_status",
                 "negative_outcome",
                 "failure_bucket",
                 "notes",

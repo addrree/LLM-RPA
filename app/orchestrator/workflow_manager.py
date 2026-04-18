@@ -25,12 +25,17 @@ class WorkflowManager:
     SAFE_CORRECTIVE_ACTIONS = {
         "open_url",
         "click",
+        "navigate_to_relevant_section",
         "type",
         "wait_for",
         "extract_text",
         "extract_html",
         "extract_items",
         "extract_structured_items",
+        "extract_value_from_section",
+        "extract_structured_items_from_region",
+        "compare_structured_values",
+        "assert_page_contains",
         "observe_page",
         "extract_pattern_from_page_text",
         "extract_text_near_text",
@@ -440,16 +445,16 @@ class WorkflowManager:
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:
         data = execution_result.extracted_data
-        alias_pairs = (
-            ("section_a_data", "source_a"),
-            ("section_a_data", "extract_section_a_data"),
-            ("section_b_data", "source_b"),
-            ("section_b_data", "extract_section_b_data"),
-        )
-        for canonical_name, alias in alias_pairs:
-            if canonical_name not in data and alias in data:
-                data[canonical_name] = data.get(alias)
-
+        if "structured_comparison" in data and isinstance(data["structured_comparison"], dict):
+            comparison = data["structured_comparison"]
+            left = data.get(comparison.get("left_key", "section_a_data"))
+            right = data.get(comparison.get("right_key", "section_b_data"))
+            data["combined_result"] = {
+                "section_a_data": left,
+                "section_b_data": right,
+                "comparison": comparison,
+            }
+            return
         left = data.get("section_a_data")
         right = data.get("section_b_data")
         if left is None or right is None:
