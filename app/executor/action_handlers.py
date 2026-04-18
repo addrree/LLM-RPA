@@ -369,7 +369,6 @@ class ActionHandlers:
         args["page_language"] = effective_page_language
         if not value_pattern:
             value_pattern = self._resolve_value_pattern(value_type)
-        inferred_value_type = value_type or self._infer_value_type_from_pattern(str(value_pattern) if value_pattern else "")
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
         resolved_candidates = list(anchor_candidates)
