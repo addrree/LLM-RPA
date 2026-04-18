@@ -1,4 +1,5 @@
 from datetime import datetime, timezone
+import asyncio
 from typing import Any
 
 from playwright.async_api import async_playwright
@@ -12,7 +13,7 @@ UTC = timezone.utc
 
 
 class PlaywrightExecutor:
-    BROWSER_RETRYABLE_ACTIONS = {"open_url", "click", "wait_for"}
+    BROWSER_RETRYABLE_ACTIONS = {"open_url", "click", "wait_for", "navigate_to_relevant_section"}
 
     def __init__(self, *, headless: bool = True, slow_mo: int = 0, record_video: bool = False):
         self.handlers = ActionHandlers()
@@ -27,6 +28,7 @@ class PlaywrightExecutor:
         if self.record_video:
             context_kwargs["record_video_dir"] = str(VIDEOS_DIR)
         context = await browser.new_context(**context_kwargs)
+        await context.tracing.start(screenshots=True, snapshots=True, sources=False)
         page = await context.new_page()
         return {
             "playwright": p,
@@ -37,6 +39,11 @@ class PlaywrightExecutor:
 
     @staticmethod
     async def _close_session(session: dict[str, Any]) -> None:
+        try:
+            if session.get("context") is not None:
+                await session["context"].tracing.stop()
+        except Exception:
+            pass
         await session["context"].close()
         await session["browser"].close()
         await session["playwright"].stop()
@@ -102,6 +109,7 @@ class PlaywrightExecutor:
 
                     result = await self._run_step_with_browser_retries(
                         page=page,
+                        session=session,
                         step=step,
                         runtime_state=runtime_state,
                         logs=logs,
@@ -109,6 +117,7 @@ class PlaywrightExecutor:
 
                     if step.save_as:
                         extracted_data[step.save_as] = result
+                        runtime_state["extracted_data"] = extracted_data
 
                     if step.action == "screenshot":
                         screenshot_path = result
@@ -165,9 +174,31 @@ class PlaywrightExecutor:
                 page_text_excerpt=text_excerpt,
                 screenshot_path=screenshot_path,
                 logs=logs,
+                retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
             )
 
         except Exception as e:
+            if session and session.get("context") is not None:
+                trace_path = VIDEOS_DIR / f"trace_failure_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.zip"
+                try:
+                    await session["context"].tracing.stop(path=str(trace_path))
+                    logs.append(
+                        StepLog(
+                            step_id=0,
+                            action="trace_dump",
+                            status="success",
+                            message=f"Saved trace to {trace_path}",
+                        )
+                    )
+                except Exception as trace_error:
+                    logs.append(
+                        StepLog(
+                            step_id=0,
+                            action="trace_dump",
+                            status="failed",
+                            message=str(trace_error),
+                        )
+                    )
             if screenshot_path is None:
                 timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
                 emergency_path = SCREENSHOTS_DIR / f"emergency_{timestamp}.png"
@@ -217,31 +248,73 @@ class PlaywrightExecutor:
                 failed_action=current_step.action if current_step else (logs[-1].action if logs else None),
                 failed_args=dict(current_step.args) if current_step else {},
                 technical_failure=self._is_technical_failure(str(e)),
+                retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
             )
 
-    async def _run_step_with_browser_retries(self, *, page, step, runtime_state, logs):
+    async def _run_step_with_browser_retries(self, *, page, session, step, runtime_state, logs):
         handler = getattr(self.handlers, step.action)
         if step.action not in self.BROWSER_RETRYABLE_ACTIONS:
             return await handler(page, step.args, runtime_state)
 
         max_attempts = 3
+        base_delay = 0.35
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
+                if step.action in {"click", "wait_for"}:
+                    await self._pre_retry_state_check(page=page, step=step)
                 return await handler(page, step.args, runtime_state)
             except Exception as exc:  # noqa: BLE001
                 last_error = exc
+                await self._capture_retry_artifacts(
+                    page=page,
+                    step=step,
+                    runtime_state=runtime_state,
+                    attempt=attempt,
+                    error=exc,
+                )
                 if not self._is_retryable_browser_error(str(exc)) or attempt >= max_attempts:
                     raise
+                backoff_sec = base_delay * (2 ** (attempt - 1))
                 logs.append(
                     StepLog(
                         step_id=step.step_id,
-                        action=step.action,
+                        action=f"{step.action}_retry",
                         status="success",
-                        message=f"Transient browser failure on attempt {attempt}, retrying: {exc}",
+                        message=f"Transient browser failure on attempt {attempt}, retrying in {backoff_sec:.2f}s: {exc}",
                     )
                 )
+                await asyncio.sleep(backoff_sec)
         raise last_error if last_error else RuntimeError("Unknown step execution error")
+
+    async def _pre_retry_state_check(self, *, page, step) -> None:
+        if step.action == "wait_for" and step.args.get("selector"):
+            await page.wait_for_selector(step.args["selector"], state="attached", timeout=3000)
+            return
+        if step.action == "click":
+            await page.wait_for_timeout(50)
+
+    async def _capture_retry_artifacts(self, *, page, step, runtime_state, attempt: int, error: Exception) -> None:
+        timestamp = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
+        screenshot_path = SCREENSHOTS_DIR / f"retry_step{step.step_id}_attempt{attempt}_{timestamp}.png"
+        diagnostics = {
+            "step_id": step.step_id,
+            "action": step.action,
+            "attempt": attempt,
+            "error": str(error),
+            "args": dict(step.args),
+            "selected_candidate": runtime_state.get("last_selected_candidate") if runtime_state else None,
+            "locator_diagnostics": runtime_state.get("last_locator_diagnostics") if runtime_state else None,
+            "timestamp": datetime.now(UTC).isoformat(),
+        }
+        try:
+            await page.screenshot(path=str(screenshot_path), full_page=True)
+            diagnostics["screenshot_path"] = str(screenshot_path)
+        except Exception as screenshot_error:  # noqa: BLE001
+            diagnostics["screenshot_error"] = str(screenshot_error)
+
+        if runtime_state is not None:
+            runtime_state.setdefault("retry_artifacts", []).append(diagnostics)
 
     @staticmethod
     def _is_retryable_browser_error(message: str) -> bool:

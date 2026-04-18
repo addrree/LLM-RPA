@@ -48,6 +48,16 @@ class LLMVerifier:
         semantic_required_fields = [
             field for field in plan.expected_result.required_fields if field not in TECHNICAL_REQUIRED_FIELDS
         ]
+        deterministic_issues = self._validate_structured_compare_contract(result.extracted_data)
+        if deterministic_issues:
+            self.last_artifact = None
+            return VerificationVerdict(
+                task_completed=False,
+                confidence=0.0,
+                verdict="reject",
+                issues=deterministic_issues,
+                summary="Verifier rejected due to invalid structured comparison contract.",
+            )
 
         package = VerificationPackage(
             user_goal=plan.goal,
@@ -70,3 +80,18 @@ class LLMVerifier:
         )
         self.last_artifact = artifact
         return VerificationVerdict.model_validate(artifact.parsed_response)
+
+    @staticmethod
+    def _validate_structured_compare_contract(extracted_data: dict) -> list[str]:
+        if not isinstance(extracted_data, dict):
+            return []
+        if "section_a_data" not in extracted_data and "section_b_data" not in extracted_data:
+            return []
+        if "structured_comparison" not in extracted_data:
+            return ["Structured comparison is missing for section_a_data/section_b_data compare pipeline."]
+        comparison = extracted_data.get("structured_comparison")
+        if not isinstance(comparison, dict):
+            return ["structured_comparison must be an object."]
+        if "exact_match" not in comparison or "status" not in comparison:
+            return ["structured_comparison must include exact_match and status fields."]
+        return []

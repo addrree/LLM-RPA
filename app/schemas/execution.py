@@ -8,6 +8,7 @@ class StepLog(BaseModel):
     action: str
     status: str
     message: Optional[str] = None
+    diagnostics: Dict[str, Any] = Field(default_factory=dict)
 
 
 class GenerationMetadata(BaseModel):
@@ -36,3 +37,4 @@ class ExecutionResult(BaseModel):
     failed_action: Optional[str] = None
     failed_args: Dict[str, Any] = Field(default_factory=dict)
     technical_failure: bool = False
+    retry_artifacts: List[Dict[str, Any]] = Field(default_factory=list)

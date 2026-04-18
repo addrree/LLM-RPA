@@ -2,19 +2,22 @@ from __future__ import annotations
 
 from typing import Any
 
-ACTION_ALIASES = {
-    "click_element": "click",
-}
+ACTION_ALIASES: dict[str, str] = {}
 
 CANONICAL_ACTIONS = {
     "open_url",
     "click",
+    "navigate_to_relevant_section",
     "type",
     "wait_for",
     "extract_text",
     "extract_html",
     "extract_items",
     "extract_structured_items",
+    "extract_value_from_section",
+    "extract_structured_items_from_region",
+    "compare_structured_values",
+    "assert_page_contains",
     "screenshot",
     "observe_page",
     "extract_pattern_from_page_text",
@@ -39,8 +42,7 @@ def normalize_plan_action_aliases(payload: dict[str, Any]) -> tuple[dict[str, An
         action = step.get("action")
         if isinstance(action, str):
             canonical = ACTION_ALIASES.get(action, action)
-            if canonical != action:
-                step["action"] = canonical
+            step["action"] = canonical
             if canonical not in CANONICAL_ACTIONS:
                 action_oov_detected = True
         normalized_steps.append(step)

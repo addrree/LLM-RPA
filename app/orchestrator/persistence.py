@@ -16,6 +16,7 @@ def save_artifacts(result: dict, run_id: str) -> dict:
     execution_path = RESULTS_DIR / f"execution_{run_id}.json"
     verdict_path = RESULTS_DIR / f"verdict_{run_id}.json"
     logs_path = LOGS_DIR / f"logs_{run_id}.json"
+    diagnostics_path = LOGS_DIR / f"diagnostics_{run_id}.json"
 
     plan_json = result["plan"].model_dump(mode="json")
     initial_plan = result.get("initial_plan")
@@ -33,6 +34,15 @@ def save_artifacts(result: dict, run_id: str) -> dict:
     _write_json(execution_path, execution_json)
     _write_json(verdict_path, verdict_json)
     _write_json(logs_path, {"logs": execution_json.get("logs", [])})
+    _write_json(
+        diagnostics_path,
+        {
+            "retry_artifacts": execution_json.get("retry_artifacts", []),
+            "failed_action": execution_json.get("failed_action"),
+            "failed_args": execution_json.get("failed_args", {}),
+            "failure_type": execution_json.get("failure_type"),
+        },
+    )
 
     planner_artifact = result.get("planner_artifact")
     if planner_artifact is not None:
@@ -83,6 +93,7 @@ def save_artifacts(result: dict, run_id: str) -> dict:
         "execution": execution_path,
         "verdict": verdict_path,
         "logs": logs_path,
+        "diagnostics": diagnostics_path,
         "planner_raw": RAW_LLM_DIR / f"planner_raw_{run_id}.json" if planner_artifact else None,
         "initial_planner_raw": RAW_LLM_DIR / f"initial_planner_raw_{run_id}.json" if initial_planner_artifact else None,
         "replanner_raw": RAW_LLM_DIR / f"replanner_raw_{run_id}.json" if replanner_artifact else None,
