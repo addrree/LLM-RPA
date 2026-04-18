@@ -199,6 +199,35 @@ def test_extract_value_near_anchor_smoke_prefers_contextual_match():
     assert value == 7141000
 
 
+def test_extract_value_near_anchor_with_pattern_only_does_not_require_type_inference():
+    observed_text = "Start here: https://example.com/pricing has the latest pricing details."
+    page = _FakePage(
+        observed_text,
+        evaluate_payload=[
+            {
+                "source": "dom_same_block",
+                "window_text": observed_text,
+                "anchor_idx_in_window": observed_text.index("Start here"),
+            }
+        ],
+    )
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_value_near_anchor(
+            page,
+            {
+                "anchor_text": "Start here",
+                "value_pattern": r"(https?://[^\s]+)",
+                "search_direction": "after",
+                "same_block_only": True,
+                "page_language": "en",
+            },
+            runtime_state={},
+        )
+    )
+    assert value == "https://example.com/pricing"
+
+
 def test_extract_items_field_rule_near_anchor_normalizes_number():
     container = _FakeFieldTarget(text="English 7,141,000+ articles")
     handler = ActionHandlers()
