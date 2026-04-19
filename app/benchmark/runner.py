@@ -11,6 +11,7 @@ from typing import Awaitable, Callable
 from pydantic import BaseModel, Field
 
 from app.benchmark.scenario_loader import BenchmarkScenario, ScenarioSuite
+from app.benchmark.policies import build_benchmark_context
 from app.config import BENCHMARKS_DIR
 from app.orchestrator.persistence import export_results, save_artifacts
 from app.orchestrator.workflow_manager import WorkflowStageError
@@ -126,7 +127,11 @@ class BenchmarkRunner:
         technical_failure = False
 
         try:
-            result = await workflow.run(self._build_grounded_goal(scenario))
+            benchmark_context = build_benchmark_context(category=scenario.category, task_family=scenario.task_family)
+            result = await workflow.run(
+                self._build_grounded_goal(scenario, allowed_actions=benchmark_context["allowed_actions"]),
+                benchmark_context=benchmark_context,
+            )
             execution = result["execution_result"]
             verdict = result["verdict"]
             execution_status = execution.status
@@ -364,10 +369,12 @@ class BenchmarkRunner:
         return None
 
     @staticmethod
-    def _build_grounded_goal(scenario: BenchmarkScenario) -> str:
+    def _build_grounded_goal(scenario: BenchmarkScenario, *, allowed_actions: list[str] | None = None) -> str:
         parts = [scenario.goal.strip()]
         if scenario.task_family:
             parts.append(f"Task family: {scenario.task_family}.")
+        if allowed_actions:
+            parts.append(f"Allowed actions for benchmark: {', '.join(allowed_actions)}.")
         normalized_language = str(scenario.page_language or "").strip().lower()
         if normalized_language and normalized_language != "auto":
             parts.append(f"Page language hint: {scenario.page_language}.")

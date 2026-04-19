@@ -70,7 +70,7 @@ class WorkflowManager:
         self.replanner = replanner
         self.two_stage_planning = two_stage_planning
 
-    async def run(self, user_goal: str):
+    async def run(self, user_goal: str, benchmark_context: dict | None = None):
         planning_mode = "two_stage" if self.two_stage_planning else "single_stage"
         initial_plan = None
         final_plan = None
@@ -87,13 +87,13 @@ class WorkflowManager:
 
         if not self.two_stage_planning:
             try:
-                plan = self.planner.build_plan(user_goal)
+                plan = self._planner_build_plan(user_goal=user_goal, benchmark_context=benchmark_context)
             except Exception as exc:  # noqa: BLE001
                 raise WorkflowStageError("planning", str(exc)) from exc
             plan = self._normalize_plan_for_validation(plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
-                self.validator.validate(plan)
+                self._validator_validate(plan=plan, benchmark_context=benchmark_context)
                 initial_plan_valid = True
                 final_plan_valid = True
             except PlanValidationError as exc:
@@ -106,6 +106,7 @@ class WorkflowManager:
                 session=None,
                 runtime_state=None,
                 page_snapshot=None,
+                benchmark_context=benchmark_context,
             )
         else:
             if self.replanner is None:
@@ -118,7 +119,7 @@ class WorkflowManager:
             initial_plan = self._normalize_plan_for_validation(initial_plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
-                self.validator.validate(initial_plan)
+                self._validator_validate(plan=initial_plan, benchmark_context=benchmark_context)
                 initial_plan_valid = True
             except PlanValidationError as exc:
                 initial_plan_valid = False
@@ -159,10 +160,11 @@ class WorkflowManager:
                 page_snapshot = PageSnapshot.model_validate(snapshot_payload)
                 shared_page_snapshot = page_snapshot.model_dump(mode="json")
 
-                final_plan = self.replanner.revise_plan(
+                final_plan = self._replanner_revise_plan(
                     user_goal=user_goal,
                     page_snapshot=page_snapshot,
                     previous_plan=initial_plan,
+                    benchmark_context=benchmark_context,
                 )
                 action_oov_detected = action_oov_detected or bool(
                     getattr(self.replanner, "last_action_oov_detected", False)
@@ -170,17 +172,18 @@ class WorkflowManager:
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._normalize_plan_for_validation(final_plan)
                 try:
-                    self.validator.validate(final_plan)
+                    self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                     final_plan_valid = True
                 except PlanValidationError as first_error:
                     final_plan_valid = False
                     invalid_plan_dump = final_plan.model_dump(mode="json")
-                    repaired_plan = self.replanner.revise_plan(
+                    repaired_plan = self._replanner_revise_plan(
                         user_goal=user_goal,
                         page_snapshot=page_snapshot,
                         previous_plan=initial_plan,
                         validation_error=str(first_error),
                         invalid_plan=invalid_plan_dump,
+                        benchmark_context=benchmark_context,
                     )
                     action_oov_detected = action_oov_detected or bool(
                         getattr(self.replanner, "last_action_oov_detected", False)
@@ -188,7 +191,7 @@ class WorkflowManager:
                     replanner_artifact = self.replanner.last_artifact
                     final_plan = self._normalize_plan_for_validation(repaired_plan)
                     try:
-                        self.validator.validate(final_plan)
+                        self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                         final_plan_valid = True
                     except PlanValidationError as second_error:
                         self._persist_final_plan_repair_failure(
@@ -204,6 +207,7 @@ class WorkflowManager:
                     session=session,
                     runtime_state=shared_runtime_state,
                     page_snapshot=page_snapshot,
+                    benchmark_context=benchmark_context,
                 )
                 plan = final_plan
             finally:
@@ -240,6 +244,7 @@ class WorkflowManager:
         session,
         runtime_state,
         page_snapshot: PageSnapshot | None,
+        benchmark_context: dict | None,
     ):
         current_plan = initial_plan
         max_retries = self._effective_max_retries(current_plan.constraints.max_verification_retries)
@@ -299,7 +304,7 @@ class WorkflowManager:
             corrective_attempt_count += 1
             effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
             try:
-                corrective_plan = self.replanner.build_corrective_plan(
+                corrective_plan = self._replanner_build_corrective_plan(
                     user_goal=user_goal,
                     page_snapshot=effective_snapshot,
                     previous_plan=current_plan,
@@ -313,6 +318,7 @@ class WorkflowManager:
                     verifier_issues=failure_context["verifier_issues"],
                     previous_attempt_signatures=sorted(prior_signatures),
                     disallowed_next_patterns=self._build_disallowed_patterns(prior_corrective_attempts),
+                    benchmark_context=benchmark_context,
                 )
             except Exception as corrective_error:  # noqa: BLE001
                 logger.error("Corrective plan generation failed: %s", corrective_error)
@@ -399,7 +405,7 @@ class WorkflowManager:
                 continue
 
             try:
-                self.validator.validate(corrective_plan)
+                self._validator_validate(plan=corrective_plan, benchmark_context=benchmark_context)
             except PlanValidationError as validation_error:
                 corrective_plan_invalid_count += 1
                 offending_step = self._identify_offending_step(
@@ -441,6 +447,47 @@ class WorkflowManager:
             )
             current_plan = corrective_plan
             replanner_artifact = self.replanner.last_artifact
+
+
+    @staticmethod
+    def _allowed_actions(benchmark_context: dict | None) -> set[str] | None:
+        if not benchmark_context:
+            return None
+        allowed = benchmark_context.get("allowed_actions")
+        if not isinstance(allowed, list):
+            return None
+        return {str(action) for action in allowed if str(action).strip()}
+
+    def _planner_build_plan(self, *, user_goal: str, benchmark_context: dict | None):
+        try:
+            return self.planner.build_plan(user_goal, benchmark_context=benchmark_context)
+        except TypeError:
+            return self.planner.build_plan(user_goal)
+
+    def _replanner_revise_plan(self, **kwargs):
+        if self.replanner is None:
+            raise ValueError("replanner is required")
+        try:
+            return self.replanner.revise_plan(**kwargs)
+        except TypeError:
+            kwargs.pop("benchmark_context", None)
+            return self.replanner.revise_plan(**kwargs)
+
+    def _replanner_build_corrective_plan(self, **kwargs):
+        if self.replanner is None:
+            raise ValueError("replanner is required")
+        try:
+            return self.replanner.build_corrective_plan(**kwargs)
+        except TypeError:
+            kwargs.pop("benchmark_context", None)
+            return self.replanner.build_corrective_plan(**kwargs)
+
+    def _validator_validate(self, *, plan: TaskSpec, benchmark_context: dict | None) -> None:
+        allowed_actions = self._allowed_actions(benchmark_context)
+        try:
+            self.validator.validate(plan, allowed_actions=allowed_actions)
+        except TypeError:
+            self.validator.validate(plan)
 
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:

@@ -3,7 +3,11 @@ import re
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import normalize_plan_action_aliases
-from app.planner.prompts import INITIAL_PLANNER_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
+from app.planner.prompts import (
+    INITIAL_PLANNER_SYSTEM_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+    build_benchmark_planner_prompt,
+)
 from app.schemas.execution import LLMArtifact
 from app.schemas.task_spec import TaskSpec
 from app.utils.llm_client import LLMClient
@@ -16,9 +20,15 @@ class Planner:
         self.last_initial_artifact: LLMArtifact | None = None
         self.last_action_oov_detected = False
 
-    def build_plan(self, user_goal: str) -> TaskSpec:
+    def build_plan(self, user_goal: str, benchmark_context: dict | None = None) -> TaskSpec:
+        system_prompt = PLANNER_SYSTEM_PROMPT
+        if benchmark_context:
+            system_prompt = build_benchmark_planner_prompt(
+                task_family=str(benchmark_context.get("task_family", "unknown")),
+                allowed_actions=list(benchmark_context.get("allowed_actions", [])),
+            )
         artifact = self.llm_client.generate_planner_artifact(
-            system_prompt=PLANNER_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_goal,
             stage="planner",
         )
