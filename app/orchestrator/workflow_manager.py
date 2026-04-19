@@ -103,6 +103,7 @@ class WorkflowStageError(Exception):
 
 
 class WorkflowManager:
+    INITIAL_TWO_STAGE_ALLOWED_ACTIONS = {"open_url", "observe_page", "finish"}
     SAFE_CORRECTIVE_ACTIONS = {
         "open_url",
         "click",
@@ -150,6 +151,10 @@ class WorkflowManager:
         self.verifier = verifier
         self.replanner = replanner
         self.two_stage_planning = two_stage_planning
+
+    @staticmethod
+    def _normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> TaskSpec:
+        return normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
 
     async def run(self, user_goal: str, benchmark_context: dict | None = None):
         planning_mode = "two_stage" if self.two_stage_planning else "single_stage"
@@ -201,7 +206,11 @@ class WorkflowManager:
             initial_plan = self._normalize_plan_for_validation(initial_plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
-                self._validator_validate(plan=initial_plan, benchmark_context=benchmark_context)
+                self._validator_validate(
+                    plan=initial_plan,
+                    benchmark_context=benchmark_context,
+                    allowed_actions_override=self.INITIAL_TWO_STAGE_ALLOWED_ACTIONS,
+                )
                 initial_plan_valid = True
             except PlanValidationError as exc:
                 initial_plan_valid = False
@@ -567,8 +576,14 @@ class WorkflowManager:
             kwargs.pop("benchmark_context", None)
             return self.replanner.build_corrective_plan(**kwargs)
 
-    def _validator_validate(self, *, plan: TaskSpec, benchmark_context: dict | None) -> None:
-        allowed_actions = self._allowed_actions(benchmark_context)
+    def _validator_validate(
+        self,
+        *,
+        plan: TaskSpec,
+        benchmark_context: dict | None,
+        allowed_actions_override: set[str] | None = None,
+    ) -> None:
+        allowed_actions = allowed_actions_override or self._allowed_actions(benchmark_context)
         try:
             self.validator.validate(plan, allowed_actions=allowed_actions)
         except TypeError:
