@@ -73,6 +73,26 @@ PLANNER_SYSTEM_PROMPT = """
 
 def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[str]) -> str:
     allowed = "|".join(allowed_actions)
+    family_rules = {
+        "single_value_extraction": (
+            "Family policy (single_value_extraction): для title/header/main heading предпочитай "
+            "extract_text с selector='h1' (или другой явный heading selector). "
+            "Не используй literal extract_pattern_from_page_text, если задача не про regex/pattern match."
+        ),
+        "navigation_then_extraction": (
+            "Family policy (navigation_then_extraction): запрещен bare text click. Разрешены только: "
+            "role+name; href_contains; scope_selector+text+exact=true; либо специфичный selector."
+        ),
+        "repeated_structured_items": (
+            "Family policy (repeated_structured_items): если используешь extract_structured_items, "
+            "pattern обязан иметь capture groups, а fields должны ссылаться только на существующие groups."
+        ),
+        "multi_step_information_retrieval": (
+            "Family policy (multi_step_information_retrieval): не используй старый regex-first compare путь. "
+            "Используй pipeline: extract_value_from_section / extract_structured_items_from_region для "
+            "section_a_data и section_b_data, затем compare_structured_values."
+        ),
+    }.get(task_family, "")
     return f"""
 Ты planner benchmark-режима веб-автоматизации.
 Верни только JSON TaskSpec без markdown/пояснений.
@@ -87,6 +107,7 @@ Task family: {task_family}
 4) План должен быть коротким и детерминированным (обычно 3-6 шагов).
 5) Никаких legacy action names или aliases.
 6) Не добавляй действия вне текущей task family.
+7) {family_rules}
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -183,6 +204,24 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 
 def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[str]) -> str:
     allowed = "|".join(allowed_actions)
+    family_rules = {
+        "single_value_extraction": (
+            "Для title/header/main heading сначала пробуй extract_text с selector='h1'; "
+            "не используй literal extract_pattern_from_page_text без regex-intent."
+        ),
+        "navigation_then_extraction": (
+            "Нельзя bare text click; используй role+name, href_contains, "
+            "scope_selector+text+exact=true или специфичный selector."
+        ),
+        "repeated_structured_items": (
+            "Для extract_structured_items pattern должен иметь capture groups, "
+            "fields могут ссылаться только на существующие группы."
+        ),
+        "multi_step_information_retrieval": (
+            "Соблюдай compare pipeline: section_a_data + section_b_data через structured extraction, "
+            "затем compare_structured_values; избегай regex-only сравнения."
+        ),
+    }.get(task_family, "")
     return f"""
 Ты replanner benchmark-режима веб-автоматизации.
 На входе goal + snapshot + previous plan. Верни только JSON TaskSpec.
@@ -196,4 +235,5 @@ Task family: {task_family}
 3) Сохраняй минимальный план с обязательным finish в конце.
 4) open_url должен содержать args.url.
 5) Никаких legacy aliases.
+6) {family_rules}
 """

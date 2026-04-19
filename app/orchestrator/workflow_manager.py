@@ -1,5 +1,6 @@
 import json
 import logging
+import re
 from datetime import datetime, timezone
 
 from app.config import RAW_LLM_DIR
@@ -28,6 +29,7 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
         if str(action).strip()
     }
     fallback_save_as = "value"
+    task_family = str((benchmark_context or {}).get("task_family", "")).strip()
     if isinstance(required_fields, list) and required_fields:
         normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
         if "value" in normalized_required:
@@ -36,6 +38,8 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
             fallback_save_as = normalized_required[0]
 
     normalized_steps: list[dict] = []
+    compare_step_idx: int | None = None
+    extraction_step_indices: list[int] = []
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -71,10 +75,99 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
         if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
             args["text"] = "Python"
 
+        if task_family == "single_value_extraction" and action == "extract_pattern_from_page_text":
+            pattern = str(args.get("pattern", "")).strip()
+            has_capture_groups = False
+            if pattern:
+                try:
+                    has_capture_groups = re.compile(pattern).groups > 0
+                except re.error:
+                    has_capture_groups = False
+            if not has_capture_groups and not bool(args.get("normalize_number", False)):
+                step["action"] = "extract_text"
+                step["args"] = {"selector": "h1"}
+
+        if task_family == "navigation_then_extraction" and action == "click":
+            has_text = bool(str(args.get("text", "")).strip())
+            has_selector = bool(str(args.get("selector", "")).strip())
+            has_role_name = bool(str(args.get("role", "")).strip() and str(args.get("name", "")).strip())
+            has_href_contains = bool(str(args.get("href_contains", "")).strip())
+            has_scope = bool(str(args.get("scope_selector", "")).strip())
+            has_exact = bool(args.get("exact"))
+            if has_text and not (has_selector or has_role_name or has_href_contains or has_scope or has_exact):
+                args["__benchmark_guardrail_error"] = (
+                    "benchmark guardrail: navigation_then_extraction click with bare text is disallowed; "
+                    "use role+name, href_contains, scope_selector+text+exact=true, or specific selector"
+                )
+
+        if task_family == "repeated_structured_items" and action == "extract_structured_items":
+            pattern = str(args.get("pattern", "")).strip()
+            compiled = None
+            if pattern:
+                try:
+                    compiled = re.compile(pattern)
+                except re.error:
+                    compiled = None
+            fields = args.get("fields")
+            if isinstance(fields, dict):
+                referenced_groups: set[int] = set()
+                for spec in fields.values():
+                    if isinstance(spec, int):
+                        referenced_groups.add(spec)
+                    elif isinstance(spec, dict) and isinstance(spec.get("group_index"), int):
+                        referenced_groups.add(int(spec["group_index"]))
+                max_requested_group = max([g for g in referenced_groups if g > 0], default=0)
+                available_groups = compiled.groups if compiled is not None else 0
+                if max_requested_group > available_groups:
+                    args["__benchmark_guardrail_error"] = (
+                        "benchmark guardrail: repeated_structured_items extract_structured_items requires capture "
+                        f"groups in pattern; requested group {max_requested_group}, available {available_groups}"
+                    )
+
+        if task_family == "multi_step_information_retrieval":
+            if action == "extract_pattern_from_page_text":
+                args["__benchmark_guardrail_error"] = (
+                    "benchmark guardrail: multi_step_information_retrieval disallows regex-only extraction path; "
+                    "use extract_value_from_section/extract_structured_items_from_region + compare_structured_values"
+                )
+            if action == "compare_structured_values":
+                compare_step_idx = len(normalized_steps)
+            if action.startswith("extract"):
+                extraction_step_indices.append(len(normalized_steps))
+
         if action.startswith("extract") and not step.get("save_as"):
             step["save_as"] = fallback_save_as
 
         normalized_steps.append(step)
+
+    if task_family == "multi_step_information_retrieval" and compare_step_idx is not None:
+        compare_step = normalized_steps[compare_step_idx]
+        compare_args = compare_step.get("args", {}) if isinstance(compare_step.get("args"), dict) else {}
+        left_key = str(compare_args.get("left_key", "section_a_data")).strip() or "section_a_data"
+        right_key = str(compare_args.get("right_key", "section_b_data")).strip() or "section_b_data"
+        compare_args["left_key"] = left_key
+        compare_args["right_key"] = right_key
+        compare_step["args"] = compare_args
+
+        produced_before_compare = {
+            str(step.get("save_as")).strip()
+            for step in normalized_steps[:compare_step_idx]
+            if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
+        }
+        missing_key_targets = [key for key in (left_key, right_key) if key not in produced_before_compare]
+        candidate_indices = [
+            idx
+            for idx in extraction_step_indices
+            if idx < compare_step_idx and normalized_steps[idx].get("action") != "extract_pattern_from_page_text"
+        ]
+        for missing_key, step_idx in zip(missing_key_targets, candidate_indices):
+            normalized_steps[step_idx]["save_as"] = missing_key
+            produced_before_compare.add(missing_key)
+        if any(key not in produced_before_compare for key in (left_key, right_key)):
+            compare_args["__benchmark_guardrail_error"] = (
+                "benchmark guardrail: multi_step compare requires prior extraction of both "
+                f"'{left_key}' and '{right_key}'"
+            )
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
         normalized_steps.append({"action": "finish", "args": {}})

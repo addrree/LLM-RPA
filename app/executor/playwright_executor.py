@@ -28,20 +28,33 @@ class PlaywrightExecutor:
         if self.record_video:
             context_kwargs["record_video_dir"] = str(VIDEOS_DIR)
         context = await browser.new_context(**context_kwargs)
+        tracing_started = False
         await context.tracing.start(screenshots=True, snapshots=True, sources=False)
+        tracing_started = True
         page = await context.new_page()
         return {
             "playwright": p,
             "browser": browser,
             "context": context,
             "page": page,
+            "tracing_started": tracing_started,
         }
+
+    @staticmethod
+    async def _stop_tracing_if_started(session: dict[str, Any], *, path: str | None = None) -> None:
+        context = session.get("context")
+        if context is None or not session.get("tracing_started", False):
+            return
+        if path:
+            await context.tracing.stop(path=path)
+        else:
+            await context.tracing.stop()
+        session["tracing_started"] = False
 
     @staticmethod
     async def _close_session(session: dict[str, Any]) -> None:
         try:
-            if session.get("context") is not None:
-                await session["context"].tracing.stop()
+            await PlaywrightExecutor._stop_tracing_if_started(session)
         except Exception:
             pass
         await session["context"].close()
@@ -181,7 +194,7 @@ class PlaywrightExecutor:
             if session and session.get("context") is not None:
                 trace_path = VIDEOS_DIR / f"trace_failure_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.zip"
                 try:
-                    await session["context"].tracing.stop(path=str(trace_path))
+                    await self._stop_tracing_if_started(session, path=str(trace_path))
                     logs.append(
                         StepLog(
                             step_id=0,
