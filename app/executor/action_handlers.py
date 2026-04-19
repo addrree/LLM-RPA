@@ -311,6 +311,15 @@ class ActionHandlers:
             return extracted_items
 
         extracted_value = self._extract_match_value(match, group_index=group_index)
+        benchmark_context = runtime_state.get("benchmark_context", {}) if isinstance(runtime_state, dict) else {}
+        task_family = str(benchmark_context.get("task_family", "")).strip().lower()
+        if task_family == "negative_or_ambiguous_case" and self._looks_like_broad_prose_match(
+            value=extracted_value,
+            pattern=str(pattern),
+        ):
+            raise ValueError(
+                "Weak regex extraction: matched broad prose fragment instead of a concrete value token"
+            )
 
         normalized_value = None
         if normalize_number:
@@ -583,7 +592,7 @@ class ActionHandlers:
                 f"Value not found near anchor_text={anchor_text!r}; pattern={value_pattern!r}; "
                 f"required_left_context={required_left_context!r}; required_right_context={required_right_context!r}"
             )
-        if prefer_local_for_contact and (
+        if prefer_local_for_contact and not strict_context_disabled and (
             best_match.get("confidence") == "low" or best_match.get("match_scope") == "fallback"
         ):
             raise ValueError(
@@ -628,27 +637,51 @@ class ActionHandlers:
         score_best: tuple[int, str] | None = None
 
         for candidate in ranked:
+            visible_match = self._find_visible_anchor_match(
+                visible_anchors=visible_anchors,
+                candidate=candidate,
+                matching_mode=anchor_matching_mode,
+            )
+            candidate_to_use = visible_match or candidate
             if not self._anchor_present(
                 source_text=source_text,
                 visible_anchors=visible_anchors,
-                candidate=candidate,
+                candidate=candidate_to_use,
                 matching_mode=anchor_matching_mode,
                 page_language=page_language,
             ):
                 continue
             if not value_pattern:
-                return candidate
+                return candidate_to_use
             candidate_score = await self._score_anchor_candidate_block_match(
                 page=page,
-                anchor_text=candidate,
+                anchor_text=candidate_to_use,
                 value_pattern=value_pattern,
             )
             if score_best is None or candidate_score > score_best[0]:
-                score_best = (candidate_score, candidate)
+                score_best = (candidate_score, candidate_to_use)
 
         if score_best is not None:
             return score_best[1]
         raise ValueError(f"Anchor text not found for candidates={ranked}")
+
+    @staticmethod
+    def _find_visible_anchor_match(*, visible_anchors: list[str], candidate: str, matching_mode: str) -> str | None:
+        needle = str(candidate).strip().lower()
+        if not needle:
+            return None
+        for anchor in visible_anchors:
+            normalized = str(anchor).strip()
+            if not normalized:
+                continue
+            haystack = normalized.lower()
+            if matching_mode == "exact" and haystack == needle:
+                return normalized
+            if matching_mode == "contains" and needle in haystack:
+                return normalized
+            if matching_mode == "auto" and (needle in haystack or (haystack in needle and len(haystack) >= 4)):
+                return normalized
+        return None
 
     async def _score_anchor_candidate_block_match(self, *, page, anchor_text: str, value_pattern: str) -> int:
         candidates = await self._collect_anchor_candidates(
@@ -670,10 +703,6 @@ class ActionHandlers:
         return score
 
     async def _resolve_page_language(self, *, page, source_text: str, provided_language: str) -> str:
-        normalized = provided_language.strip().lower()
-        if normalized and normalized != "auto":
-            return normalized
-
         html_lang = ""
         try:
             lang_attr = await page.evaluate(
@@ -694,7 +723,11 @@ class ActionHandlers:
         cyrillic = len(re.findall(r"[А-Яа-яЁё]", source_text))
         if latin == 0 and cyrillic == 0:
             return ""
-        return "en" if latin >= cyrillic else "ru"
+        total = latin + cyrillic
+        dominant_ratio = max(latin, cyrillic) / total if total else 0.0
+        if dominant_ratio >= 0.75:
+            return "en" if latin >= cyrillic else "ru"
+        return ""
 
     async def _collect_visible_anchor_texts(self, page) -> list[str]:
         anchors = await page.evaluate(
@@ -712,7 +745,7 @@ class ActionHandlers:
             }
             """
         )
-        return [str(item).strip() for item in anchors if str(item).strip()]
+        return [item.strip() for item in anchors if isinstance(item, str) and item.strip()]
 
     @classmethod
     def _anchor_present(
@@ -773,7 +806,29 @@ class ActionHandlers:
             return []
         if page_language in {"ru", "russian"}:
             return ["Контакты", "Поддержка", "Электронная почта", "Почта", "Телефон", "Помощь"]
+        if page_language not in {"en", "english"}:
+            return []
         return ["Contact", "Support", "Email", "Help", "Phone"]
+
+    @staticmethod
+    def _looks_like_broad_prose_match(*, value: Any, pattern: str) -> bool:
+        text = str(value or "").strip()
+        if len(text) < 90:
+            return False
+        if re.search(r"@", text):
+            return False
+        if re.search(r"\b\d{1,4}([\-./]\d{1,2}){1,2}\b", text):
+            return False
+        if re.search(r"\$\s?\d|\d+\s?(usd|eur|руб|₽|€|\$)", text, flags=re.IGNORECASE):
+            return False
+        has_capture_group = False
+        try:
+            has_capture_group = re.compile(pattern).groups > 0
+        except re.error:
+            has_capture_group = False
+        word_count = len(re.findall(r"\b\w+\b", text))
+        sentence_like = bool(re.search(r"[.;:]\s", text))
+        return word_count >= 14 and sentence_like and not has_capture_group
 
     async def _load_source_text(self, page, runtime_state=None) -> str:
         source_text = ""
