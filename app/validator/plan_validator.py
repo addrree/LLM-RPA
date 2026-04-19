@@ -17,10 +17,10 @@ class PlanValidationError(Exception):
 
 
 class PlanValidator:
-    def validate(self, plan: TaskSpec) -> None:
+    def validate(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
         self._validate_steps_not_empty(plan)
         self._validate_step_count(plan)
-        self._validate_actions(plan)
+        self._validate_actions(plan, allowed_actions=allowed_actions)
         self._validate_step_order(plan)
         self._validate_finish_step(plan)
         self._validate_constraints(plan)
@@ -35,9 +35,10 @@ class PlanValidator:
         if len(plan.steps) > GLOBAL_MAX_STEPS:
             raise PlanValidationError("Plan exceeds global step limit.")
 
-    def _validate_actions(self, plan: TaskSpec) -> None:
+    def _validate_actions(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
+        effective_allowed_actions = allowed_actions or ALLOWED_ACTIONS
         for step in plan.steps:
-            if step.action not in ALLOWED_ACTIONS:
+            if step.action not in effective_allowed_actions:
                 raise PlanValidationError(f"Unsupported action: {step.action}")
 
             if step.action == "open_url" and not step.args.get("url"):
