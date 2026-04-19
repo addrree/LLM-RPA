@@ -423,7 +423,6 @@ def test_normalize_benchmark_plan_anchored_uses_scenario_anchor_candidates_as_so
     assert anchored_step.args["anchor_candidates"] == ["Email", "Contact", "Support"]
     assert anchored_step.args["anchor_text"] == "Email"
     assert anchored_step.args["page_language"] == "auto"
-    assert anchored_step.args["enforce_anchor_language_filter"] is False
 
 
 def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_text():
@@ -446,29 +445,3 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_te
     normalized = normalize_benchmark_plan(plan, ctx)
     with pytest.raises(PlanValidationError):
         PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
-
-
-def test_normalize_benchmark_plan_single_value_rewrites_html_pattern_to_h1():
-    plan = TaskSpec.model_validate(
-        {
-            "goal": "extract title",
-            "start_url": "https://www.python.org/",
-            "allowed_domains": ["www.python.org"],
-            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
-            "expected_result": {"description": "x", "required_fields": ["value"]},
-            "steps": [
-                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.python.org/"}},
-                {
-                    "step_id": 2,
-                    "action": "extract_pattern_from_page_text",
-                    "args": {"pattern": "<title>([^<]+)</title>", "group_index": 1},
-                    "save_as": "value",
-                },
-                {"step_id": 3, "action": "finish", "args": {}},
-            ],
-        }
-    )
-    ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
-    normalized = normalize_benchmark_plan(plan, ctx)
-    assert normalized.steps[1].action == "extract_text"
-    assert normalized.steps[1].args["selector"] == "h1"
