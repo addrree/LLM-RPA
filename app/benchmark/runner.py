@@ -395,6 +395,16 @@ class BenchmarkRunner:
         if scenario.page_expectations:
             expectations = "; ".join(scenario.page_expectations[:3])
             parts.append(f"Page expectations: {expectations}.")
+        if scenario.required_top_level_fields:
+            parts.append(
+                "Required top-level fields: "
+                f"{', '.join(scenario.required_top_level_fields)}."
+            )
+        parts.append(f"Expected output type: {scenario.expected_output_type}.")
+        if scenario.expected_min_items > 0:
+            parts.append(f"Expected minimum items: {scenario.expected_min_items}.")
+        if scenario.expected_item_fields:
+            parts.append(f"Expected item fields: {', '.join(scenario.expected_item_fields)}.")
         return "\n".join(parts)
 
 

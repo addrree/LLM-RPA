@@ -34,6 +34,7 @@ class Planner:
         )
         self.last_artifact = artifact
         normalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)
+        normalized = self._normalize_required_fields_against_steps(normalized)
         self.last_action_oov_detected = action_oov_detected
         return TaskSpec.model_validate(normalized)
 
@@ -174,3 +175,28 @@ class Planner:
             "expected_result": expected_result,
             "steps": normalized_steps,
         }
+
+    @staticmethod
+    def _normalize_required_fields_against_steps(plan: dict) -> dict:
+        payload = dict(plan) if isinstance(plan, dict) else {}
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            return payload
+
+        produced = {
+            step.get("save_as")
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
+        }
+        expected = payload.get("expected_result")
+        if not isinstance(expected, dict):
+            return payload
+        required = expected.get("required_fields")
+        if not isinstance(required, list):
+            return payload
+
+        filtered = [str(field).strip() for field in required if str(field).strip() in produced]
+        if filtered:
+            expected["required_fields"] = filtered
+        payload["expected_result"] = expected
+        return payload

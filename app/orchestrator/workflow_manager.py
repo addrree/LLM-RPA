@@ -91,6 +91,7 @@ class WorkflowManager:
             except Exception as exc:  # noqa: BLE001
                 raise WorkflowStageError("planning", str(exc)) from exc
             plan = self._normalize_plan_for_validation(plan)
+            plan = self._normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
                 self._validator_validate(plan=plan, benchmark_context=benchmark_context)
@@ -171,6 +172,7 @@ class WorkflowManager:
                 )
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._normalize_plan_for_validation(final_plan)
+                final_plan = self._normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
                 try:
                     self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                     final_plan_valid = True
@@ -190,6 +192,7 @@ class WorkflowManager:
                     )
                     replanner_artifact = self.replanner.last_artifact
                     final_plan = self._normalize_plan_for_validation(repaired_plan)
+                    final_plan = self._normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
                     try:
                         self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                         final_plan_valid = True
@@ -345,6 +348,7 @@ class WorkflowManager:
                 continue
 
             corrective_plan = self._normalize_plan_for_validation(corrective_plan)
+            corrective_plan = self._normalize_benchmark_plan(plan=corrective_plan, benchmark_context=benchmark_context)
             self._persist_corrective_plan_candidate(
                 corrective_plan=corrective_plan,
                 attempt=corrective_attempt_count,
