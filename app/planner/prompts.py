@@ -84,14 +84,9 @@ Task family: {task_family}
 1) Используй только actions из списка выше.
 2) Последний шаг всегда finish, step_id: 1..N подряд.
 3) action=open_url всегда с непустым args.url.
-4) action=extract_text требует args.selector.
-5) action=extract_pattern_from_page_text требует args.pattern и save_as.
-6) action=extract_value_near_anchor требует anchor_text|anchor_candidates и value_type|value_pattern.
-7) action=extract_structured_items требует args.pattern, args.limit>0, args.fields (dict) и save_as.
-8) action=wait_for требует selector|url_contains|text (condition=url_change недопустим).
-9) План должен быть коротким и детерминированным (обычно 3-6 шагов).
-10) Никаких legacy action names или aliases.
-11) Не добавляй действия вне текущей task family.
+4) План должен быть коротким и детерминированным (обычно 3-6 шагов).
+5) Никаких legacy action names или aliases.
+6) Не добавляй действия вне текущей task family.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -200,10 +195,5 @@ Task family: {task_family}
 2) Не повторяй предыдущую ошибку и не усложняй план.
 3) Сохраняй минимальный план с обязательным finish в конце.
 4) open_url должен содержать args.url.
-5) extract_text требует args.selector.
-6) extract_pattern_from_page_text требует args.pattern.
-7) extract_value_near_anchor требует value_type|value_pattern.
-8) extract_structured_items требует pattern + limit>0 + fields(dict).
-9) wait_for используй только с selector|url_contains|text.
-10) Никаких legacy aliases.
+5) Никаких legacy aliases.
 """

@@ -120,7 +120,7 @@ class WorkflowManager:
             initial_plan = self._normalize_plan_for_validation(initial_plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
-                self._validator_validate(plan=initial_plan, benchmark_context=benchmark_context, enforce_benchmark_policy=False)
+                self._validator_validate(plan=initial_plan, benchmark_context=benchmark_context)
                 initial_plan_valid = True
             except PlanValidationError as exc:
                 initial_plan_valid = False
@@ -486,80 +486,12 @@ class WorkflowManager:
             kwargs.pop("benchmark_context", None)
             return self.replanner.build_corrective_plan(**kwargs)
 
-    def _validator_validate(
-        self,
-        *,
-        plan: TaskSpec,
-        benchmark_context: dict | None,
-        enforce_benchmark_policy: bool = True,
-    ) -> None:
-        allowed_actions = self._allowed_actions(benchmark_context) if enforce_benchmark_policy else None
+    def _validator_validate(self, *, plan: TaskSpec, benchmark_context: dict | None) -> None:
+        allowed_actions = self._allowed_actions(benchmark_context)
         try:
             self.validator.validate(plan, allowed_actions=allowed_actions)
         except TypeError:
             self.validator.validate(plan)
-
-    @staticmethod
-    def _normalize_benchmark_plan(*, plan: TaskSpec, benchmark_context: dict | None) -> TaskSpec:
-        if not benchmark_context:
-            return plan
-
-        payload = plan.model_dump(mode="json")
-        steps = payload.get("steps", [])
-        required_fields = payload.get("expected_result", {}).get("required_fields", [])
-        fallback_save_as = "value"
-        if isinstance(required_fields, list) and required_fields:
-            normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
-            if "value" in normalized_required:
-                fallback_save_as = "value"
-            elif normalized_required:
-                fallback_save_as = normalized_required[0]
-
-        for step in steps:
-            if not isinstance(step, dict):
-                continue
-            action = step.get("action")
-            args = step.get("args")
-            if not isinstance(args, dict):
-                args = {}
-            step["args"] = args
-
-            if action == "extract_text" and not str(args.get("selector", "")).strip():
-                args["selector"] = "h1"
-            if action == "extract_pattern_from_page_text" and not str(args.get("pattern", "")).strip():
-                args["pattern"] = "(.{1,200})"
-                args.setdefault("group_index", 1)
-            if action == "extract_value_near_anchor":
-                if not str(args.get("anchor_text", "")).strip() and not args.get("anchor_candidates"):
-                    args["anchor_text"] = "Contact"
-                if not str(args.get("value_type", "")).strip() and not str(args.get("value_pattern", "")).strip():
-                    args["value_type"] = "email"
-            if action == "extract_structured_items":
-                if not str(args.get("pattern", "")).strip():
-                    args["pattern"] = "(.+)"
-                limit = args.get("limit")
-                if not isinstance(limit, int) or limit <= 0:
-                    args["limit"] = 5
-                if not isinstance(args.get("fields"), dict) or not args.get("fields"):
-                    args["fields"] = {"value": 1}
-            if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
-                args["text"] = "Python"
-
-            if action.startswith("extract") and not step.get("save_as"):
-                step["save_as"] = fallback_save_as
-
-        produced = {
-            str(step.get("save_as")).strip()
-            for step in steps
-            if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
-        }
-        expected = payload.get("expected_result")
-        if isinstance(expected, dict) and isinstance(expected.get("required_fields"), list):
-            filtered = [field for field in expected["required_fields"] if str(field).strip() in produced]
-            expected["required_fields"] = filtered
-            payload["expected_result"] = expected
-
-        return TaskSpec.model_validate(payload)
 
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:
