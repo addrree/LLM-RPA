@@ -49,7 +49,7 @@ PLANNER_SYSTEM_PROMPT = """
     - используй extract_pattern_from_page_text с полной группой, например [0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
-14. Используй ТОЛЬКО канонические action names из схемы. Запрещены синонимы вроде click_element или extract_value.
+14. Используй ТОЛЬКО канонические action names из схемы.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
 16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
 16.1) Для click избегай слабой формы get_by_text(...).first без уточнения. Предпочитай:
@@ -68,6 +68,25 @@ PLANNER_SYSTEM_PROMPT = """
      3) compare_structured_values с save_as=structured_comparison (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), page_language, anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
+"""
+
+
+def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[str]) -> str:
+    allowed = "|".join(allowed_actions)
+    return f"""
+Ты planner benchmark-режима веб-автоматизации.
+Верни только JSON TaskSpec без markdown/пояснений.
+
+Task family: {task_family}
+Разрешенные actions: {allowed}
+
+Критические правила:
+1) Используй только actions из списка выше.
+2) Последний шаг всегда finish, step_id: 1..N подряд.
+3) action=open_url всегда с непустым args.url.
+4) План должен быть коротким и детерминированным (обычно 3-6 шагов).
+5) Никаких legacy action names или aliases.
+6) Не добавляй действия вне текущей task family.
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -122,7 +141,7 @@ REPLANNER_SYSTEM_PROMPT = """
    - save_as
 9) Не пропускай обязательные поля TaskSpec (goal, start_url, constraints, expected_result.description, steps[*].args).
 10) Никаких комментариев/markdown, только валидный JSON-объект.
-11) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
+11) Используй только канонические action names из схемы.
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
 13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй role+name/href_contains. Для text-click всегда уточняй exact=true или scope_selector.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
@@ -146,7 +165,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 4) Для open_url всегда задавай args.url.
 5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения.
 6) Никаких комментариев/markdown — только JSON.
-7) Используй только канонические action names из схемы. Не используй псевдонимы click_element/extract_value.
+7) Используй только канонические action names из схемы.
 8) Учитывай prior corrective attempts и НЕ повторяй уже проваленные решения (тот же action+args, тот же regex/group mismatch, тот же широкий click locator).
 9) Запрещено генерировать шаги с пустыми обязательными аргументами.
 10) Для single_value_title_or_header не применяй extract_value_near_anchor, если нет явного anchor.
@@ -159,4 +178,22 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
 14) Для multi_step compare corrective-план должен извлекать section_a_data и section_b_data отдельно; не полагаться на regex group reference как на контракт сравнения.
 15) Коррективный replanning используй для recoverable execution ошибок (anchor_not_found, value_not_found_near_anchor, ambiguous/weak click target, bad locator choice при browser_operation_failed), но не для чисто transient timeout без признака плохого locator.
+"""
+
+
+def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[str]) -> str:
+    allowed = "|".join(allowed_actions)
+    return f"""
+Ты replanner benchmark-режима веб-автоматизации.
+На входе goal + snapshot + previous plan. Верни только JSON TaskSpec.
+
+Task family: {task_family}
+Разрешенные actions: {allowed}
+
+Правила:
+1) Используй только разрешенные actions.
+2) Не повторяй предыдущую ошибку и не усложняй план.
+3) Сохраняй минимальный план с обязательным finish в конце.
+4) open_url должен содержать args.url.
+5) Никаких legacy aliases.
 """
