@@ -54,6 +54,8 @@ class PlanValidator:
                 raise PlanValidationError("type requires 'selector' and 'text'")
             if step.action == "navigate_to_relevant_section":
                 self._validate_click_args(step.args)
+            if step.action == "wait_for":
+                self._validate_wait_for_args(step.args)
             if step.action in {"extract_text", "extract_html"} and "selector" not in step.args:
                 raise PlanValidationError(f"{step.action} requires 'selector'")
             if step.action == "extract_items":
@@ -110,6 +112,23 @@ class PlanValidator:
             raise PlanValidationError(
                 "click with bare text is too weak; add exact=true, scope_selector, role+name, or href_contains"
             )
+
+    @staticmethod
+    def _validate_wait_for_args(args: dict) -> None:
+        selector = str(args.get("selector", "")).strip()
+        url_contains = str(args.get("url_contains", "")).strip()
+        text = str(args.get("text", "")).strip()
+        scope_selector = str(args.get("scope_selector", "")).strip()
+
+        if not (selector or url_contains or text):
+            raise PlanValidationError("wait_for requires one of: selector | url_contains | text")
+        if text and not (selector or url_contains or scope_selector or bool(args.get("exact", False))):
+            raise PlanValidationError(
+                "wait_for with bare text is too weak; add scope_selector, exact=true, or prefer selector/url_contains"
+            )
+        timeout_ms = args.get("timeout_ms")
+        if timeout_ms is not None and (not isinstance(timeout_ms, int) or timeout_ms <= 0):
+            raise PlanValidationError("wait_for timeout_ms must be a positive integer")
 
     @staticmethod
     def _validate_extract_items(args: dict, save_as: str | None) -> None:
