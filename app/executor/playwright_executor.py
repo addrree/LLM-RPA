@@ -269,7 +269,7 @@ class PlaywrightExecutor:
         if step.action not in self.BROWSER_RETRYABLE_ACTIONS:
             return await handler(page, step.args, runtime_state)
 
-        max_attempts = 3
+        max_attempts = self._resolve_max_retry_attempts(step=step, runtime_state=runtime_state)
         base_delay = 0.35
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
@@ -299,6 +299,21 @@ class PlaywrightExecutor:
                 )
                 await asyncio.sleep(backoff_sec)
         raise last_error if last_error else RuntimeError("Unknown step execution error")
+
+    @staticmethod
+    def _resolve_max_retry_attempts(*, step, runtime_state) -> int:
+        base = 2
+        benchmark_context = runtime_state.get("benchmark_context", {}) if isinstance(runtime_state, dict) else {}
+        task_family = str(benchmark_context.get("task_family", "")).strip()
+        if step.action == "open_url":
+            return 2
+        if step.action == "wait_for":
+            return 1 if task_family in {"single_value_extraction", "anchored_value_extraction"} else base
+        if step.action == "click":
+            return 2 if task_family in {"navigation_then_extraction", "multi_step_information_retrieval"} else 1
+        if step.action == "navigate_to_relevant_section":
+            return 2
+        return base
 
     async def _pre_retry_state_check(self, *, page, step) -> None:
         if step.action == "wait_for" and step.args.get("selector"):

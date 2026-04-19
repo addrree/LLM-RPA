@@ -94,19 +94,16 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
         ),
     }.get(task_family, "")
     return f"""
-Ты planner benchmark-режима веб-автоматизации.
-Верни только JSON TaskSpec без markdown/пояснений.
-
+Ты planner benchmark-режима. Верни только JSON TaskSpec.
 Task family: {task_family}
 Разрешенные actions: {allowed}
-
-Критические правила:
-1) Используй только actions из списка выше.
-2) Последний шаг всегда finish, step_id: 1..N подряд.
-3) action=open_url всегда с непустым args.url.
-4) План должен быть коротким и детерминированным (обычно 3-6 шагов).
-5) Никаких legacy action names или aliases.
-6) Не добавляй действия вне текущей task family.
+Правила:
+1) Только actions из списка.
+2) step_id подряд, последний шаг finish.
+3) open_url всегда с непустым args.url.
+4) План минимальный и детерминированный (обычно 3-6 шагов).
+5) Не используй legacy aliases.
+6) Не выходи за рамки task family.
 7) {family_rules}
 """
 
@@ -223,17 +220,14 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         ),
     }.get(task_family, "")
     return f"""
-Ты replanner benchmark-режима веб-автоматизации.
-На входе goal + snapshot + previous plan. Верни только JSON TaskSpec.
-
+Ты replanner benchmark-режима. Верни только JSON TaskSpec.
 Task family: {task_family}
 Разрешенные actions: {allowed}
-
 Правила:
-1) Используй только разрешенные actions.
-2) Не повторяй предыдущую ошибку и не усложняй план.
-3) Сохраняй минимальный план с обязательным finish в конце.
-4) open_url должен содержать args.url.
-5) Никаких legacy aliases.
+1) Только разрешенные actions.
+2) Не повторяй прошлую ошибку.
+3) План минимальный, с finish в конце.
+4) open_url обязательно содержит args.url.
+5) Не используй legacy aliases.
 6) {family_rules}
 """

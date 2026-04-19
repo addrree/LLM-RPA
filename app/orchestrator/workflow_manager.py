@@ -74,6 +74,10 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 args["fields"] = {"value": 1}
         if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
             args["text"] = "Python"
+        if action == "wait_for" and not isinstance(args.get("timeout_ms"), int):
+            args["timeout_ms"] = 12000
+        if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
+            args["timeout_ms"] = 20000
 
         if task_family == "single_value_extraction" and action == "extract_pattern_from_page_text":
             pattern = str(args.get("pattern", "")).strip()
@@ -132,6 +136,8 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 )
             if action == "compare_structured_values":
                 compare_step_idx = len(normalized_steps)
+                if not step.get("save_as"):
+                    step["save_as"] = "structured_comparison"
             if action.startswith("extract"):
                 extraction_step_indices.append(len(normalized_steps))
 
@@ -432,8 +438,11 @@ class WorkflowManager:
         page_snapshot: PageSnapshot | None,
         benchmark_context: dict | None,
     ):
+        runtime_state = runtime_state if runtime_state is not None else {}
+        runtime_state["benchmark_context"] = benchmark_context or {}
         current_plan = initial_plan
         max_retries = self._effective_max_retries(current_plan.constraints.max_verification_retries)
+        max_retries = self._effective_max_retries_for_context(max_retries=max_retries, benchmark_context=benchmark_context)
         corrective_attempt_count = 0
         corrective_plan_valid_count = 0
         corrective_plan_invalid_count = 0
@@ -687,8 +696,26 @@ class WorkflowManager:
         data = execution_result.extracted_data
         if "structured_comparison" in data and isinstance(data["structured_comparison"], dict):
             comparison = data["structured_comparison"]
+            data["comparison"] = comparison
+            data["compare_status"] = comparison.get("status")
             left = data.get(comparison.get("left_key", "section_a_data"))
             right = data.get(comparison.get("right_key", "section_b_data"))
+            data.setdefault(
+                "comparison_left_summary",
+                {
+                    "label": comparison.get("left_key", "section_a_data"),
+                    "type": type(left).__name__,
+                    "size": len(left) if isinstance(left, (dict, list)) else None,
+                },
+            )
+            data.setdefault(
+                "comparison_right_summary",
+                {
+                    "label": comparison.get("right_key", "section_b_data"),
+                    "type": type(right).__name__,
+                    "size": len(right) if isinstance(right, (dict, list)) else None,
+                },
+            )
             data["combined_result"] = {
                 "section_a_data": left,
                 "section_b_data": right,
@@ -727,6 +754,8 @@ class WorkflowManager:
             "status": "equal" if left == right else "different",
         }
         data["structured_comparison"] = comparison
+        data["comparison"] = comparison
+        data["compare_status"] = comparison.get("status")
         data["combined_result"] = {
             "section_a_data": left,
             "section_b_data": right,
@@ -735,8 +764,18 @@ class WorkflowManager:
 
     @staticmethod
     def _effective_max_retries(raw_max_retries: int) -> int:
-        bounded = min(3, max(0, int(raw_max_retries)))
-        return max(1, bounded)
+        return min(3, max(0, int(raw_max_retries)))
+
+    @staticmethod
+    def _effective_max_retries_for_context(*, max_retries: int, benchmark_context: dict | None) -> int:
+        if not benchmark_context:
+            return max_retries
+        family = str(benchmark_context.get("task_family", "")).strip()
+        if family in {"single_value_extraction", "anchored_value_extraction"}:
+            return min(max_retries, 1)
+        if family in {"navigation_then_extraction"}:
+            return min(max_retries, 2)
+        return max_retries
 
     @staticmethod
     def _build_page_snapshot_from_execution(execution_result):
