@@ -477,12 +477,14 @@ class ActionHandlers:
                 page_language=effective_page_language,
             )
         if resolved_candidates:
+            enforce_anchor_language_filter = bool(args.get("enforce_anchor_language_filter", True))
             anchor_text = await self._resolve_anchor_text(
                 page=page,
                 preferred_anchor=anchor_text,
                 anchor_candidates=resolved_candidates,
                 anchor_matching_mode=anchor_matching_mode,
                 page_language=effective_page_language,
+                enforce_anchor_language_filter=enforce_anchor_language_filter,
                 value_pattern=str(value_pattern) if value_pattern else None,
                 runtime_state=runtime_state,
             )
@@ -629,6 +631,7 @@ class ActionHandlers:
         anchor_candidates: list[str],
         anchor_matching_mode: str,
         page_language: str,
+        enforce_anchor_language_filter: bool,
         value_pattern: str | None,
         runtime_state=None,
     ) -> str:
@@ -650,6 +653,7 @@ class ActionHandlers:
                 candidate=candidate_to_use,
                 matching_mode=anchor_matching_mode,
                 page_language=page_language,
+                enforce_language_filter=enforce_anchor_language_filter,
             ):
                 continue
             if not value_pattern:
@@ -757,14 +761,16 @@ class ActionHandlers:
         candidate: str,
         matching_mode: str,
         page_language: str,
+        enforce_language_filter: bool,
     ) -> bool:
         normalized_candidate = candidate.strip()
         if not normalized_candidate:
             return False
-        if page_language in {"en", "english"} and cls._contains_cyrillic(normalized_candidate):
-            return False
-        if page_language in {"ru", "russian"} and cls._contains_latin(normalized_candidate):
-            return False
+        if enforce_language_filter:
+            if page_language in {"en", "english"} and cls._contains_cyrillic(normalized_candidate):
+                return False
+            if page_language in {"ru", "russian"} and cls._contains_latin(normalized_candidate):
+                return False
 
         candidate_lower = normalized_candidate.lower()
         corpus = [source_text] + visible_anchors

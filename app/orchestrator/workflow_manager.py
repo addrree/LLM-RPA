@@ -120,7 +120,11 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                     has_capture_groups = re.compile(pattern).groups > 0
                 except re.error:
                     has_capture_groups = False
+            html_only_pattern = "<" in pattern and ">" in pattern
             if not has_capture_groups and not bool(args.get("normalize_number", False)):
+                step["action"] = "extract_text"
+                step["args"] = {"selector": "h1"}
+            elif html_only_pattern:
                 step["action"] = "extract_text"
                 step["args"] = {"selector": "h1"}
 
