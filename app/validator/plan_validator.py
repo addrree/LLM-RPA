@@ -38,6 +38,9 @@ class PlanValidator:
     def _validate_actions(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
         effective_allowed_actions = allowed_actions or ALLOWED_ACTIONS
         for step in plan.steps:
+            benchmark_guardrail_error = str(step.args.get("__benchmark_guardrail_error", "")).strip()
+            if benchmark_guardrail_error:
+                raise PlanValidationError(benchmark_guardrail_error)
             if step.action not in effective_allowed_actions:
                 raise PlanValidationError(f"Unsupported action: {step.action}")
 
@@ -269,6 +272,12 @@ class PlanValidator:
                     raise PlanValidationError(
                         f"extract_structured_items field '{field_name}' requires positive group index"
                     )
+                PlanValidator._validate_group_index_reference(
+                    group_index=spec,
+                    compiled_pattern=compiled_pattern,
+                    action_name="extract_structured_items",
+                    field_name=str(field_name),
+                )
                 continue
             if not isinstance(spec, dict):
                 raise PlanValidationError(

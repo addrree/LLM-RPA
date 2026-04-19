@@ -300,3 +300,87 @@ def test_plan_validator_rejects_actions_outside_benchmark_policy():
     ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
     with pytest.raises(PlanValidationError):
         PlanValidator().validate(plan, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_single_value_rewrites_brittle_literal_pattern_to_h1():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "extract header",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_pattern_from_page_text",
+                    "args": {"pattern": r"Welcome to Python\\.org"},
+                    "save_as": "value",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    extraction = normalized.steps[1]
+    assert extraction.action == "extract_text"
+    assert extraction.args["selector"] == "h1"
+
+
+def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "navigate and extract",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "click", "args": {"text": "Pricing"}},
+                {"step_id": 3, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_adds_guardrail_for_regex_only_multi_step_compare():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "compare two sections",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["structured_comparison"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_pattern_from_page_text",
+                    "args": {"pattern": r"(\\d{4}-\\d{2}-\\d{2}.+)"},
+                    "save_as": "section_a_data",
+                },
+                {
+                    "step_id": 3,
+                    "action": "compare_structured_values",
+                    "args": {"left_key": "section_a_data", "right_key": "section_b_data"},
+                    "save_as": "structured_comparison",
+                },
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(
+        category="multi_step_information_retrieval",
+        task_family="multi_step_information_retrieval",
+    )
+    normalized = normalize_benchmark_plan(plan, ctx)
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
