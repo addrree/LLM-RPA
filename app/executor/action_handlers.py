@@ -37,18 +37,19 @@ class ActionHandlers:
     async def wait_for(self, page, args, runtime_state=None):
         timeout_ms = int(args.get("timeout_ms", 12000))
         if "selector" in args and str(args.get("selector", "")).strip():
-            await page.wait_for_selector(args["selector"], timeout=timeout_ms)
+            await page.wait_for_selector(args["selector"], state="visible", timeout=timeout_ms)
             return
         if "url_contains" in args and str(args.get("url_contains", "")).strip():
             await page.wait_for_url(f"**{args['url_contains']}**", timeout=timeout_ms)
             return
         if "text" in args and str(args.get("text", "")).strip():
-            await page.get_by_text(str(args["text"]), exact=bool(args.get("exact", False))).first.wait_for(
-                state="visible",
-                timeout=timeout_ms,
-            )
+            scope_selector = str(args.get("scope_selector", "")).strip()
+            scope = page.locator(scope_selector) if scope_selector else page
+            locator = scope.get_by_text(str(args["text"]), exact=bool(args.get("exact", False)))
+            state = "visible" if bool(args.get("visible_only", True)) else "attached"
+            await locator.first.wait_for(state=state, timeout=timeout_ms)
             return
-        raise ValueError("wait_for requires one of selector | url_contains | text")
+        raise ValueError("wait_for requires one of selector | url_contains | text (optionally scoped)")
 
     async def navigate_to_relevant_section(self, page, args, runtime_state=None):
         await self.click(page, args, runtime_state)

@@ -30,6 +30,12 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
     }
     fallback_save_as = "value"
     task_family = str((benchmark_context or {}).get("task_family", "")).strip()
+    benchmark_anchor_candidates = [
+        str(item).strip()
+        for item in (benchmark_context or {}).get("scenario_anchor_candidates", [])
+        if str(item).strip()
+    ]
+    benchmark_anchor_matching_mode = str((benchmark_context or {}).get("scenario_anchor_matching_mode", "")).strip().lower()
     if isinstance(required_fields, list) and required_fields:
         normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
         if "value" in normalized_required:
@@ -66,6 +72,16 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 args["value_type"] = "email"
             if not str(args.get("page_language", "")).strip():
                 args["page_language"] = "auto"
+            if task_family == "anchored_value_extraction":
+                if benchmark_anchor_candidates:
+                    args["anchor_candidates"] = list(benchmark_anchor_candidates)
+                    anchor_text = str(args.get("anchor_text", "")).strip()
+                    if not anchor_text or anchor_text not in benchmark_anchor_candidates:
+                        args["anchor_text"] = benchmark_anchor_candidates[0]
+                if benchmark_anchor_matching_mode in {"auto", "exact", "contains"}:
+                    args["anchor_matching_mode"] = benchmark_anchor_matching_mode
+                # In benchmark mode we must detect language from actual page content and avoid user-language localization.
+                args["page_language"] = "auto"
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
                 args["pattern"] = "(.+)"
@@ -76,6 +92,21 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 args["fields"] = {"value": 1}
         if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
             args["text"] = "Python"
+        if task_family == "navigation_then_extraction" and action == "wait_for":
+            has_selector = bool(str(args.get("selector", "")).strip())
+            has_url_contains = bool(str(args.get("url_contains", "")).strip())
+            text_value = str(args.get("text", "")).strip()
+            has_text = bool(text_value)
+            has_scope = bool(str(args.get("scope_selector", "")).strip())
+            has_exact = bool(args.get("exact", False))
+            weak_text_wait = has_text and not has_selector and not has_url_contains and not has_scope
+            generic_text_wait = text_value.lower() in {"python", "home", "docs", "pricing", "policy"} and not has_exact
+            if weak_text_wait or generic_text_wait:
+                args["__benchmark_guardrail_error"] = (
+                    "benchmark guardrail: navigation_then_extraction wait_for is too weak; "
+                    "use url_contains, visible selector in main content, or scoped text wait "
+                    "(scope_selector + exact=true)"
+                )
         if action == "wait_for" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 12000
         if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
