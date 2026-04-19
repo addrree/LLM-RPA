@@ -5,6 +5,7 @@ import pytest
 from app.benchmark.policies import BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY, build_benchmark_context
 from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, BenchmarkSelection
 from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
+from app.orchestrator.workflow_manager import normalize_benchmark_plan
 from app.planner.action_vocab import normalize_plan_action_aliases
 from app.schemas.task_spec import TaskSpec
 from app.validator.plan_validator import PlanValidationError, PlanValidator

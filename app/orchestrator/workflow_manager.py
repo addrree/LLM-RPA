@@ -15,6 +15,87 @@ UTC = timezone.utc
 logger = logging.getLogger(__name__)
 
 
+def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> TaskSpec:
+    if not benchmark_context:
+        return plan
+
+    payload = plan.model_dump(mode="json")
+    steps = payload.get("steps", [])
+    required_fields = payload.get("expected_result", {}).get("required_fields", [])
+    allowed_actions = {
+        str(action).strip()
+        for action in (benchmark_context.get("allowed_actions") or [])
+        if str(action).strip()
+    }
+    fallback_save_as = "value"
+    if isinstance(required_fields, list) and required_fields:
+        normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
+        if "value" in normalized_required:
+            fallback_save_as = "value"
+        elif normalized_required:
+            fallback_save_as = normalized_required[0]
+
+    normalized_steps: list[dict] = []
+    for step in steps:
+        if not isinstance(step, dict):
+            continue
+        action = str(step.get("action", "")).strip()
+        if allowed_actions and action not in allowed_actions:
+            if action == "finish":
+                normalized_steps.append({"action": "finish", "args": {}})
+            continue
+
+        args = step.get("args")
+        if not isinstance(args, dict):
+            args = {}
+        step["args"] = args
+
+        if action == "extract_text" and not str(args.get("selector", "")).strip():
+            args["selector"] = "h1"
+        if action == "extract_pattern_from_page_text" and not str(args.get("pattern", "")).strip():
+            args["pattern"] = "(.{1,200})"
+            args.setdefault("group_index", 1)
+        if action == "extract_value_near_anchor":
+            if not str(args.get("anchor_text", "")).strip() and not args.get("anchor_candidates"):
+                args["anchor_text"] = "Contact"
+            if not str(args.get("value_type", "")).strip() and not str(args.get("value_pattern", "")).strip():
+                args["value_type"] = "email"
+        if action == "extract_structured_items":
+            if not str(args.get("pattern", "")).strip():
+                args["pattern"] = "(.+)"
+            limit = args.get("limit")
+            if not isinstance(limit, int) or limit <= 0:
+                args["limit"] = 5
+            if not isinstance(args.get("fields"), dict) or not args.get("fields"):
+                args["fields"] = {"value": 1}
+        if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
+            args["text"] = "Python"
+
+        if action.startswith("extract") and not step.get("save_as"):
+            step["save_as"] = fallback_save_as
+
+        normalized_steps.append(step)
+
+    if not any(str(step.get("action")) == "finish" for step in normalized_steps):
+        normalized_steps.append({"action": "finish", "args": {}})
+    for idx, step in enumerate(normalized_steps, start=1):
+        step["step_id"] = idx
+
+    payload["steps"] = normalized_steps
+    produced = {
+        str(step.get("save_as")).strip()
+        for step in normalized_steps
+        if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
+    }
+    expected = payload.get("expected_result")
+    if isinstance(expected, dict) and isinstance(expected.get("required_fields"), list):
+        filtered = [field for field in expected["required_fields"] if str(field).strip() in produced]
+        expected["required_fields"] = filtered
+        payload["expected_result"] = expected
+
+    return TaskSpec.model_validate(payload)
+
+
 class WorkflowStageError(Exception):
     def __init__(self, stage: str, message: str):
         super().__init__(message)
