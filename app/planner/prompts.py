@@ -68,6 +68,7 @@ PLANNER_SYSTEM_PROMPT = """
      3) compare_structured_values с save_as=structured_comparison (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), page_language, anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
+20. page_language для anchored extraction определяется по фактической странице после navigation; по умолчанию передавай page_language="auto". Не локализуй anchor_text по языку пользователя.
 """
 
 
@@ -91,6 +92,15 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Family policy (multi_step_information_retrieval): не используй старый regex-first compare путь. "
             "Используй pipeline: extract_value_from_section / extract_structured_items_from_region для "
             "section_a_data и section_b_data, затем compare_structured_values."
+        ),
+        "anchored_value_extraction": (
+            "Family policy (anchored_value_extraction): anchor_text/anchor_candidates должны оставаться в языке "
+            "страницы; ставь page_language='auto' и используй видимые anchors страницы без автоперевода."
+        ),
+        "negative_or_ambiguous_case": (
+            "Family policy (negative_or_ambiguous_case): не используй broad prose regex. "
+            "Для extract_pattern_from_page_text pattern должен иметь capture group под конкретное значение; "
+            "если значения нет, верни status/reason как explicit uncertainty, а не длинный фрагмент страницы."
         ),
     }.get(task_family, "")
     return f"""
@@ -166,6 +176,7 @@ REPLANNER_SYSTEM_PROMPT = """
 15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
 16) Для anchored extraction учитывай page_language + anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
 17) Для contact/support/email/phone задач предпочтительно value_type=email|phone и anchor_candidates вместо одного жесткого anchor_text.
+18) Для anchored extraction передавай page_language=\"auto\" (или язык, подтвержденный самой страницей), не локализуй anchor по языку пользователя.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -217,6 +228,14 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         "multi_step_information_retrieval": (
             "Соблюдай compare pipeline: section_a_data + section_b_data через structured extraction, "
             "затем compare_structured_values; избегай regex-only сравнения."
+        ),
+        "anchored_value_extraction": (
+            "Не переводи anchor_text между языками. Ставь page_language='auto', используй anchor_candidates "
+            "как видимые тексты страницы и избегай cross-language mismatch."
+        ),
+        "negative_or_ambiguous_case": (
+            "Избегай broad prose extraction: regex должен иметь capture group для конкретного value token. "
+            "Не возвращай длинные абзацы как статус/reason."
         ),
     }.get(task_family, "")
     return f"""

@@ -64,6 +64,8 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 args["anchor_text"] = "Contact"
             if not str(args.get("value_type", "")).strip() and not str(args.get("value_pattern", "")).strip():
                 args["value_type"] = "email"
+            if not str(args.get("page_language", "")).strip():
+                args["page_language"] = "auto"
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
                 args["pattern"] = "(.+)"
@@ -140,6 +142,19 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                     step["save_as"] = "structured_comparison"
             if action.startswith("extract"):
                 extraction_step_indices.append(len(normalized_steps))
+
+        if task_family == "negative_or_ambiguous_case" and action == "extract_pattern_from_page_text":
+            pattern = str(args.get("pattern", "")).strip()
+            has_capture_groups = False
+            try:
+                has_capture_groups = re.compile(pattern).groups > 0 if pattern else False
+            except re.error:
+                has_capture_groups = False
+            if not has_capture_groups:
+                args["__benchmark_guardrail_error"] = (
+                    "benchmark guardrail: negative_or_ambiguous_case requires explicit capture-group regex for "
+                    "extract_pattern_from_page_text; broad prose matching is disallowed"
+                )
 
         if action.startswith("extract") and not step.get("save_as"):
             step["save_as"] = fallback_save_as

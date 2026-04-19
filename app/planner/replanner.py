@@ -97,6 +97,16 @@ class Replanner:
             "prior_corrective_attempts": prior_corrective_attempts or [],
             "disallowed_next_patterns": disallowed_next_patterns or [],
         }
+        if benchmark_context:
+            payload["benchmark_policy_hints"] = {
+                "task_family": str(benchmark_context.get("task_family", "")),
+                "anchor_language_grounding": (
+                    "Determine page_language from current page content/html; keep anchor text in visible page language."
+                ),
+                "negative_value_policy": (
+                    "Avoid broad prose extraction for negative/ambiguous tasks; require concrete capture token or explicit uncertainty."
+                ),
+            }
         system_prompt = CORRECTIVE_REPLANNER_SYSTEM_PROMPT
         if benchmark_context:
             system_prompt = build_benchmark_replanner_prompt(

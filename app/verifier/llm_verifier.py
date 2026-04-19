@@ -49,6 +49,13 @@ class LLMVerifier:
             field for field in plan.expected_result.required_fields if field not in TECHNICAL_REQUIRED_FIELDS
         ]
         deterministic_issues = self._validate_structured_compare_contract(result.extracted_data)
+        deterministic_issues.extend(
+            self._validate_semantic_value_quality(
+                required_fields=semantic_required_fields,
+                extracted_data=result.extracted_data,
+                goal=plan.goal,
+            )
+        )
         if deterministic_issues:
             self.last_artifact = None
             return VerificationVerdict(
@@ -100,3 +107,52 @@ class LLMVerifier:
         if str(compare_status) != str(comparison.get("status")):
             return ["compare_status must match structured_comparison.status."]
         return []
+
+    @staticmethod
+    def _validate_semantic_value_quality(*, required_fields: list[str], extracted_data: dict, goal: str) -> list[str]:
+        if not isinstance(extracted_data, dict):
+            return []
+        issues: list[str] = []
+        normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
+        normalized_goal = str(goal).lower()
+        negative_like_goal = any(token in normalized_goal for token in ["absent", "ambiguous", "uncertainty", "not-found"])
+
+        for field in normalized_required:
+            if field not in extracted_data:
+                continue
+            value = extracted_data.get(field)
+            if not isinstance(value, str):
+                continue
+            text = value.strip()
+            if not text:
+                continue
+            if field == "status":
+                status_token = text.lower().replace(" ", "_")
+                allowed_prefixes = (
+                    "not_found",
+                    "ambiguous",
+                    "uncertain",
+                    "unknown",
+                    "missing",
+                    "no_match",
+                    "not_available",
+                )
+                if len(status_token) > 32 or not status_token.startswith(allowed_prefixes):
+                    issues.append(
+                        "status field must be a compact uncertainty token (e.g., not_found/ambiguous), not broad prose."
+                    )
+            if len(text) >= 120 and LLMVerifier._looks_like_sentence_prose(text):
+                issues.append(
+                    f"Field '{field}' looks like broad page prose, not a concrete extracted value."
+                )
+            if negative_like_goal and field in {"value", "status"} and len(text) >= 80 and LLMVerifier._looks_like_sentence_prose(text):
+                issues.append(
+                    f"Negative/ambiguous goal requires explicit uncertainty semantics; field '{field}' contains broad prose."
+                )
+        return issues
+
+    @staticmethod
+    def _looks_like_sentence_prose(text: str) -> bool:
+        token_count = len([token for token in text.split() if token])
+        punctuation_count = sum(text.count(mark) for mark in [".", ";", ":"])
+        return token_count >= 14 and punctuation_count >= 1
