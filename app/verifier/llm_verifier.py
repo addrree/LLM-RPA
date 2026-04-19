@@ -94,4 +94,9 @@ class LLMVerifier:
             return ["structured_comparison must be an object."]
         if "exact_match" not in comparison or "status" not in comparison:
             return ["structured_comparison must include exact_match and status fields."]
+        compare_status = extracted_data.get("compare_status")
+        if compare_status is None:
+            return ["compare_status is missing for structured comparison result."]
+        if str(compare_status) != str(comparison.get("status")):
+            return ["compare_status must match structured_comparison.status."]
         return []

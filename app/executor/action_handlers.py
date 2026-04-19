@@ -19,7 +19,7 @@ class ActionHandlers:
 
     async def open_url(self, page, args, runtime_state=None):
         wait_until = str(args.get("wait_until", "domcontentloaded"))
-        timeout_ms = int(args.get("timeout_ms", 30000))
+        timeout_ms = int(args.get("timeout_ms", 20000))
         await page.goto(args["url"], wait_until=wait_until, timeout=timeout_ms)
 
     async def click(self, page, args, runtime_state=None):
@@ -35,16 +35,17 @@ class ActionHandlers:
         await page.fill(args["selector"], args["text"])
 
     async def wait_for(self, page, args, runtime_state=None):
+        timeout_ms = int(args.get("timeout_ms", 12000))
         if "selector" in args and str(args.get("selector", "")).strip():
-            await page.wait_for_selector(args["selector"], timeout=int(args.get("timeout_ms", 30000)))
+            await page.wait_for_selector(args["selector"], timeout=timeout_ms)
             return
         if "url_contains" in args and str(args.get("url_contains", "")).strip():
-            await page.wait_for_url(f"**{args['url_contains']}**", timeout=int(args.get("timeout_ms", 30000)))
+            await page.wait_for_url(f"**{args['url_contains']}**", timeout=timeout_ms)
             return
         if "text" in args and str(args.get("text", "")).strip():
             await page.get_by_text(str(args["text"]), exact=bool(args.get("exact", False))).first.wait_for(
                 state="visible",
-                timeout=int(args.get("timeout_ms", 30000)),
+                timeout=timeout_ms,
             )
             return
         raise ValueError("wait_for requires one of selector | url_contains | text")
@@ -130,6 +131,16 @@ class ActionHandlers:
                 f"compare_structured_values requires data for '{left_key}' and '{right_key}' in extracted_data"
             )
         comparison = self._build_structured_comparison(left=left, right=right, label_left=left_key, label_right=right_key)
+        extracted["structured_comparison"] = comparison
+        extracted["comparison"] = comparison
+        extracted["compare_status"] = comparison.get("status")
+        extracted["comparison_left_summary"] = self._build_comparison_side_summary(value=left, label=left_key)
+        extracted["comparison_right_summary"] = self._build_comparison_side_summary(value=right, label=right_key)
+        runtime["extracted_data"] = extracted
+        args["_executor_note"] = (
+            f"compare_structured_values compared {left_key!r} vs {right_key!r}; "
+            f"status={comparison.get('status')}; exact_match={comparison.get('exact_match')}"
+        )
         return comparison
 
     async def assert_page_contains(self, page, args, runtime_state=None):
@@ -165,6 +176,9 @@ class ActionHandlers:
             args["_executor_note"] = (
                 f'Selector "{selector}" matched {match_count} elements; used index={index}.'
             )
+        elif self._is_heading_selector(selector):
+            target_locator, note = await self._resolve_primary_heading_locator(page=page, fallback_locator=locator)
+            args["_executor_note"] = note
         else:
             target_locator = locator.first
             if match_count > 1:
@@ -466,6 +480,7 @@ class ActionHandlers:
         if not value_pattern:
             raise ValueError("extract_value_near_anchor requires value_pattern or supported value_type")
         value_pattern = str(value_pattern)
+        prefer_local_for_contact = value_type in {"email", "phone"}
         search_direction = str(args.get("search_direction", "after")).lower()
         same_block_only = bool(args.get("same_block_only", True))
         required_right_context = args.get("required_right_context")
@@ -486,6 +501,8 @@ class ActionHandlers:
             required_left_context = str(required_left_context)
         if max_distance_chars is not None:
             max_distance_chars = int(max_distance_chars)
+        elif prefer_local_for_contact:
+            max_distance_chars = 280
 
         candidates = await self._collect_anchor_candidates(
             page=page,
@@ -507,6 +524,7 @@ class ActionHandlers:
             max_distance_chars=max_distance_chars,
             flags_value=flags_value,
             group_index=group_index,
+            prefer_local_for_contact=prefer_local_for_contact,
         )
 
         strict_context_disabled = False
@@ -521,6 +539,7 @@ class ActionHandlers:
                 max_distance_chars=max_distance_chars,
                 flags_value=flags_value,
                 group_index=group_index,
+                prefer_local_for_contact=prefer_local_for_contact,
             )
 
         if best_match is None and same_block_only:
@@ -543,6 +562,7 @@ class ActionHandlers:
                 max_distance_chars=max_distance_chars,
                 flags_value=flags_value,
                 group_index=group_index,
+                prefer_local_for_contact=prefer_local_for_contact,
             )
             if best_match is None and (required_left_context or required_right_context):
                 strict_context_disabled = True
@@ -555,12 +575,21 @@ class ActionHandlers:
                     max_distance_chars=max_distance_chars,
                     flags_value=flags_value,
                     group_index=group_index,
+                    prefer_local_for_contact=prefer_local_for_contact,
                 )
 
         if best_match is None:
             raise ValueError(
                 f"Value not found near anchor_text={anchor_text!r}; pattern={value_pattern!r}; "
                 f"required_left_context={required_left_context!r}; required_right_context={required_right_context!r}"
+            )
+        if prefer_local_for_contact and (
+            best_match.get("confidence") == "low" or best_match.get("match_scope") == "fallback"
+        ):
+            raise ValueError(
+                "Value found near anchor but rejected by confidence policy for contact extraction "
+                f"(scope={best_match.get('match_scope')}, confidence={best_match.get('confidence')}, "
+                f"distance={best_match.get('distance')})"
             )
 
         extracted_value = best_match["value"]
@@ -577,6 +606,7 @@ class ActionHandlers:
             f"extract_value_near_anchor matched near anchor={anchor_text!r}; "
             f"raw_match={extracted_value!r}; distance={best_match['distance']}; "
             f"source={best_match['source']}; fallback_used={fallback_used}; "
+            f"scope={best_match.get('match_scope')}; confidence={best_match.get('confidence')}; "
             f"strict_context_disabled={strict_context_disabled}"
         )
         return result
@@ -1023,6 +1053,7 @@ class ActionHandlers:
         max_distance_chars: int | None,
         flags_value: int,
         group_index: int | None,
+        prefer_local_for_contact: bool = False,
     ) -> dict[str, Any] | None:
         best: dict[str, Any] | None = None
 
@@ -1051,7 +1082,16 @@ class ActionHandlers:
                     continue
 
                 extracted_value = self._extract_match_value(match, group_index=group_index)
+                match_scope = self._classify_anchor_source_scope(str(candidate.get("source", "")))
+                confidence = self._classify_anchor_match_confidence(
+                    distance=distance,
+                    match_scope=match_scope,
+                )
+                if prefer_local_for_contact and match_scope == "fallback" and confidence != "high":
+                    continue
                 score = (
+                    0 if confidence == "high" else (1 if confidence == "medium" else 2),
+                    0 if match_scope == "local_block" else (1 if match_scope == "section" else 2),
                     distance,
                     int(candidate.get("source_rank", 3)),
                     0 if str(candidate.get("source", "")).startswith("dom_") else 1,
@@ -1061,9 +1101,117 @@ class ActionHandlers:
                         "value": extracted_value,
                         "distance": distance,
                         "source": candidate.get("source", "unknown"),
+                        "match_scope": match_scope,
+                        "confidence": confidence,
                         "score": score,
                     }
         return best
+
+    @staticmethod
+    def _classify_anchor_source_scope(source: str) -> str:
+        lowered = source.strip().lower()
+        if lowered == "dom_local_block":
+            return "local_block"
+        if lowered in {"dom_section_block", "dom_broad_block"}:
+            return "section"
+        return "fallback"
+
+    @staticmethod
+    def _classify_anchor_match_confidence(*, distance: int, match_scope: str) -> str:
+        if match_scope == "local_block":
+            if distance <= 140:
+                return "high"
+            if distance <= 260:
+                return "medium"
+            return "low"
+        if match_scope == "section":
+            if distance <= 220:
+                return "high"
+            if distance <= 400:
+                return "medium"
+            return "low"
+        if distance <= 120:
+            return "high"
+        if distance <= 220:
+            return "medium"
+        return "low"
+
+    @staticmethod
+    def _build_comparison_side_summary(*, value: Any, label: str) -> dict[str, Any]:
+        summary: dict[str, Any] = {
+            "label": label,
+            "type": type(value).__name__,
+            "is_null": value is None,
+        }
+        if isinstance(value, dict):
+            summary["keys"] = sorted(str(key) for key in value.keys())
+            summary["size"] = len(value)
+        elif isinstance(value, list):
+            summary["size"] = len(value)
+            summary["item_types"] = sorted({type(item).__name__ for item in value})
+        elif isinstance(value, str):
+            summary["length"] = len(value)
+            summary["preview"] = value[:120]
+        else:
+            summary["repr"] = repr(value)[:120]
+        return summary
+
+    @staticmethod
+    def _is_heading_selector(selector: str) -> bool:
+        normalized = selector.strip().lower()
+        return normalized in {"h1", "main h1", "article h1", "header h1"}
+
+    async def _resolve_primary_heading_locator(self, *, page, fallback_locator):
+        selected_index = await page.evaluate(
+            r"""
+            () => {
+              const headings = Array.from(document.querySelectorAll("h1"));
+              if (!headings.length) return -1;
+              const visible = (el) => {
+                if (!el || !el.isConnected) return false;
+                if (el.closest("[hidden], [aria-hidden='true']")) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+                  return false;
+                }
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              };
+              let best = null;
+              headings.forEach((el, idx) => {
+                const text = (el.innerText || el.textContent || "").replace(/\s+/g, " ").trim();
+                if (!text || !visible(el)) return;
+                const inMain = !!el.closest("main");
+                const inArticle = !!el.closest("article");
+                const inHeader = !!el.closest("header");
+                const inNavLike = !!el.closest("nav, aside, footer");
+                const rect = el.getBoundingClientRect();
+                let bucket = 3;
+                if (inMain) bucket = 0;
+                else if (inArticle) bucket = 1;
+                else if (inHeader) bucket = 2;
+                let score = 1000 - bucket * 100;
+                if (inNavLike) score -= 300;
+                score -= Math.max(0, Math.floor(rect.top));
+                const candidate = { idx, bucket, score, top: rect.top };
+                if (!best || candidate.score > best.score || (candidate.score === best.score && candidate.top < best.top)) {
+                  best = candidate;
+                }
+              });
+              return best ? best.idx : -1;
+            }
+            """
+        )
+        if isinstance(selected_index, int) and selected_index >= 0:
+            note = (
+                'Selector "h1" used primary heading resolution '
+                f"(priority: main>article>header>h1); selected index={selected_index}."
+            )
+            return page.locator("h1").nth(selected_index), note
+
+        count = await fallback_locator.count()
+        note = f'Selector "h1" primary heading resolution failed; fallback to first of {count}.'
+        return fallback_locator.first, note
 
     @staticmethod
     def _distance_from_anchor(anchor_idx: int, match: re.Match[str], direction: str) -> int | None:
