@@ -127,14 +127,7 @@ class BenchmarkRunner:
         technical_failure = False
 
         try:
-            benchmark_context = build_benchmark_context(
-                category=scenario.category,
-                task_family=scenario.task_family,
-                required_top_level_fields=scenario.required_top_level_fields,
-                expected_item_fields=scenario.expected_item_fields,
-                expected_min_items=scenario.expected_min_items,
-                anchor_candidates=scenario.anchor_candidates,
-            )
+            benchmark_context = build_benchmark_context(category=scenario.category, task_family=scenario.task_family)
             result = await workflow.run(
                 self._build_grounded_goal(scenario, allowed_actions=benchmark_context["allowed_actions"]),
                 benchmark_context=benchmark_context,

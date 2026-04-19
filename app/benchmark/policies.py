@@ -48,22 +48,11 @@ BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY: dict[ScenarioCategory, list[str]] = {
 }
 
 
-def build_benchmark_context(
-    *,
-    category: ScenarioCategory,
-    task_family: str | None = None,
-    required_top_level_fields: list[str] | None = None,
-    expected_item_fields: list[str] | None = None,
-    expected_min_items: int | None = None,
-    anchor_candidates: list[str] | None = None,
-) -> dict:
+def build_benchmark_context(*, category: ScenarioCategory, task_family: str | None = None) -> dict:
     family = task_family or category
     return {
         "is_benchmark": True,
         "task_family": family,
         "allowed_actions": list(BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY[category]),
-        "required_top_level_fields": list(required_top_level_fields or []),
-        "expected_item_fields": list(expected_item_fields or []),
-        "expected_min_items": int(expected_min_items or 0),
-        "anchor_candidates": list(anchor_candidates or []),
     }
+

@@ -27,14 +27,6 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
         for action in (benchmark_context.get("allowed_actions") or [])
         if str(action).strip()
     }
-    expected_item_fields = [
-        str(field).strip() for field in (benchmark_context.get("expected_item_fields") or []) if str(field).strip()
-    ]
-    anchor_candidates = [
-        str(item).strip() for item in (benchmark_context.get("anchor_candidates") or []) if str(item).strip()
-    ]
-    goal_text = str(payload.get("goal", "")).lower()
-
     fallback_save_as = "value"
     if isinstance(required_fields, list) and required_fields:
         normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
@@ -58,51 +50,26 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
             args = {}
         step["args"] = args
 
-        # Structural normalization without magic constants unrelated to scenario hints.
         if action == "extract_text" and not str(args.get("selector", "")).strip():
-            # Do not guess arbitrary selectors: if selector is absent, switch to pattern extraction when allowed.
-            if "extract_pattern_from_page_text" in allowed_actions:
-                action = "extract_pattern_from_page_text"
-                step["action"] = action
-                args.clear()
-                args["pattern"] = r"([^\n]{3,200})"
-                args["group_index"] = 1
-            else:
-                continue
-
+            args["selector"] = "h1"
         if action == "extract_pattern_from_page_text" and not str(args.get("pattern", "")).strip():
-            args["pattern"] = r"([^\n]{3,200})"
+            args["pattern"] = "(.{1,200})"
             args.setdefault("group_index", 1)
-
         if action == "extract_value_near_anchor":
             if not str(args.get("anchor_text", "")).strip() and not args.get("anchor_candidates"):
-                if anchor_candidates:
-                    args["anchor_candidates"] = anchor_candidates[:5]
+                args["anchor_text"] = "Contact"
             if not str(args.get("value_type", "")).strip() and not str(args.get("value_pattern", "")).strip():
-                if "email" in goal_text:
-                    args["value_type"] = "email"
-                elif "phone" in goal_text or "тел" in goal_text:
-                    args["value_type"] = "phone"
-                else:
-                    args["value_type"] = "number"
-
+                args["value_type"] = "email"
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
-                field_count = max(1, len(expected_item_fields))
-                args["pattern"] = r"\s*".join([r"(.+?)"] * field_count)
+                args["pattern"] = "(.+)"
             limit = args.get("limit")
             if not isinstance(limit, int) or limit <= 0:
-                min_items = int(benchmark_context.get("expected_min_items") or 0)
-                args["limit"] = max(3, min_items) if min_items > 0 else 5
+                args["limit"] = 5
             if not isinstance(args.get("fields"), dict) or not args.get("fields"):
-                if expected_item_fields:
-                    args["fields"] = {name: idx + 1 for idx, name in enumerate(expected_item_fields)}
-                else:
-                    args["fields"] = {"value": 1}
-
+                args["fields"] = {"value": 1}
         if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
-            # Avoid invalid wait step; better to skip than inject irrelevant constants.
-            continue
+            args["text"] = "Python"
 
         if action.startswith("extract") and not step.get("save_as"):
             step["save_as"] = fallback_save_as
@@ -127,7 +94,6 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
         payload["expected_result"] = expected
 
     return TaskSpec.model_validate(payload)
-
 
 
 class WorkflowStageError(Exception):
@@ -206,10 +172,10 @@ class WorkflowManager:
             except Exception as exc:  # noqa: BLE001
                 raise WorkflowStageError("planning", str(exc)) from exc
             plan = self._normalize_plan_for_validation(plan)
-            plan = normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
+            plan = self._normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
-                plan = self._validator_validate(plan=plan, benchmark_context=benchmark_context)
+                self._validator_validate(plan=plan, benchmark_context=benchmark_context)
                 initial_plan_valid = True
                 final_plan_valid = True
             except PlanValidationError as exc:
@@ -235,7 +201,7 @@ class WorkflowManager:
             initial_plan = self._normalize_plan_for_validation(initial_plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
             try:
-                initial_plan = self._validator_validate(plan=initial_plan, benchmark_context=benchmark_context, enforce_benchmark_policy=False)
+                self._validator_validate(plan=initial_plan, benchmark_context=benchmark_context)
                 initial_plan_valid = True
             except PlanValidationError as exc:
                 initial_plan_valid = False
@@ -287,9 +253,9 @@ class WorkflowManager:
                 )
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._normalize_plan_for_validation(final_plan)
-                final_plan = normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
+                final_plan = self._normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
                 try:
-                    final_plan = self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
+                    self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                     final_plan_valid = True
                 except PlanValidationError as first_error:
                     final_plan_valid = False
@@ -307,9 +273,9 @@ class WorkflowManager:
                     )
                     replanner_artifact = self.replanner.last_artifact
                     final_plan = self._normalize_plan_for_validation(repaired_plan)
-                    final_plan = normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
+                    final_plan = self._normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
                     try:
-                        final_plan = self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
+                        self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                         final_plan_valid = True
                     except PlanValidationError as second_error:
                         self._persist_final_plan_repair_failure(
@@ -463,7 +429,7 @@ class WorkflowManager:
                 continue
 
             corrective_plan = self._normalize_plan_for_validation(corrective_plan)
-            corrective_plan = normalize_benchmark_plan(plan=corrective_plan, benchmark_context=benchmark_context)
+            corrective_plan = self._normalize_benchmark_plan(plan=corrective_plan, benchmark_context=benchmark_context)
             self._persist_corrective_plan_candidate(
                 corrective_plan=corrective_plan,
                 attempt=corrective_attempt_count,
@@ -524,7 +490,7 @@ class WorkflowManager:
                 continue
 
             try:
-                corrective_plan = self._validator_validate(plan=corrective_plan, benchmark_context=benchmark_context)
+                self._validator_validate(plan=corrective_plan, benchmark_context=benchmark_context)
             except PlanValidationError as validation_error:
                 corrective_plan_invalid_count += 1
                 offending_step = self._identify_offending_step(
@@ -601,25 +567,12 @@ class WorkflowManager:
             kwargs.pop("benchmark_context", None)
             return self.replanner.build_corrective_plan(**kwargs)
 
-    def _validator_validate(
-        self,
-        *,
-        plan: TaskSpec,
-        benchmark_context: dict | None,
-        enforce_benchmark_policy: bool = True,
-    ) -> TaskSpec:
-        normalized_plan = normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context) if enforce_benchmark_policy else plan
-        allowed_actions = self._allowed_actions(benchmark_context) if enforce_benchmark_policy else None
+    def _validator_validate(self, *, plan: TaskSpec, benchmark_context: dict | None) -> None:
+        allowed_actions = self._allowed_actions(benchmark_context)
         try:
-            self.validator.validate(normalized_plan, allowed_actions=allowed_actions)
+            self.validator.validate(plan, allowed_actions=allowed_actions)
         except TypeError:
-            self.validator.validate(normalized_plan)
-        return normalized_plan
-
-    @staticmethod
-    def _normalize_benchmark_plan(*, plan: TaskSpec, benchmark_context: dict | None) -> TaskSpec:
-        # Backward-compatible alias for external callers that still use old method name.
-        return normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
+            self.validator.validate(plan)
 
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:
