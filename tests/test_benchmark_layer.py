@@ -1,8 +1,14 @@
 from pathlib import Path
 
+import pytest
+
+from app.benchmark.policies import BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY, build_benchmark_context
 from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, BenchmarkSelection
 from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
+from app.orchestrator.workflow_manager import normalize_benchmark_plan
 from app.planner.action_vocab import normalize_plan_action_aliases
+from app.schemas.task_spec import TaskSpec
+from app.validator.plan_validator import PlanValidationError, PlanValidator
 
 
 def test_scenario_suite_contains_required_categories():
@@ -262,3 +268,61 @@ def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
     goal = BenchmarkRunner._build_grounded_goal(scenario)
     assert "Page language hint:" not in goal
     assert "Page language is unknown before navigation" in goal
+
+
+def test_benchmark_allowed_actions_are_category_specific():
+    assert BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY["single_value_extraction"] == [
+        "open_url",
+        "extract_text",
+        "extract_pattern_from_page_text",
+        "finish",
+    ]
+    assert "click" not in BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY["single_value_extraction"]
+    assert "compare_structured_values" in BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY["multi_step_information_retrieval"]
+
+
+def test_plan_validator_rejects_actions_outside_benchmark_policy():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "benchmark",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": []},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "click", "args": {"text": "Docs", "exact": True}},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(plan, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_prunes_disallowed_actions_and_keeps_finish():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "benchmark",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                {"step_id": 3, "action": "extract_text", "args": {}, "save_as": "value"},
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
+
+    normalized = normalize_benchmark_plan(plan, ctx)
+    actions = [step.action for step in normalized.steps]
+
+    assert "observe_page" not in actions
+    assert actions[-1] == "finish"
+    assert normalized.steps[1].args["selector"] == "h1"
