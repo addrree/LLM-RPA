@@ -37,18 +37,19 @@ class ActionHandlers:
     async def wait_for(self, page, args, runtime_state=None):
         timeout_ms = int(args.get("timeout_ms", 12000))
         if "selector" in args and str(args.get("selector", "")).strip():
-            await page.wait_for_selector(args["selector"], timeout=timeout_ms)
+            await page.wait_for_selector(args["selector"], state="visible", timeout=timeout_ms)
             return
         if "url_contains" in args and str(args.get("url_contains", "")).strip():
             await page.wait_for_url(f"**{args['url_contains']}**", timeout=timeout_ms)
             return
         if "text" in args and str(args.get("text", "")).strip():
-            await page.get_by_text(str(args["text"]), exact=bool(args.get("exact", False))).first.wait_for(
-                state="visible",
-                timeout=timeout_ms,
-            )
+            scope_selector = str(args.get("scope_selector", "")).strip()
+            scope = page.locator(scope_selector) if scope_selector else page
+            locator = scope.get_by_text(str(args["text"]), exact=bool(args.get("exact", False)))
+            state = "visible" if bool(args.get("visible_only", True)) else "attached"
+            await locator.first.wait_for(state=state, timeout=timeout_ms)
             return
-        raise ValueError("wait_for requires one of selector | url_contains | text")
+        raise ValueError("wait_for requires one of selector | url_contains | text (optionally scoped)")
 
     async def navigate_to_relevant_section(self, page, args, runtime_state=None):
         await self.click(page, args, runtime_state)
@@ -476,12 +477,14 @@ class ActionHandlers:
                 page_language=effective_page_language,
             )
         if resolved_candidates:
+            enforce_anchor_language_filter = bool(args.get("enforce_anchor_language_filter", True))
             anchor_text = await self._resolve_anchor_text(
                 page=page,
                 preferred_anchor=anchor_text,
                 anchor_candidates=resolved_candidates,
                 anchor_matching_mode=anchor_matching_mode,
                 page_language=effective_page_language,
+                enforce_anchor_language_filter=enforce_anchor_language_filter,
                 value_pattern=str(value_pattern) if value_pattern else None,
                 runtime_state=runtime_state,
             )
@@ -628,6 +631,7 @@ class ActionHandlers:
         anchor_candidates: list[str],
         anchor_matching_mode: str,
         page_language: str,
+        enforce_anchor_language_filter: bool,
         value_pattern: str | None,
         runtime_state=None,
     ) -> str:
@@ -649,6 +653,7 @@ class ActionHandlers:
                 candidate=candidate_to_use,
                 matching_mode=anchor_matching_mode,
                 page_language=page_language,
+                enforce_language_filter=enforce_anchor_language_filter,
             ):
                 continue
             if not value_pattern:
@@ -756,14 +761,16 @@ class ActionHandlers:
         candidate: str,
         matching_mode: str,
         page_language: str,
+        enforce_language_filter: bool,
     ) -> bool:
         normalized_candidate = candidate.strip()
         if not normalized_candidate:
             return False
-        if page_language in {"en", "english"} and cls._contains_cyrillic(normalized_candidate):
-            return False
-        if page_language in {"ru", "russian"} and cls._contains_latin(normalized_candidate):
-            return False
+        if enforce_language_filter:
+            if page_language in {"en", "english"} and cls._contains_cyrillic(normalized_candidate):
+                return False
+            if page_language in {"ru", "russian"} and cls._contains_latin(normalized_candidate):
+                return False
 
         candidate_lower = normalized_candidate.lower()
         corpus = [source_text] + visible_anchors
