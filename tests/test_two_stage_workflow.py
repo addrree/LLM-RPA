@@ -178,6 +178,14 @@ class _FakeValidator:
             raise PlanValidationError("extract_value_near_anchor requires non-empty 'value_pattern'")
 
 
+class _RecordingValidator:
+    def __init__(self):
+        self.allowed_actions_history: list[set[str] | None] = []
+
+    def validate(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
+        self.allowed_actions_history.append(allowed_actions)
+
+
 class _FakeExecutor:
     async def _start_session(self):
         return {"id": "session"}
@@ -216,6 +224,29 @@ class _FakeVerifier:
 
     def verify(self, plan, execution):
         return self._Verdict()
+
+
+class _SingleStagePlanner:
+    last_artifact = None
+    last_initial_artifact = None
+    last_action_oov_detected = False
+
+    def build_plan(self, user_goal: str, benchmark_context=None) -> TaskSpec:
+        return TaskSpec.model_validate(
+            {
+                "goal": user_goal,
+                "start_url": "https://example.com",
+                "allowed_domains": ["example.com"],
+                "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 20},
+                "expected_result": {"description": "Extract value", "required_fields": ["value"]},
+                "steps": [
+                    {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                    {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                    {"step_id": 3, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                    {"step_id": 4, "action": "finish", "args": {}},
+                ],
+            }
+        )
 
 
 class _FakeReplanner:
@@ -282,3 +313,54 @@ def test_two_stage_workflow_retries_invalid_final_plan_once():
     assert result["execution_result"].status == "success"
     assert result["final_plan"] is not None
     assert result["final_plan"].steps[1].args["value_pattern"] == r"(\\d+)"
+
+
+def test_two_stage_initial_plan_uses_observation_actions_in_benchmark_mode():
+    validator = _RecordingValidator()
+    manager = WorkflowManager(
+        planner=_FakePlanner(),
+        validator=validator,
+        executor=_FakeExecutor(),
+        verifier=_FakeVerifier(),
+        replanner=_FakeReplanner(),
+        two_stage_planning=True,
+    )
+
+    result = asyncio.run(
+        manager.run(
+            "Extract users count",
+            benchmark_context={
+                "task_family": "single_value_extraction",
+                "allowed_actions": ["open_url", "extract_text", "extract_pattern_from_page_text", "finish"],
+            },
+        )
+    )
+
+    assert result["execution_result"].status == "success"
+    assert validator.allowed_actions_history[0] == {"open_url", "observe_page", "finish"}
+    assert validator.allowed_actions_history[1] == {"open_url", "extract_text", "extract_pattern_from_page_text", "finish"}
+
+
+def test_single_stage_benchmark_run_does_not_raise_normalization_attribute_error():
+    manager = WorkflowManager(
+        planner=_SingleStagePlanner(),
+        validator=_RecordingValidator(),
+        executor=_FakeExecutor(),
+        verifier=_FakeVerifier(),
+        replanner=None,
+        two_stage_planning=False,
+    )
+
+    result = asyncio.run(
+        manager.run(
+            "Extract users count",
+            benchmark_context={
+                "task_family": "single_value_extraction",
+                "allowed_actions": ["open_url", "extract_text", "extract_pattern_from_page_text", "finish"],
+            },
+        )
+    )
+
+    assert result["execution_result"].status == "success"
+    assert result["plan"] is not None
+    assert [step.action for step in result["plan"].steps] == ["open_url", "extract_text", "finish"]
