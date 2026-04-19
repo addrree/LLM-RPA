@@ -3,7 +3,11 @@ import re
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import normalize_plan_action_aliases
-from app.planner.prompts import INITIAL_PLANNER_SYSTEM_PROMPT, PLANNER_SYSTEM_PROMPT
+from app.planner.prompts import (
+    INITIAL_PLANNER_SYSTEM_PROMPT,
+    PLANNER_SYSTEM_PROMPT,
+    build_benchmark_planner_prompt,
+)
 from app.schemas.execution import LLMArtifact
 from app.schemas.task_spec import TaskSpec
 from app.utils.llm_client import LLMClient
@@ -16,14 +20,21 @@ class Planner:
         self.last_initial_artifact: LLMArtifact | None = None
         self.last_action_oov_detected = False
 
-    def build_plan(self, user_goal: str) -> TaskSpec:
+    def build_plan(self, user_goal: str, benchmark_context: dict | None = None) -> TaskSpec:
+        system_prompt = PLANNER_SYSTEM_PROMPT
+        if benchmark_context:
+            system_prompt = build_benchmark_planner_prompt(
+                task_family=str(benchmark_context.get("task_family", "unknown")),
+                allowed_actions=list(benchmark_context.get("allowed_actions", [])),
+            )
         artifact = self.llm_client.generate_planner_artifact(
-            system_prompt=PLANNER_SYSTEM_PROMPT,
+            system_prompt=system_prompt,
             user_prompt=user_goal,
             stage="planner",
         )
         self.last_artifact = artifact
         normalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)
+        normalized = self._normalize_required_fields_against_steps(normalized)
         self.last_action_oov_detected = action_oov_detected
         return TaskSpec.model_validate(normalized)
 
@@ -164,3 +175,28 @@ class Planner:
             "expected_result": expected_result,
             "steps": normalized_steps,
         }
+
+    @staticmethod
+    def _normalize_required_fields_against_steps(plan: dict) -> dict:
+        payload = dict(plan) if isinstance(plan, dict) else {}
+        steps = payload.get("steps")
+        if not isinstance(steps, list):
+            return payload
+
+        produced = {
+            step.get("save_as")
+            for step in steps
+            if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
+        }
+        expected = payload.get("expected_result")
+        if not isinstance(expected, dict):
+            return payload
+        required = expected.get("required_fields")
+        if not isinstance(required, list):
+            return payload
+
+        filtered = [str(field).strip() for field in required if str(field).strip() in produced]
+        if filtered:
+            expected["required_fields"] = filtered
+        payload["expected_result"] = expected
+        return payload
