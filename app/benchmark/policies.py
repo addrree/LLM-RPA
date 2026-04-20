@@ -55,6 +55,8 @@ def build_benchmark_context(
     scenario_anchor_candidates: list[str] | None = None,
     scenario_anchor_matching_mode: str | None = None,
     scenario_page_language: str | None = None,
+    expected_min_items: int | None = None,
+    expected_item_fields: list[str] | None = None,
 ) -> dict:
     family = task_family or category
     return {
@@ -64,4 +66,6 @@ def build_benchmark_context(
         "scenario_anchor_candidates": list(scenario_anchor_candidates or []),
         "scenario_anchor_matching_mode": str(scenario_anchor_matching_mode or "").strip(),
         "scenario_page_language": str(scenario_page_language or "").strip(),
+        "expected_min_items": int(expected_min_items or 0),
+        "expected_item_fields": list(expected_item_fields or []),
     }

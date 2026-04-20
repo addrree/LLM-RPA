@@ -38,6 +38,10 @@ PLANNER_SYSTEM_PROMPT = """
     {"selector":"...", "pattern":"...", "group_index":1, "normalize_number":true, "number_type":"int", "strip_plus":true}
     или правило с anchor/value внутри блока:
     {"selector":"...", "anchor_text":"English", "value_pattern":"([0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*)", ... }.
+4.3) Для extract_structured_items fields допускают только:
+    - int (индекс capture group), или
+    - object rule c group_index.
+    Строковые field specs запрещены.
 5. Для action=open_url аргумент args.url обязателен и не может быть пустым.
 6. allowed_domains должен содержать netloc start_url или его родительский домен.
 7. action=screenshot добавляй только когда это явно нужно для цели; указывай корректный args.path.
@@ -158,6 +162,7 @@ REPLANNER_SYSTEM_PROMPT = """
    - article_count: селектор/паттерн и normalize_number=true
    Результат должен быть массивом объектов, а не массивом строк.
 4.1.1) Если CSS-контейнер неочевиден или нестабилен, вместо extract_items используй extract_structured_items с regex pattern, limit и fields.
+4.1.2) Для extract_structured_items fields должны быть только int или object rule с group_index; string specs запрещены.
 4.2) Для list/block/card/top-N задач не делай ставку на extract_pattern_from_page_text как основную долгосрочную стратегию:
    - сначала пробуй extract_items (DOM/block-aware),
    - extract_pattern_from_page_text используй только как тактический fallback.

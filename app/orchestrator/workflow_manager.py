@@ -390,7 +390,11 @@ class WorkflowManager:
                 )
                 initial_execution_result = initial_execution
                 if initial_execution.status != "success":
-                    verdict = self.verifier.verify(initial_plan, initial_execution)
+                    verdict = self.verifier.verify(
+                        initial_plan,
+                        initial_execution,
+                        benchmark_context=benchmark_context,
+                    )
                     return {
                         "plan": initial_plan,
                         "initial_plan": initial_plan,
@@ -519,7 +523,11 @@ class WorkflowManager:
         while True:
             execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
             self._augment_multi_step_comparison(execution_result)
-            verdict = self.verifier.verify(current_plan, execution_result)
+            verdict = self.verifier.verify(
+                current_plan,
+                execution_result,
+                benchmark_context=benchmark_context,
+            )
             if verdict.verdict == "accept":
                 return (
                     execution_result,
