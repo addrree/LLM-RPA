@@ -74,18 +74,14 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 args["page_language"] = "auto"
             if task_family == "anchored_value_extraction":
                 if benchmark_anchor_candidates:
-                    deduplicated_candidates = list(dict.fromkeys(benchmark_anchor_candidates))
-                    args["anchor_candidates"] = deduplicated_candidates
+                    args["anchor_candidates"] = list(benchmark_anchor_candidates)
                     anchor_text = str(args.get("anchor_text", "")).strip()
-                    if not anchor_text or anchor_text not in deduplicated_candidates:
-                        args["anchor_text"] = deduplicated_candidates[0]
+                    if not anchor_text or anchor_text not in benchmark_anchor_candidates:
+                        args["anchor_text"] = benchmark_anchor_candidates[0]
                 if benchmark_anchor_matching_mode in {"auto", "exact", "contains"}:
                     args["anchor_matching_mode"] = benchmark_anchor_matching_mode
                 # In benchmark mode we must detect language from actual page content and avoid user-language localization.
                 args["page_language"] = "auto"
-                # Scenario anchor candidates are source-of-truth for benchmark mode.
-                args["enforce_anchor_language_filter"] = False
-                args["allow_low_confidence_contact_match"] = True
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
                 args["pattern"] = "(.+)"
