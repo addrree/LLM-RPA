@@ -277,7 +277,7 @@ class ActionHandlers:
         number_type = str(args.get("number_type", "int")).lower()
         strip_plus = bool(args.get("strip_plus", True))
 
-        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
 
         matches = list(re.finditer(pattern, source_text, flags=flags_value))
         if not matches:
@@ -418,7 +418,7 @@ class ActionHandlers:
         window_chars = int(args.get("window_chars", 200))
         flags_value = re.IGNORECASE if bool(args.get("ignore_case", True)) else 0
 
-        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
         anchor_match = re.search(re.escape(anchor_text), source_text, flags=flags_value)
         if not anchor_match:
             raise ValueError(f"Anchor text not found: {anchor_text}")
@@ -459,7 +459,7 @@ class ActionHandlers:
         page_language = str(args.get("page_language", "")).strip().lower()
         value_pattern = args.get("value_pattern")
         value_type = str(args.get("value_type", "")).strip().lower()
-        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
         effective_page_language = await self._resolve_page_language(
             page=page,
             source_text=source_text,
@@ -595,8 +595,14 @@ class ActionHandlers:
                 f"Value not found near anchor_text={anchor_text!r}; pattern={value_pattern!r}; "
                 f"required_left_context={required_left_context!r}; required_right_context={required_right_context!r}"
             )
-        if prefer_local_for_contact and not strict_context_disabled and (
+        allow_low_confidence_contact_match = bool(args.get("allow_low_confidence_contact_match", False))
+        if (
+            prefer_local_for_contact
+            and not allow_low_confidence_contact_match
+            and not strict_context_disabled
+            and (
             best_match.get("confidence") == "low" or best_match.get("match_scope") == "fallback"
+            )
         ):
             raise ValueError(
                 "Value found near anchor but rejected by confidence policy for contact extraction "
@@ -635,9 +641,10 @@ class ActionHandlers:
         value_pattern: str | None,
         runtime_state=None,
     ) -> str:
-        source_text = await self._load_source_text(page=page, runtime_state=runtime_state)
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
         visible_anchors = await self._collect_visible_anchor_texts(page)
         ranked = [preferred_anchor] + anchor_candidates if preferred_anchor else list(anchor_candidates)
+        ranked = [item for item in dict.fromkeys(ranked) if str(item).strip()]
         score_best: tuple[int, str] | None = None
 
         for candidate in ranked:
@@ -837,9 +844,9 @@ class ActionHandlers:
         sentence_like = bool(re.search(r"[.;:]\s", text))
         return word_count >= 14 and sentence_like and not has_capture_group
 
-    async def _load_source_text(self, page, runtime_state=None) -> str:
+    async def _load_source_text(self, page, runtime_state=None, force_refresh: bool = False) -> str:
         source_text = ""
-        if runtime_state is not None:
+        if runtime_state is not None and not force_refresh:
             source_text = runtime_state.get("last_page_text") or ""
         if not source_text:
             source_text = (await page.locator("body").inner_text()).strip()
@@ -869,6 +876,8 @@ class ActionHandlers:
             candidates.append({"strategy": "placeholder", "locator": scope.get_by_placeholder(placeholder), "selector": f"placeholder={placeholder}"})
         if text:
             candidates.append({"strategy": "visible_text", "locator": scope.get_by_text(text, exact=exact), "selector": f"text={text}"})
+            if exact:
+                candidates.append({"strategy": "visible_text_fuzzy", "locator": scope.get_by_text(text, exact=False), "selector": f"text~={text}"})
         if href_contains:
             href_selector = f'a[href*="{href_contains}"]'
             candidates.append({"strategy": "href_filter", "locator": scope.locator(href_selector), "selector": href_selector})
