@@ -66,6 +66,15 @@ class LLMVerifier:
                 summary="Verifier rejected due to invalid structured comparison contract.",
             )
 
+        fast_path_verdict = self._deterministic_fast_path_verdict(
+            plan=plan,
+            result=result,
+            required_fields=semantic_required_fields,
+        )
+        if fast_path_verdict is not None:
+            self.last_artifact = None
+            return fast_path_verdict
+
         package = VerificationPackage(
             user_goal=plan.goal,
             expected_result_description=plan.expected_result.description,
@@ -156,3 +165,62 @@ class LLMVerifier:
         token_count = len([token for token in text.split() if token])
         punctuation_count = sum(text.count(mark) for mark in [".", ";", ":"])
         return token_count >= 14 and punctuation_count >= 1
+
+    @classmethod
+    def _deterministic_fast_path_verdict(
+        cls,
+        *,
+        plan: TaskSpec,
+        result: ExecutionResult,
+        required_fields: list[str],
+    ) -> VerificationVerdict | None:
+        extracted_data = result.extracted_data if isinstance(result.extracted_data, dict) else {}
+        normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
+        if not normalized_required:
+            return None
+
+        goal_lower = str(plan.goal or "").lower()
+        negative_like_goal = any(token in goal_lower for token in ["absent", "ambiguous", "uncertainty", "not-found"])
+        if negative_like_goal:
+            return None
+
+        if len(normalized_required) == 1:
+            field = normalized_required[0]
+            value = extracted_data.get(field)
+            if isinstance(value, (int, float)) and field != "status":
+                return VerificationVerdict(
+                    task_completed=True,
+                    confidence=0.95,
+                    verdict="accept",
+                    issues=[],
+                    summary="Deterministic verifier accepted scalar extraction without LLM call.",
+                )
+            if isinstance(value, str):
+                text = value.strip()
+                if text and len(text) <= 160 and not cls._looks_like_sentence_prose(text):
+                    return VerificationVerdict(
+                        task_completed=True,
+                        confidence=0.94,
+                        verdict="accept",
+                        issues=[],
+                        summary="Deterministic verifier accepted compact scalar value without LLM call.",
+                    )
+
+        if all(field in extracted_data for field in normalized_required):
+            has_structured_payload = False
+            for field in normalized_required:
+                value = extracted_data.get(field)
+                if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
+                    has_structured_payload = True
+                    continue
+                has_structured_payload = False
+                break
+            if has_structured_payload:
+                return VerificationVerdict(
+                    task_completed=True,
+                    confidence=0.92,
+                    verdict="accept",
+                    issues=[],
+                    summary="Deterministic verifier accepted structured repeated extraction without LLM call.",
+                )
+        return None

@@ -86,7 +86,9 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
         ),
         "repeated_structured_items": (
             "Family policy (repeated_structured_items): если используешь extract_structured_items, "
-            "pattern обязан иметь capture groups, а fields должны ссылаться только на существующие groups."
+            "pattern обязан иметь capture groups, а fields должны ссылаться только на существующие groups. "
+            "Для extract_structured_items fields допускают только int group index или object rule "
+            "(с group_index); string-формат field spec запрещен."
         ),
         "multi_step_information_retrieval": (
             "Family policy (multi_step_information_retrieval): не используй старый regex-first compare путь. "
@@ -223,7 +225,8 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         ),
         "repeated_structured_items": (
             "Для extract_structured_items pattern должен иметь capture groups, "
-            "fields могут ссылаться только на существующие группы."
+            "fields могут ссылаться только на существующие группы. "
+            "Разрешены только int group index или object rule с group_index; string field specs запрещены."
         ),
         "multi_step_information_retrieval": (
             "Соблюдай compare pipeline: section_a_data + section_b_data через structured extraction, "
