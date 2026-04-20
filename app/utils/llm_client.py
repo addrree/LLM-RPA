@@ -43,6 +43,7 @@ class LLMClient:
 
         self.session = requests.Session()
         self.session.trust_env = False
+        self.last_chat_diagnostics: Dict[str, Any] = {}
 
     @staticmethod
     def _resolve_timeout_sec() -> int:
@@ -74,6 +75,7 @@ class LLMClient:
             image_path=None,
         )
         parsed = self._safe_parse_json(raw_text, stage=stage)
+        fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
         return LLMArtifact(
             raw_response=raw_text,
             parsed_response=parsed,
@@ -81,7 +83,7 @@ class LLMClient:
                 backend=self.backend,
                 model=self.planner_model,
                 source="llm",
-                fallback_used=False,
+                fallback_used=fallback_used,
             ),
         )
 
@@ -108,6 +110,7 @@ class LLMClient:
             image_path=image_path,
         )
         parsed = self._safe_parse_json(raw_text, stage=stage)
+        fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
         return LLMArtifact(
             raw_response=raw_text,
             parsed_response=parsed,
@@ -115,7 +118,7 @@ class LLMClient:
                 backend=self.backend,
                 model=self.verifier_model,
                 source="llm",
-                fallback_used=False,
+                fallback_used=fallback_used,
             ),
         )
 
@@ -180,12 +183,29 @@ class LLMClient:
         except ValueError as exc:
             raise LLMClientError(f"Ollama returned non-JSON response: {response.text[:300]}") from exc
 
-        message_content = (
-            (data.get("message") or {}).get("content")
-            or data.get("response")
-            or ""
-        )
+        message = data.get("message") or {}
+        message_content_raw = str(message.get("content") or "")
+        response_content_raw = str(data.get("response") or "")
+        message_content = message_content_raw.strip()
+        thinking_content = str(message.get("thinking") or "").strip()
+        content_source = "message.content"
         cleaned_content = str(message_content).strip()
+        used_thinking_fallback = False
+        if not cleaned_content and response_content_raw.strip():
+            cleaned_content = response_content_raw.strip()
+            content_source = "response"
+        if not cleaned_content and thinking_content:
+            extracted_thinking = self._sanitize_llm_json_text(thinking_content)
+            if extracted_thinking:
+                cleaned_content = extracted_thinking
+                content_source = "message.thinking"
+                used_thinking_fallback = True
+
+        self.last_chat_diagnostics = {
+            "content_source": content_source,
+            "used_thinking_fallback": used_thinking_fallback,
+            "response_keys": sorted(list(data.keys())),
+        }
         if not cleaned_content:
             raise LLMClientError(f"Ollama returned empty content. Full payload: {data}")
 

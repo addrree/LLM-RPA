@@ -34,7 +34,12 @@ class LLMVerifier:
         self.llm_client = llm_client
         self.last_artifact: LLMArtifact | None = None
 
-    def verify(self, plan: TaskSpec, result: ExecutionResult) -> VerificationVerdict:
+    def verify(
+        self,
+        plan: TaskSpec,
+        result: ExecutionResult,
+        benchmark_context: dict | None = None,
+    ) -> VerificationVerdict:
         if result.status != "success":
             self.last_artifact = None
             return VerificationVerdict(
@@ -70,6 +75,7 @@ class LLMVerifier:
             plan=plan,
             result=result,
             required_fields=semantic_required_fields,
+            benchmark_context=benchmark_context or {},
         )
         if fast_path_verdict is not None:
             self.last_artifact = None
@@ -173,6 +179,7 @@ class LLMVerifier:
         plan: TaskSpec,
         result: ExecutionResult,
         required_fields: list[str],
+        benchmark_context: dict,
     ) -> VerificationVerdict | None:
         extracted_data = result.extracted_data if isinstance(result.extracted_data, dict) else {}
         normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
@@ -184,7 +191,8 @@ class LLMVerifier:
         if negative_like_goal:
             return None
 
-        if len(normalized_required) == 1:
+        task_family = str(benchmark_context.get("task_family", "")).strip().lower()
+        if task_family == "single_value_extraction" and len(normalized_required) == 1:
             field = normalized_required[0]
             value = extracted_data.get(field)
             if isinstance(value, (int, float)) and field != "status":
@@ -206,21 +214,29 @@ class LLMVerifier:
                         summary="Deterministic verifier accepted compact scalar value without LLM call.",
                     )
 
-        if all(field in extracted_data for field in normalized_required):
-            has_structured_payload = False
+        if task_family == "repeated_structured_items" and all(field in extracted_data for field in normalized_required):
+            expected_min_items = int(benchmark_context.get("expected_min_items", 0) or 0)
+            expected_item_fields = [
+                str(field).strip()
+                for field in (benchmark_context.get("expected_item_fields") or [])
+                if str(field).strip()
+            ]
             for field in normalized_required:
                 value = extracted_data.get(field)
-                if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-                    has_structured_payload = True
-                    continue
-                has_structured_payload = False
-                break
-            if has_structured_payload:
-                return VerificationVerdict(
-                    task_completed=True,
-                    confidence=0.92,
-                    verdict="accept",
-                    issues=[],
-                    summary="Deterministic verifier accepted structured repeated extraction without LLM call.",
-                )
+                if not (isinstance(value, list) and value and all(isinstance(item, dict) for item in value)):
+                    return None
+                if expected_min_items > 0 and len(value) < expected_min_items:
+                    return None
+                if expected_item_fields and not all(
+                    all(str(item.get(item_field, "")).strip() for item_field in expected_item_fields)
+                    for item in value
+                ):
+                    return None
+            return VerificationVerdict(
+                task_completed=True,
+                confidence=0.92,
+                verdict="accept",
+                issues=[],
+                summary="Deterministic verifier accepted repeated structured extraction without LLM call.",
+            )
         return None

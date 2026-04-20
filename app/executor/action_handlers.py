@@ -460,9 +460,11 @@ class ActionHandlers:
         value_pattern = args.get("value_pattern")
         value_type = str(args.get("value_type", "")).strip().lower()
         source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
+        visible_anchor_texts = await self._collect_visible_anchor_texts(page)
         effective_page_language = await self._resolve_page_language(
             page=page,
             source_text=source_text,
+            visible_anchor_texts=visible_anchor_texts,
             provided_language=page_language,
         )
         args["page_language"] = effective_page_language
@@ -470,17 +472,21 @@ class ActionHandlers:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
+        benchmark_anchor_candidates = list(anchor_candidates)
+        default_anchor_candidates = self._default_anchor_candidates(
+            value_type=value_type,
+            page_language=effective_page_language,
+        )
         resolved_candidates = list(
             dict.fromkeys(
                 [
-                    *anchor_candidates,
-                    *self._default_anchor_candidates(
-                        value_type=value_type,
-                        page_language=effective_page_language,
-                    ),
+                    *benchmark_anchor_candidates,
+                    *default_anchor_candidates,
                 ]
             )
         )
+        if resolved_candidates:
+            args["anchor_candidates"] = resolved_candidates
         if resolved_candidates:
             enforce_anchor_language_filter = bool(args.get("enforce_anchor_language_filter", True))
             anchor_text = await self._resolve_anchor_text(
@@ -719,16 +725,34 @@ class ActionHandlers:
                 score += 1
         return score
 
-    async def _resolve_page_language(self, *, page, source_text: str, provided_language: str) -> str:
-        latin = len(re.findall(r"[A-Za-z]", source_text))
-        cyrillic = len(re.findall(r"[А-Яа-яЁё]", source_text))
+    def _detect_script_language(self, text: str) -> str:
+        latin = len(re.findall(r"[A-Za-z]", text or ""))
+        cyrillic = len(re.findall(r"[А-Яа-яЁё]", text or ""))
         total = latin + cyrillic
-        if total:
-            dominant_ratio = max(latin, cyrillic) / total
-            if (latin == 0 and cyrillic >= 6) or (cyrillic > 0 and dominant_ratio >= 0.6 and cyrillic > latin):
-                return "ru"
-            if (cyrillic == 0 and latin >= 6) or (latin > 0 and dominant_ratio >= 0.6 and latin > cyrillic):
-                return "en"
+        if not total:
+            return ""
+        dominant_ratio = max(latin, cyrillic) / total
+        if (latin == 0 and cyrillic >= 6) or (cyrillic > 0 and dominant_ratio >= 0.6 and cyrillic > latin):
+            return "ru"
+        if (cyrillic == 0 and latin >= 6) or (latin > 0 and dominant_ratio >= 0.6 and latin > cyrillic):
+            return "en"
+        return ""
+
+    async def _resolve_page_language(
+        self,
+        *,
+        page,
+        source_text: str,
+        visible_anchor_texts: list[str],
+        provided_language: str,
+    ) -> str:
+        detected_from_source = self._detect_script_language(source_text)
+        if detected_from_source:
+            return detected_from_source
+
+        detected_from_anchors = self._detect_script_language(" ".join(visible_anchor_texts or []))
+        if detected_from_anchors:
+            return detected_from_anchors
 
         html_lang = ""
         try:
@@ -746,6 +770,7 @@ class ActionHandlers:
         if html_lang.startswith("ru"):
             return "ru"
 
+        # provided_language is only a weak fallback hint.
         provided = str(provided_language or "").strip().lower()
         if provided.startswith("en"):
             return "en"
