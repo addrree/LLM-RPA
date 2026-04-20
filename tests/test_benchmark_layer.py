@@ -384,3 +384,92 @@ def test_normalize_benchmark_plan_adds_guardrail_for_regex_only_multi_step_compa
     normalized = normalize_benchmark_plan(plan, ctx)
     with pytest.raises(PlanValidationError):
         PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_anchored_uses_scenario_anchor_candidates_as_source_of_truth():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "extract support email",
+            "start_url": "https://pypi.org/help/",
+            "allowed_domains": ["pypi.org"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://pypi.org/help/"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_value_near_anchor",
+                    "args": {
+                        "anchor_text": "Контактная информация",
+                        "anchor_candidates": ["Контакт", "Поддержка"],
+                        "page_language": "ru",
+                        "value_type": "email",
+                    },
+                    "save_as": "value",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(
+        category="anchored_value_extraction",
+        task_family="anchored_value_extraction",
+        scenario_anchor_candidates=["Email", "Contact", "Support"],
+        scenario_anchor_matching_mode="auto",
+        scenario_page_language="en",
+    )
+    normalized = normalize_benchmark_plan(plan, ctx)
+    anchored_step = normalized.steps[1]
+    assert anchored_step.args["anchor_candidates"] == ["Email", "Contact", "Support"]
+    assert anchored_step.args["anchor_text"] == "Email"
+    assert anchored_step.args["page_language"] == "auto"
+    assert anchored_step.args["enforce_anchor_language_filter"] is False
+    assert anchored_step.args["allow_low_confidence_contact_match"] is True
+
+
+def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_text():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "navigate and extract",
+            "start_url": "https://www.python.org",
+            "allowed_domains": ["www.python.org"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.python.org"}},
+                {"step_id": 2, "action": "wait_for", "args": {"text": "Python"}},
+                {"step_id": 3, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_single_value_rewrites_html_pattern_to_h1():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "extract title",
+            "start_url": "https://www.python.org/",
+            "allowed_domains": ["www.python.org"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.python.org/"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_pattern_from_page_text",
+                    "args": {"pattern": "<title>([^<]+)</title>", "group_index": 1},
+                    "save_as": "value",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    assert normalized.steps[1].action == "extract_text"
+    assert normalized.steps[1].args["selector"] == "h1"
