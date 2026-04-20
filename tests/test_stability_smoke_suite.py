@@ -22,7 +22,7 @@ class _FakePage:
         assert selector == "body"
         return _FakeBodyLocator(self._text)
 
-    async def evaluate(self, _script, _payload):
+    async def evaluate(self, _script, _payload=None):
         return self._evaluate_payload
 
 
@@ -64,6 +64,36 @@ def test_stability_smoke_anchored_value_extraction():
         )
     )
     assert value == "7,141,000+"
+
+
+def test_stability_smoke_anchored_extraction_refreshes_truncated_cached_page_text():
+    full_text = "For account issues contact support@pypi.org for help."
+    page = _FakePage(
+        full_text,
+        evaluate_payload=[
+            {
+                "source": "dom_same_block",
+                "window_text": full_text,
+                "anchor_idx_in_window": full_text.lower().index("support"),
+            }
+        ],
+    )
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_value_near_anchor(
+            page,
+                {
+                    "anchor_candidates": ["Email", "Contact", "Support"],
+                    "anchor_text": "Email",
+                    "anchor_matching_mode": "auto",
+                    "value_type": "email",
+                    "enforce_anchor_language_filter": False,
+                    "allow_low_confidence_contact_match": True,
+                },
+            runtime_state={"last_page_text": "short snapshot without anchor"},
+        )
+    )
+    assert value == "support@pypi.org"
 
 
 def test_stability_smoke_repeated_structured_extraction():
