@@ -470,12 +470,17 @@ class ActionHandlers:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
-        resolved_candidates = list(anchor_candidates)
-        if not resolved_candidates:
-            resolved_candidates = self._default_anchor_candidates(
-                value_type=value_type,
-                page_language=effective_page_language,
+        resolved_candidates = list(
+            dict.fromkeys(
+                [
+                    *anchor_candidates,
+                    *self._default_anchor_candidates(
+                        value_type=value_type,
+                        page_language=effective_page_language,
+                    ),
+                ]
             )
+        )
         if resolved_candidates:
             enforce_anchor_language_filter = bool(args.get("enforce_anchor_language_filter", True))
             anchor_text = await self._resolve_anchor_text(
@@ -715,6 +720,16 @@ class ActionHandlers:
         return score
 
     async def _resolve_page_language(self, *, page, source_text: str, provided_language: str) -> str:
+        latin = len(re.findall(r"[A-Za-z]", source_text))
+        cyrillic = len(re.findall(r"[А-Яа-яЁё]", source_text))
+        total = latin + cyrillic
+        if total:
+            dominant_ratio = max(latin, cyrillic) / total
+            if (latin == 0 and cyrillic >= 6) or (cyrillic > 0 and dominant_ratio >= 0.6 and cyrillic > latin):
+                return "ru"
+            if (cyrillic == 0 and latin >= 6) or (latin > 0 and dominant_ratio >= 0.6 and latin > cyrillic):
+                return "en"
+
         html_lang = ""
         try:
             lang_attr = await page.evaluate(
@@ -731,14 +746,11 @@ class ActionHandlers:
         if html_lang.startswith("ru"):
             return "ru"
 
-        latin = len(re.findall(r"[A-Za-z]", source_text))
-        cyrillic = len(re.findall(r"[А-Яа-яЁё]", source_text))
-        if latin == 0 and cyrillic == 0:
-            return ""
-        total = latin + cyrillic
-        dominant_ratio = max(latin, cyrillic) / total if total else 0.0
-        if dominant_ratio >= 0.75:
-            return "en" if latin >= cyrillic else "ru"
+        provided = str(provided_language or "").strip().lower()
+        if provided.startswith("en"):
+            return "en"
+        if provided.startswith("ru"):
+            return "ru"
         return ""
 
     async def _collect_visible_anchor_texts(self, page) -> list[str]:

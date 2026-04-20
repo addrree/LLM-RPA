@@ -151,6 +151,22 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                     compiled = None
             fields = args.get("fields")
             if isinstance(fields, dict):
+                string_only_fields = all(isinstance(spec, str) for spec in fields.values())
+                if string_only_fields and fields:
+                    available_groups = compiled.groups if compiled is not None else 0
+                    required_groups = len(fields)
+                    if available_groups >= required_groups:
+                        args["fields"] = {
+                            str(field_name): idx
+                            for idx, field_name in enumerate(fields.keys(), start=1)
+                        }
+                        fields = args["fields"]
+                    else:
+                        args["__benchmark_guardrail_error"] = (
+                            "benchmark guardrail: repeated_structured_items extract_structured_items cannot "
+                            "normalize string field specs because pattern capture groups are insufficient; "
+                            f"need >= {required_groups}, available {available_groups}"
+                        )
                 referenced_groups: set[int] = set()
                 for spec in fields.values():
                     if isinstance(spec, int):
