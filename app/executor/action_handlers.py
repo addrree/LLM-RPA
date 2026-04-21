@@ -467,7 +467,6 @@ class ActionHandlers:
             visible_anchor_texts=visible_anchor_texts,
             provided_language=page_language,
         )
-        args["page_language"] = effective_page_language
         if not value_pattern:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
@@ -634,18 +633,31 @@ class ActionHandlers:
                 f"required_left_context={required_left_context!r}; required_right_context={required_right_context!r}"
             )
         allow_low_confidence_contact_match = bool(args.get("allow_low_confidence_contact_match", False))
+        best_match_value = best_match.get("value")
+        best_match_confidence = str(best_match.get("confidence", "")).strip().lower()
+        best_match_scope = str(best_match.get("match_scope", "")).strip().lower()
+        best_match_distance = int(best_match.get("distance", 10**9))
+        allow_close_valid_high_confidence_fallback_contact = (
+            prefer_local_for_contact
+            and best_match_scope == "fallback"
+            and best_match_confidence == "high"
+            and best_match_distance <= 80
+            and self._is_valid_typed_contact_value(value=best_match_value, value_type=value_type)
+        )
         if (
             prefer_local_for_contact
             and not allow_low_confidence_contact_match
             and not strict_context_disabled
+            and not allow_close_valid_high_confidence_fallback_contact
             and (
-            best_match.get("confidence") == "low" or best_match.get("match_scope") == "fallback"
+                best_match_confidence == "low"
+                or (best_match_scope == "fallback" and best_match_confidence != "high")
             )
         ):
             raise ValueError(
                 "Value found near anchor but rejected by confidence policy for contact extraction "
-                f"(scope={best_match.get('match_scope')}, confidence={best_match.get('confidence')}, "
-                f"distance={best_match.get('distance')})"
+                f"(scope={best_match_scope}, confidence={best_match_confidence}, "
+                f"distance={best_match_distance})"
             )
 
         extracted_value = best_match["value"]
@@ -887,6 +899,20 @@ class ActionHandlers:
         if page_language not in {"en", "english"}:
             return []
         return ["Contact", "Support", "Email", "Help", "Phone"]
+
+    @staticmethod
+    def _is_valid_typed_contact_value(*, value: Any, value_type: str) -> bool:
+        token = str(value or "").strip()
+        if not token:
+            return False
+        if value_type == "email":
+            return bool(re.fullmatch(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,63}", token, flags=re.IGNORECASE))
+        if value_type == "phone":
+            digits_only = re.sub(r"\D+", "", token)
+            if len(digits_only) < 8 or len(digits_only) > 15:
+                return False
+            return bool(re.fullmatch(r"\+?\d[\d\-\(\)\s\.]{6,}\d", token))
+        return True
 
     @staticmethod
     def _looks_like_broad_prose_match(*, value: Any, pattern: str) -> bool:

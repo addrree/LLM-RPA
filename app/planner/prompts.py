@@ -70,9 +70,9 @@ PLANNER_SYSTEM_PROMPT = """
      1) extract/save_as=section_a_data,
      2) extract/save_as=section_b_data,
      3) compare_structured_values с save_as=structured_comparison (без regex-group контрактов между шагами).
-18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке, указывай page_language и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
-19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), page_language, anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
-20. page_language для anchored extraction определяется по фактической странице после navigation; по умолчанию передавай page_language="auto". Не локализуй anchor_text по языку пользователя.
+18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке страницы и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
+19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
+20. Язык страницы определяется executor по фактической странице после navigation. Не передавай page_language в JSON-плане и не локализуй anchor_text по языку пользователя.
 """
 
 
@@ -101,7 +101,7 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
         ),
         "anchored_value_extraction": (
             "Family policy (anchored_value_extraction): anchor_text/anchor_candidates должны оставаться в языке "
-            "страницы; ставь page_language='auto' и используй видимые anchors страницы без автоперевода."
+            "страницы; не передавай page_language и используй видимые anchors страницы без автоперевода."
         ),
         "negative_or_ambiguous_case": (
             "Family policy (negative_or_ambiguous_case): не используй broad prose regex. "
@@ -147,7 +147,7 @@ REPLANNER_SYSTEM_PROMPT = """
 1) Если final execution может запускаться в отдельной сессии, добавляй open_url(start_url) первым шагом.
 2) Не выдумывай CSS-селекторы, если можно извлечь значение из page_text через regex/pattern.
 3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor:
-   - всегда задавай anchor_text
+   - задавай anchor_candidates (anchor_text только если он явно подтвержден на странице)
    - search_direction="after"
    - same_block_only=true
    - required_right_context, если очевиден контекст ("articles", "₽", "reviews" и т.п.)
@@ -171,7 +171,7 @@ REPLANNER_SYSTEM_PROMPT = """
 6) Последний шаг всегда finish, step_id подряд.
 7) Для action=open_url обязательно передавай args.url (не пустой).
 8) Для action=extract_value_near_anchor обязательно передавай:
-   - args.anchor_text
+   - args.anchor_text или args.anchor_candidates
    - args.value_pattern или args.value_type
    - save_as
 9) Не пропускай обязательные поля TaskSpec (goal, start_url, constraints, expected_result.description, steps[*].args).
@@ -181,9 +181,9 @@ REPLANNER_SYSTEM_PROMPT = """
 13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй role+name/href_contains. Для text-click всегда уточняй exact=true или scope_selector.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
-16) Для anchored extraction учитывай page_language + anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
+16) Для anchored extraction используй anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
 17) Для contact/support/email/phone задач предпочтительно value_type=email|phone и anchor_candidates вместо одного жесткого anchor_text.
-18) Для anchored extraction передавай page_language=\"auto\" (или язык, подтвержденный самой страницей), не локализуй anchor по языку пользователя.
+18) Для anchored extraction не передавай page_language в args; executor сам определяет язык страницы. Не локализуй anchor по языку пользователя.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -238,7 +238,7 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "затем compare_structured_values; избегай regex-only сравнения."
         ),
         "anchored_value_extraction": (
-            "Не переводи anchor_text между языками. Ставь page_language='auto', используй anchor_candidates "
+            "Не переводи anchor_text между языками. Не передавай page_language, используй anchor_candidates "
             "как видимые тексты страницы и избегай cross-language mismatch."
         ),
         "negative_or_ambiguous_case": (

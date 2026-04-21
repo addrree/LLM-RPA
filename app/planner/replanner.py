@@ -101,7 +101,8 @@ class Replanner:
             payload["benchmark_policy_hints"] = {
                 "task_family": str(benchmark_context.get("task_family", "")),
                 "anchor_language_grounding": (
-                    "Determine page_language from current page content/html; keep anchor text in visible page language."
+                    "Detect page language in executor from current page content/html; "
+                    "planner JSON must not include page_language; keep anchors in visible page language."
                 ),
                 "negative_value_policy": (
                     "Avoid broad prose extraction for negative/ambiguous tasks; require concrete capture token or explicit uncertainty."
