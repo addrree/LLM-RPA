@@ -61,6 +61,13 @@ class LLMVerifier:
                 goal=plan.goal,
             )
         )
+        deterministic_issues.extend(
+            self._validate_single_value_key_alignment(
+                required_fields=semantic_required_fields,
+                extracted_data=result.extracted_data,
+                benchmark_context=benchmark_context or {},
+            )
+        )
         if deterministic_issues:
             self.last_artifact = None
             return VerificationVerdict(
@@ -171,6 +178,34 @@ class LLMVerifier:
         token_count = len([token for token in text.split() if token])
         punctuation_count = sum(text.count(mark) for mark in [".", ";", ":"])
         return token_count >= 14 and punctuation_count >= 1
+
+    @staticmethod
+    def _validate_single_value_key_alignment(
+        *,
+        required_fields: list[str],
+        extracted_data: dict,
+        benchmark_context: dict,
+    ) -> list[str]:
+        if not isinstance(extracted_data, dict):
+            return []
+        task_family = str(benchmark_context.get("task_family", "")).strip().lower()
+        normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
+        if task_family != "single_value_extraction" or normalized_required != ["value"]:
+            return []
+        if "value" in extracted_data:
+            return []
+        scalar_aliases = [
+            key
+            for key, value in extracted_data.items()
+            if key != "value" and isinstance(value, (str, int, float, bool))
+        ]
+        if scalar_aliases:
+            aliases = ", ".join(sorted(scalar_aliases))
+            return [
+                "single_value_extraction expects extracted_data.value, but scalar output was saved under "
+                f"different key(s): {aliases}."
+            ]
+        return []
 
     @classmethod
     def _deterministic_fast_path_verdict(
