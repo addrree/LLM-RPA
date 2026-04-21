@@ -331,6 +331,28 @@ def test_normalize_benchmark_plan_single_value_rewrites_brittle_literal_pattern_
     assert extraction.args["selector"] == "h1"
 
 
+def test_normalize_benchmark_plan_single_value_forces_save_as_value_even_for_alias():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "extract header",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "heading"},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    extraction = normalized.steps[1]
+    assert extraction.action == "extract_text"
+    assert extraction.save_as == "value"
+
+
 def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click():
     plan = TaskSpec.model_validate(
         {

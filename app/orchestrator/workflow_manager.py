@@ -237,8 +237,13 @@ def normalize_benchmark_plan(
                     "extract_pattern_from_page_text; broad prose matching is disallowed"
                 )
 
-        if action.startswith("extract") and not step.get("save_as"):
-            step["save_as"] = fallback_save_as
+        if action.startswith("extract"):
+            if task_family == "single_value_extraction":
+                # Benchmarks in this family require scalar output in top-level `value`
+                # for deterministic verification fast-path compatibility.
+                step["save_as"] = "value"
+            elif not step.get("save_as"):
+                step["save_as"] = fallback_save_as
 
         normalized_steps.append(step)
 
