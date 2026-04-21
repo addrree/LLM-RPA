@@ -1,3 +1,4 @@
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -7,6 +8,7 @@ from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, Bench
 from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
 from app.orchestrator.workflow_manager import normalize_benchmark_plan
 from app.planner.action_vocab import normalize_plan_action_aliases
+from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.task_spec import TaskSpec
 from app.validator.plan_validator import PlanValidationError, PlanValidator
 
@@ -443,5 +445,43 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_te
     )
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_rejects_overconstrained_navigation_text_click_without_snapshot_evidence():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "navigate and extract",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {
+                    "step_id": 2,
+                    "action": "click",
+                    "args": {"scope_selector": "main", "text": "Tutorial", "exact": True},
+                },
+                {"step_id": 3, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    snapshot = PageSnapshot(
+        url="https://example.com",
+        title="Example",
+        screenshot_path="artifacts/screenshots/x.png",
+        page_text_excerpt="Welcome to docs",
+        visible_headings=["Home"],
+        visible_labels=[],
+        visible_buttons=[],
+        visible_inputs=[],
+        timestamp=datetime.now(timezone.utc),
+        page_text="Pricing and docs overview",
+    )
+    ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx, page_snapshot=snapshot)
     with pytest.raises(PlanValidationError):
         PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))

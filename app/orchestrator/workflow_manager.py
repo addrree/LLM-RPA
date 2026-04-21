@@ -16,7 +16,30 @@ UTC = timezone.utc
 logger = logging.getLogger(__name__)
 
 
-def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> TaskSpec:
+def _snapshot_confirms_click_text(page_snapshot: PageSnapshot | None, text_value: str) -> bool:
+    needle = str(text_value or "").strip().lower()
+    if not needle or page_snapshot is None:
+        return False
+    candidates = [
+        *(page_snapshot.visible_headings or []),
+        *(page_snapshot.visible_labels or []),
+        *(page_snapshot.visible_buttons or []),
+    ]
+    page_text = str(page_snapshot.page_text or "").strip() or str(page_snapshot.page_text_excerpt or "").strip()
+    if page_text:
+        candidates.append(page_text)
+    for candidate in candidates:
+        haystack = str(candidate).strip().lower()
+        if haystack and needle in haystack:
+            return True
+    return False
+
+
+def normalize_benchmark_plan(
+    plan: TaskSpec,
+    benchmark_context: dict | None,
+    page_snapshot: PageSnapshot | None = None,
+) -> TaskSpec:
     if not benchmark_context:
         return plan
 
@@ -127,7 +150,8 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
                 step["args"] = {"selector": "h1"}
 
         if task_family == "navigation_then_extraction" and action == "click":
-            has_text = bool(str(args.get("text", "")).strip())
+            text_value = str(args.get("text", "")).strip()
+            has_text = bool(text_value)
             has_selector = bool(str(args.get("selector", "")).strip())
             has_role_name = bool(str(args.get("role", "")).strip() and str(args.get("name", "")).strip())
             has_href_contains = bool(str(args.get("href_contains", "")).strip())
@@ -136,8 +160,16 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
             if has_text and not (has_selector or has_role_name or has_href_contains or has_scope or has_exact):
                 args["__benchmark_guardrail_error"] = (
                     "benchmark guardrail: navigation_then_extraction click with bare text is disallowed; "
-                    "use role+name, href_contains, scope_selector+text+exact=true, or specific selector"
+                    "prefer href_contains, role+name, or specific selector"
                 )
+            text_only_contract = has_text and not (has_selector or has_role_name or has_href_contains)
+            if text_only_contract and has_scope and has_exact:
+                if not _snapshot_confirms_click_text(page_snapshot=page_snapshot, text_value=text_value):
+                    args["__benchmark_guardrail_error"] = (
+                        "benchmark guardrail: navigation_then_extraction click is over-constrained "
+                        "(text+scope_selector+exact=true) without explicit snapshot confirmation; "
+                        "normalize to href_contains/role+name or trigger corrective replanning"
+                    )
 
         if task_family == "repeated_structured_items" and action == "extract_structured_items":
             pattern = str(args.get("pattern", "")).strip()
@@ -316,8 +348,12 @@ class WorkflowManager:
         self.two_stage_planning = two_stage_planning
 
     @staticmethod
-    def _normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> TaskSpec:
-        return normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
+    def _normalize_benchmark_plan(
+        plan: TaskSpec,
+        benchmark_context: dict | None,
+        page_snapshot: PageSnapshot | None = None,
+    ) -> TaskSpec:
+        return normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context, page_snapshot=page_snapshot)
 
     async def run(self, user_goal: str, benchmark_context: dict | None = None):
         planning_mode = "two_stage" if self.two_stage_planning else "single_stage"
@@ -429,7 +465,11 @@ class WorkflowManager:
                 )
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._normalize_plan_for_validation(final_plan)
-                final_plan = self._normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
+                final_plan = self._normalize_benchmark_plan(
+                    plan=final_plan,
+                    benchmark_context=benchmark_context,
+                    page_snapshot=page_snapshot,
+                )
                 try:
                     self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                     final_plan_valid = True
@@ -449,7 +489,11 @@ class WorkflowManager:
                     )
                     replanner_artifact = self.replanner.last_artifact
                     final_plan = self._normalize_plan_for_validation(repaired_plan)
-                    final_plan = self._normalize_benchmark_plan(plan=final_plan, benchmark_context=benchmark_context)
+                    final_plan = self._normalize_benchmark_plan(
+                        plan=final_plan,
+                        benchmark_context=benchmark_context,
+                        page_snapshot=page_snapshot,
+                    )
                     try:
                         self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
                         final_plan_valid = True
@@ -612,7 +656,11 @@ class WorkflowManager:
                 continue
 
             corrective_plan = self._normalize_plan_for_validation(corrective_plan)
-            corrective_plan = self._normalize_benchmark_plan(plan=corrective_plan, benchmark_context=benchmark_context)
+            corrective_plan = self._normalize_benchmark_plan(
+                plan=corrective_plan,
+                benchmark_context=benchmark_context,
+                page_snapshot=effective_snapshot,
+            )
             self._persist_corrective_plan_candidate(
                 corrective_plan=corrective_plan,
                 attempt=corrective_attempt_count,
