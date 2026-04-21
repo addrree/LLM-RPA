@@ -67,21 +67,19 @@ def normalize_benchmark_plan(plan: TaskSpec, benchmark_context: dict | None) -> 
             args.setdefault("group_index", 1)
         if action == "extract_value_near_anchor":
             if not str(args.get("anchor_text", "")).strip() and not args.get("anchor_candidates"):
-                args["anchor_text"] = "Contact"
+                args["anchor_candidates"] = ["Contact", "Support", "Email", "Help", "Phone"]
             if not str(args.get("value_type", "")).strip() and not str(args.get("value_pattern", "")).strip():
                 args["value_type"] = "email"
-            if not str(args.get("page_language", "")).strip():
-                args["page_language"] = "auto"
+            # Language is detected by executor from page content/DOM.
+            args.pop("page_language", None)
             if task_family == "anchored_value_extraction":
                 if benchmark_anchor_candidates:
                     args["anchor_candidates"] = list(benchmark_anchor_candidates)
-                    anchor_text = str(args.get("anchor_text", "")).strip()
-                    if not anchor_text or anchor_text not in benchmark_anchor_candidates:
-                        args["anchor_text"] = benchmark_anchor_candidates[0]
+                    provided_anchor_text = str(args.get("anchor_text", "")).strip()
+                    if provided_anchor_text and provided_anchor_text not in benchmark_anchor_candidates:
+                        args.pop("anchor_text", None)
                 if benchmark_anchor_matching_mode in {"auto", "exact", "contains"}:
                     args["anchor_matching_mode"] = benchmark_anchor_matching_mode
-                # In benchmark mode we must detect language from actual page content and avoid user-language localization.
-                args["page_language"] = "auto"
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
                 args["pattern"] = "(.+)"
