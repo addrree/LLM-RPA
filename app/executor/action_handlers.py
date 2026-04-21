@@ -473,9 +473,14 @@ class ActionHandlers:
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
         benchmark_anchor_candidates = list(anchor_candidates)
-        default_anchor_candidates = self._default_anchor_candidates(
-            value_type=value_type,
-            page_language=effective_page_language,
+        should_use_fallback_candidates = not benchmark_anchor_candidates and not anchor_text
+        default_anchor_candidates = (
+            self._default_anchor_candidates(
+                value_type=value_type,
+                page_language=effective_page_language,
+            )
+            if should_use_fallback_candidates
+            else []
         )
         benchmark_candidates_ranked = list(
             dict.fromkeys(
