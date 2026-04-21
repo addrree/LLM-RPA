@@ -56,11 +56,12 @@ PLANNER_SYSTEM_PROMPT = """
 14. Используй ТОЛЬКО канонические action names из схемы.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
 16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
-16.1) Для click избегай слабой формы get_by_text(...).first без уточнения. Предпочитай:
+16.1) Для click избегай слабой формы get_by_text(...).first без уточнения. Предпочитай target-стратегии в таком порядке:
+   - href_contains (+опционально role/name или text),
    - role+name (например link/button),
-   - href_contains (+опционально text),
-   - scope_selector + text + exact=true,
-   - selector только если он специфичный и привязан к блоку.
+   - text (только если текст явно подтвержден snapshot/observe_page контекстом).
+   scope_selector и exact=true НЕ ставь по умолчанию: используй их только если это явно подтверждено snapshot/observe_page.
+   selector используй только если он специфичный и привязан к блоку.
 17. Task-family routing policy:
    - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
@@ -85,8 +86,10 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Не используй literal extract_pattern_from_page_text, если задача не про regex/pattern match."
         ),
         "navigation_then_extraction": (
-            "Family policy (navigation_then_extraction): запрещен bare text click. Разрешены только: "
-            "role+name; href_contains; scope_selector+text+exact=true; либо специфичный selector."
+            "Family policy (navigation_then_extraction): избегай over-constrained text-click контрактов. "
+            "Предпочитай href_contains, затем role+name, затем text (только если текст явно подтвержден snapshot). "
+            "Не добавляй scope_selector или exact=true без явного подтверждения из observe_page/page snapshot. "
+            "Разрешен также специфичный selector."
         ),
         "repeated_structured_items": (
             "Family policy (repeated_structured_items): если используешь extract_structured_items, "
@@ -178,7 +181,7 @@ REPLANNER_SYSTEM_PROMPT = """
 10) Никаких комментариев/markdown, только валидный JSON-объект.
 11) Используй только канонические action names из схемы.
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
-13) Для click используй строгий контракт: selector должен быть специфичным (не "a"/"button"), либо используй role+name/href_contains. Для text-click всегда уточняй exact=true или scope_selector.
+13) Для click используй детерминированный, но не переусложненный контракт: предпочитай href_contains, затем role+name, затем text (если текст явно подтвержден snapshot). Не добавляй exact=true или scope_selector по умолчанию; только при явном подтверждении из snapshot/observe_page.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
 16) Для anchored extraction используй anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
@@ -210,7 +213,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
    - retry только для recoverable ошибок;
    - не повторяй invalid/duplicate corrective plans;
    - соблюдай disallowed_next_patterns (например broad_click_selector, missing_required_args).
-12) Для click после неудачи сужай target (text, href_contains, role+name, visible_only), не повторяй общий selector.
+12) Для click после неудачи сужай target с приоритетом href_contains -> role+name -> text(confirmed); не добавляй exact=true/scope_selector без явного подтверждения snapshot и не повторяй общий selector.
 13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
 14) Для multi_step compare corrective-план должен извлекать section_a_data и section_b_data отдельно; не полагаться на regex group reference как на контракт сравнения.
 15) Коррективный replanning используй для recoverable execution ошибок (anchor_not_found, value_not_found_near_anchor, ambiguous/weak click target, bad locator choice при browser_operation_failed), но не для чисто transient timeout без признака плохого locator.
@@ -225,8 +228,8 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "не используй literal extract_pattern_from_page_text без regex-intent."
         ),
         "navigation_then_extraction": (
-            "Нельзя bare text click; используй role+name, href_contains, "
-            "scope_selector+text+exact=true или специфичный selector."
+            "Избегай хрупкого navigation click: приоритет href_contains, затем role+name, затем text только при явном подтверждении в snapshot. "
+            "Не добавляй scope_selector/exact=true без наблюдаемого основания из observe_page."
         ),
         "repeated_structured_items": (
             "Для extract_structured_items pattern должен иметь capture groups, "
