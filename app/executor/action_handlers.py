@@ -473,32 +473,59 @@ class ActionHandlers:
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
             anchor_matching_mode = "auto"
         benchmark_anchor_candidates = list(anchor_candidates)
-        default_anchor_candidates = self._default_anchor_candidates(
-            value_type=value_type,
-            page_language=effective_page_language,
+        should_use_fallback_candidates = not benchmark_anchor_candidates and not anchor_text
+        default_anchor_candidates = (
+            self._default_anchor_candidates(
+                value_type=value_type,
+                page_language=effective_page_language,
+            )
+            if should_use_fallback_candidates
+            else []
         )
-        resolved_candidates = list(
+        benchmark_candidates_ranked = list(
             dict.fromkeys(
-                [
-                    *benchmark_anchor_candidates,
-                    *default_anchor_candidates,
-                ]
+                [*([anchor_text] if anchor_text else []), *benchmark_anchor_candidates]
             )
         )
+        fallback_candidates_ranked = list(dict.fromkeys(default_anchor_candidates))
+        resolved_candidates = list(dict.fromkeys([*benchmark_candidates_ranked, *fallback_candidates_ranked]))
         if resolved_candidates:
             args["anchor_candidates"] = resolved_candidates
         if resolved_candidates:
             enforce_anchor_language_filter = bool(args.get("enforce_anchor_language_filter", True))
-            anchor_text = await self._resolve_anchor_text(
-                page=page,
-                preferred_anchor=anchor_text,
-                anchor_candidates=resolved_candidates,
-                anchor_matching_mode=anchor_matching_mode,
-                page_language=effective_page_language,
-                enforce_anchor_language_filter=enforce_anchor_language_filter,
-                value_pattern=str(value_pattern) if value_pattern else None,
-                runtime_state=runtime_state,
-            )
+            resolved_anchor_text = ""
+            if benchmark_candidates_ranked:
+                # User/benchmark-provided anchors must be evaluated first and should
+                # not be filtered out by page-language heuristics.
+                try:
+                    resolved_anchor_text = await self._resolve_anchor_text(
+                        page=page,
+                        preferred_anchor="",
+                        anchor_candidates=benchmark_candidates_ranked,
+                        anchor_matching_mode=anchor_matching_mode,
+                        page_language=effective_page_language,
+                        enforce_anchor_language_filter=False,
+                        value_pattern=str(value_pattern) if value_pattern else None,
+                        runtime_state=runtime_state,
+                    )
+                except ValueError:
+                    resolved_anchor_text = ""
+
+            if not resolved_anchor_text and fallback_candidates_ranked:
+                resolved_anchor_text = await self._resolve_anchor_text(
+                    page=page,
+                    preferred_anchor="",
+                    anchor_candidates=fallback_candidates_ranked,
+                    anchor_matching_mode=anchor_matching_mode,
+                    page_language=effective_page_language,
+                    enforce_anchor_language_filter=enforce_anchor_language_filter,
+                    value_pattern=str(value_pattern) if value_pattern else None,
+                    runtime_state=runtime_state,
+                )
+
+            if not resolved_anchor_text:
+                raise ValueError(f"Anchor text not found for candidates={resolved_candidates}")
+            anchor_text = resolved_anchor_text
             args["anchor_text"] = anchor_text
         if not value_pattern:
             raise ValueError("extract_value_near_anchor requires value_pattern or supported value_type")
