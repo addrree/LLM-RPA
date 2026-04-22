@@ -115,7 +115,7 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Family policy (multi_step_information_retrieval): compare-only через section-aware pipeline. "
             "НЕ используй extract_structured_items с args.section и НЕ используй regex-first extraction как default. "
             "Используй extract_value_from_section / extract_structured_items_from_region для "
-            "section_a_data и section_b_data, затем compare_structured_values."
+            "source_a и source_b, затем compare_structured_values."
         ),
         "anchored_value_extraction": (
             "Family policy (anchored_value_extraction): anchor_text/anchor_candidates должны оставаться в языке "

@@ -147,6 +147,21 @@ def normalize_benchmark_plan(
                         args.pop("anchor_text", None)
                 if benchmark_anchor_matching_mode in {"auto", "exact", "contains"}:
                     args["anchor_matching_mode"] = benchmark_anchor_matching_mode
+        if action == "extract_value_from_section":
+            if not str(args.get("section_selector", "")).strip():
+                args["section_selector"] = "main"
+            if not str(args.get("field_selector", "")).strip() and not str(args.get("pattern", "")).strip():
+                args["pattern"] = "(.{1,200})"
+        if action == "extract_structured_items_from_region":
+            if not str(args.get("region_selector", "")).strip():
+                args["region_selector"] = "main"
+            if not str(args.get("container_selector", "")).strip():
+                args["container_selector"] = "li, tr, article, section"
+            if not isinstance(args.get("fields"), dict) or not args.get("fields"):
+                args["fields"] = {"value": "*"}
+            limit = args.get("limit")
+            if not isinstance(limit, int) or limit <= 0:
+                args["limit"] = 5
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
                 args["pattern"] = "(.+)"
