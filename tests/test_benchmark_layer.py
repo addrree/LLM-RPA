@@ -443,10 +443,11 @@ def test_normalize_benchmark_plan_anchored_uses_scenario_anchor_candidates_as_so
         scenario_page_language="en",
     )
     normalized = normalize_benchmark_plan(plan, ctx)
-    anchored_step = normalized.steps[1]
+    anchored_step = next(step for step in normalized.steps if step.action == "extract_value_near_anchor")
     assert anchored_step.args["anchor_candidates"] == ["Email", "Contact", "Support"]
-    assert anchored_step.args["anchor_text"] == "Email"
-    assert anchored_step.args["page_language"] == "auto"
+    assert "anchor_text" not in anchored_step.args
+    assert "page_language" not in anchored_step.args
+    assert normalized.expected_result.required_fields == ["anchor", "value"]
 
 
 def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_text():
@@ -490,7 +491,7 @@ def test_normalize_benchmark_plan_promotes_navigation_wait_to_url_contains_from_
     )
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
-    wait_step = normalized.steps[2]
+    wait_step = next(step for step in normalized.steps if step.action == "wait_for")
     assert wait_step.args["url_contains"] == "/pricing"
     assert "text" not in wait_step.args
     PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
@@ -515,7 +516,7 @@ def test_normalize_benchmark_plan_promotes_navigation_wait_to_main_selector_for_
     )
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
-    wait_step = normalized.steps[2]
+    wait_step = next(step for step in normalized.steps if step.action == "wait_for")
     assert wait_step.args["selector"] == "main h1, article h1, [role='main'] h1, main, article, [role='main']"
     assert "text" not in wait_step.args
     PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))

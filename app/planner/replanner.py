@@ -2,6 +2,7 @@ import json
 import logging
 from urllib.parse import urlparse
 
+from app.benchmark.contract import required_contract_fields
 from app.planner.action_vocab import normalize_plan_action_aliases
 from app.planner.prompts import (
     CORRECTIVE_REPLANNER_SYSTEM_PROMPT,
@@ -40,6 +41,16 @@ class Replanner:
                 "Return corrected JSON only."
             )
             payload["previous_invalid_plan"] = invalid_plan
+        if benchmark_context:
+            family = str(benchmark_context.get("task_family", "")).strip()
+            payload["benchmark_policy_hints"] = {
+                "task_family": family,
+                "required_top_level_fields": required_contract_fields(
+                    task_family=family,
+                    scenario_required_fields=benchmark_context.get("required_top_level_fields"),
+                ),
+                "schema_contract_source": "benchmark contract layer",
+            }
         system_prompt = REPLANNER_SYSTEM_PROMPT
         if benchmark_context:
             system_prompt = build_benchmark_replanner_prompt(
@@ -98,8 +109,14 @@ class Replanner:
             "disallowed_next_patterns": disallowed_next_patterns or [],
         }
         if benchmark_context:
+            family = str(benchmark_context.get("task_family", "")).strip()
             payload["benchmark_policy_hints"] = {
-                "task_family": str(benchmark_context.get("task_family", "")),
+                "task_family": family,
+                "required_top_level_fields": required_contract_fields(
+                    task_family=family,
+                    scenario_required_fields=benchmark_context.get("required_top_level_fields"),
+                ),
+                "schema_contract_source": "benchmark contract layer",
                 "anchor_language_grounding": (
                     "Detect page language in executor from current page content/html; "
                     "planner JSON must not include page_language; keep anchors in visible page language."
