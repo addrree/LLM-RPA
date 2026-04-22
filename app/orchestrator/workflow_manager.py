@@ -154,6 +154,20 @@ def normalize_benchmark_plan(
                 args["limit"] = 5
             if not isinstance(args.get("fields"), dict) or not args.get("fields"):
                 args["fields"] = {"value": 1}
+            if task_family == "multi_step_information_retrieval":
+                section_hint = str(args.get("section", "")).strip()
+                region_hint = str(args.get("region", "")).strip()
+                if section_hint or region_hint:
+                    args["__benchmark_guardrail_error"] = (
+                        "benchmark guardrail: multi_step_information_retrieval disallows compare extraction via "
+                        "extract_structured_items + section/region hints; use extract_value_from_section or "
+                        "extract_structured_items_from_region and persist section_a_data/section_b_data"
+                    )
+                else:
+                    args["__benchmark_guardrail_error"] = (
+                        "benchmark guardrail: multi_step_information_retrieval disallows legacy "
+                        "extract_structured_items compare path; use section-aware extraction actions"
+                    )
         if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
             args["text"] = "Python"
         if task_family == "navigation_then_extraction" and action == "wait_for":
@@ -263,8 +277,12 @@ def normalize_benchmark_plan(
                 compare_step_idx = len(normalized_steps)
                 if not step.get("save_as"):
                     step["save_as"] = "structured_comparison"
-            if action.startswith("extract"):
+            if action in {"extract_value_from_section", "extract_structured_items_from_region"}:
                 extraction_step_indices.append(len(normalized_steps))
+                if len(extraction_step_indices) == 1:
+                    step["save_as"] = "section_a_data"
+                elif len(extraction_step_indices) == 2:
+                    step["save_as"] = "section_b_data"
 
         if task_family == "negative_or_ambiguous_case" and action == "extract_pattern_from_page_text":
             pattern = str(args.get("pattern", "")).strip()
@@ -307,7 +325,8 @@ def normalize_benchmark_plan(
         candidate_indices = [
             idx
             for idx in extraction_step_indices
-            if idx < compare_step_idx and normalized_steps[idx].get("action") != "extract_pattern_from_page_text"
+            if idx < compare_step_idx
+            and normalized_steps[idx].get("action") in {"extract_value_from_section", "extract_structured_items_from_region"}
         ]
         for missing_key, step_idx in zip(missing_key_targets, candidate_indices):
             normalized_steps[step_idx]["save_as"] = missing_key
