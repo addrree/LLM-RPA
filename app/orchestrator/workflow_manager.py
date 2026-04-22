@@ -3,6 +3,7 @@ import logging
 import re
 from datetime import datetime, timezone
 
+from app.benchmark.contract import normalize_payload_for_task_family_contract
 from app.config import RAW_LLM_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.planner.planner import Planner
@@ -146,6 +147,21 @@ def normalize_benchmark_plan(
                         args.pop("anchor_text", None)
                 if benchmark_anchor_matching_mode in {"auto", "exact", "contains"}:
                     args["anchor_matching_mode"] = benchmark_anchor_matching_mode
+        if action == "extract_value_from_section":
+            if not str(args.get("section_selector", "")).strip():
+                args["section_selector"] = "main"
+            if not str(args.get("field_selector", "")).strip() and not str(args.get("pattern", "")).strip():
+                args["pattern"] = "(.{1,200})"
+        if action == "extract_structured_items_from_region":
+            if not str(args.get("region_selector", "")).strip():
+                args["region_selector"] = "main"
+            if not str(args.get("container_selector", "")).strip():
+                args["container_selector"] = "li, tr, article, section"
+            if not isinstance(args.get("fields"), dict) or not args.get("fields"):
+                args["fields"] = {"value": "*"}
+            limit = args.get("limit")
+            if not isinstance(limit, int) or limit <= 0:
+                args["limit"] = 5
         if action == "extract_structured_items":
             if not str(args.get("pattern", "")).strip():
                 args["pattern"] = "(.+)"
@@ -161,7 +177,7 @@ def normalize_benchmark_plan(
                     args["__benchmark_guardrail_error"] = (
                         "benchmark guardrail: multi_step_information_retrieval disallows compare extraction via "
                         "extract_structured_items + section/region hints; use extract_value_from_section or "
-                        "extract_structured_items_from_region and persist section_a_data/section_b_data"
+                        "extract_structured_items_from_region and persist source_a/source_b"
                     )
                 else:
                     args["__benchmark_guardrail_error"] = (
@@ -276,13 +292,13 @@ def normalize_benchmark_plan(
             if action == "compare_structured_values":
                 compare_step_idx = len(normalized_steps)
                 if not step.get("save_as"):
-                    step["save_as"] = "structured_comparison"
+                    step["save_as"] = "combined_result"
             if action in {"extract_value_from_section", "extract_structured_items_from_region"}:
                 extraction_step_indices.append(len(normalized_steps))
                 if len(extraction_step_indices) == 1:
-                    step["save_as"] = "section_a_data"
+                    step["save_as"] = "source_a"
                 elif len(extraction_step_indices) == 2:
-                    step["save_as"] = "section_b_data"
+                    step["save_as"] = "source_b"
 
         if task_family == "negative_or_ambiguous_case" and action == "extract_pattern_from_page_text":
             pattern = str(args.get("pattern", "")).strip()
@@ -310,8 +326,8 @@ def normalize_benchmark_plan(
     if task_family == "multi_step_information_retrieval" and compare_step_idx is not None:
         compare_step = normalized_steps[compare_step_idx]
         compare_args = compare_step.get("args", {}) if isinstance(compare_step.get("args"), dict) else {}
-        left_key = str(compare_args.get("left_key", "section_a_data")).strip() or "section_a_data"
-        right_key = str(compare_args.get("right_key", "section_b_data")).strip() or "section_b_data"
+        left_key = str(compare_args.get("left_key", "source_a")).strip() or "source_a"
+        right_key = str(compare_args.get("right_key", "source_b")).strip() or "source_b"
         compare_args["left_key"] = left_key
         compare_args["right_key"] = right_key
         compare_step["args"] = compare_args
@@ -343,16 +359,10 @@ def normalize_benchmark_plan(
         step["step_id"] = idx
 
     payload["steps"] = normalized_steps
-    produced = {
-        str(step.get("save_as")).strip()
-        for step in normalized_steps
-        if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
-    }
-    expected = payload.get("expected_result")
-    if isinstance(expected, dict) and isinstance(expected.get("required_fields"), list):
-        filtered = [field for field in expected["required_fields"] if str(field).strip() in produced]
-        expected["required_fields"] = filtered
-        payload["expected_result"] = expected
+    payload = normalize_payload_for_task_family_contract(payload, task_family=task_family)
+    for idx, step in enumerate(payload.get("steps", []), start=1):
+        if isinstance(step, dict):
+            step["step_id"] = idx
 
     return TaskSpec.model_validate(payload)
 
@@ -631,9 +641,9 @@ class WorkflowManager:
         while True:
             execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
             self._augment_multi_step_comparison(execution_result)
-            verdict = self.verifier.verify(
-                current_plan,
-                execution_result,
+            verdict = self._verifier_verify(
+                plan=current_plan,
+                execution_result=execution_result,
                 benchmark_context=benchmark_context,
             )
             if verdict.verdict == "accept":
@@ -872,10 +882,25 @@ class WorkflowManager:
         allowed_actions_override: set[str] | None = None,
     ) -> None:
         allowed_actions = allowed_actions_override or self._allowed_actions(benchmark_context)
+        benchmark_contract_context = benchmark_context if allowed_actions_override is None else None
         try:
-            self.validator.validate(plan, allowed_actions=allowed_actions)
+            self.validator.validate(
+                plan,
+                allowed_actions=allowed_actions,
+                benchmark_context=benchmark_contract_context,
+            )
         except TypeError:
-            self.validator.validate(plan)
+            try:
+                self.validator.validate(plan, allowed_actions=allowed_actions)
+            except TypeError:
+                self.validator.validate(plan)
+
+
+    def _verifier_verify(self, *, plan: TaskSpec, execution_result, benchmark_context: dict | None):
+        try:
+            return self.verifier.verify(plan, execution_result, benchmark_context=benchmark_context)
+        except TypeError:
+            return self.verifier.verify(plan, execution_result)
 
     @staticmethod
     def _augment_multi_step_comparison(execution_result) -> None:
@@ -884,12 +909,14 @@ class WorkflowManager:
             comparison = data["structured_comparison"]
             data["comparison"] = comparison
             data["compare_status"] = comparison.get("status")
-            left = data.get(comparison.get("left_key", "section_a_data"))
-            right = data.get(comparison.get("right_key", "section_b_data"))
+            left_key = comparison.get("left_key") or ("source_a" if "source_a" in data else "section_a_data")
+            right_key = comparison.get("right_key") or ("source_b" if "source_b" in data else "section_b_data")
+            left = data.get(left_key)
+            right = data.get(right_key)
             data.setdefault(
                 "comparison_left_summary",
                 {
-                    "label": comparison.get("left_key", "section_a_data"),
+                    "label": left_key,
                     "type": type(left).__name__,
                     "size": len(left) if isinstance(left, (dict, list)) else None,
                 },
@@ -897,19 +924,19 @@ class WorkflowManager:
             data.setdefault(
                 "comparison_right_summary",
                 {
-                    "label": comparison.get("right_key", "section_b_data"),
+                    "label": right_key,
                     "type": type(right).__name__,
                     "size": len(right) if isinstance(right, (dict, list)) else None,
                 },
             )
             data["combined_result"] = {
-                "section_a_data": left,
-                "section_b_data": right,
+                "source_a": left,
+                "source_b": right,
                 "comparison": comparison,
             }
             return
-        left = data.get("section_a_data")
-        right = data.get("section_b_data")
+        left = data.get("source_a", data.get("section_a_data"))
+        right = data.get("source_b", data.get("section_b_data"))
         if left is None or right is None:
             return
         left_keys = sorted(left.keys()) if isinstance(left, dict) else []
@@ -943,14 +970,14 @@ class WorkflowManager:
         data["comparison"] = comparison
         data["compare_status"] = comparison.get("status")
         data["combined_result"] = {
-            "section_a_data": left,
-            "section_b_data": right,
+            "source_a": left,
+            "source_b": right,
             "comparison": comparison,
         }
 
     @staticmethod
     def _effective_max_retries(raw_max_retries: int) -> int:
-        return min(3, max(0, int(raw_max_retries)))
+        return min(3, max(1, int(raw_max_retries)))
 
     @staticmethod
     def _effective_max_retries_for_context(*, max_retries: int, benchmark_context: dict | None) -> int:

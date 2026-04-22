@@ -73,12 +73,19 @@ PLANNER_SYSTEM_PROMPT = """
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
    - navigation_then_extraction: предпочитай navigate_to_relevant_section, затем extraction.
    - multi_step_information_retrieval: используй формальный pipeline:
-     1) extract/save_as=section_a_data,
-     2) extract/save_as=section_b_data,
-     3) compare_structured_values с save_as=structured_comparison (без regex-group контрактов между шагами).
+     1) extract/save_as=source_a,
+     2) extract/save_as=source_b,
+     3) compare_structured_values с save_as=combined_result (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке страницы и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
 20. Язык страницы определяется executor по фактической странице после navigation. Не передавай page_language в JSON-плане и не локализуй anchor_text по языку пользователя.
+21. Top-level output schema задается benchmark contract layer по task family. Planner выбирает strategy шагов, но НЕ придумывает альтернативные final save_as aliases.
+22. Контракт top-level полей:
+   - single_value_extraction -> value
+   - anchored_value_extraction -> anchor, value
+   - repeated_structured_items -> items
+   - navigation_then_extraction -> source_page, target_page, value
+   - multi_step_information_retrieval -> source_a, source_b, combined_result
 """
 
 
@@ -108,7 +115,7 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Family policy (multi_step_information_retrieval): compare-only через section-aware pipeline. "
             "НЕ используй extract_structured_items с args.section и НЕ используй regex-first extraction как default. "
             "Используй extract_value_from_section / extract_structured_items_from_region для "
-            "section_a_data и section_b_data, затем compare_structured_values."
+            "source_a и source_b, затем compare_structured_values."
         ),
         "anchored_value_extraction": (
             "Family policy (anchored_value_extraction): anchor_text/anchor_candidates должны оставаться в языке "
@@ -131,7 +138,8 @@ Task family: {task_family}
 4) План минимальный и детерминированный (обычно 3-6 шагов).
 5) Не используй legacy aliases.
 6) Не выходи за рамки task family.
-7) {family_rules}
+7) Top-level output keys задаются benchmark contract layer для task_family; не изобретай альтернативные final save_as aliases.
+8) {family_rules}
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -196,10 +204,11 @@ REPLANNER_SYSTEM_PROMPT = """
    - scoped text wait используй только если snapshot явно подтверждает и обязательно с scope_selector + exact=true.
    Bare/generic text wait_for запрещен.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
-15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
+15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй source_a и source_b, а сравнение сохраняй в combined_result детерминированно.
 16) Для anchored extraction используй anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
 17) Для contact/support/email/phone задач предпочтительно value_type=email|phone и anchor_candidates вместо одного жесткого anchor_text.
 18) Для anchored extraction не передавай page_language в args; executor сам определяет язык страницы. Не локализуй anchor по языку пользователя.
+19) Финальные top-level output keys фиксируются benchmark contract layer по task family; replanner может менять strategy, но не бизнес-ключи результата.
 """
 
 CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
@@ -228,7 +237,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
    - соблюдай disallowed_next_patterns (например broad_click_selector, missing_required_args).
 12) Для click после неудачи сужай target с приоритетом href_contains -> role+name -> text(confirmed); не добавляй exact=true/scope_selector без явного подтверждения snapshot и не повторяй общий selector.
 13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
-14) Для multi_step compare corrective-план должен извлекать section_a_data и section_b_data отдельно; не полагаться на regex group reference как на контракт сравнения.
+14) Для multi_step compare corrective-план должен извлекать source_a и source_b отдельно; не полагаться на regex group reference как на контракт сравнения.
 15) Коррективный replanning используй для recoverable execution ошибок (anchor_not_found, value_not_found_near_anchor, ambiguous/weak click target, bad locator choice при browser_operation_failed), но не для чисто transient timeout без признака плохого locator.
 """
 
@@ -244,7 +253,7 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "Избегай хрупкого navigation click: приоритет href_contains, затем role+name, затем text только при явном подтверждении в snapshot. "
             "Не добавляй scope_selector/exact=true без наблюдаемого основания из observe_page. "
             "После click используй strong wait_for: href_contains -> url_contains(тот же ключ), иначе selector в main content; "
-            "bare/generic text wait_for запрещен."
+            "bare/generic text wait_for запрещен. Финальные business keys фиксированы: source_page, target_page, value."
         ),
         "repeated_structured_items": (
             "Для extract_structured_items pattern должен иметь capture groups, "
@@ -252,7 +261,7 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "Разрешены только int group index или object rule с group_index; string field specs запрещены."
         ),
         "multi_step_information_retrieval": (
-            "Соблюдай compare pipeline: section_a_data + section_b_data через section-aware extraction, "
+            "Соблюдай compare pipeline: source_a + source_b через section-aware extraction, "
             "затем compare_structured_values. Не используй extract_structured_items с args.section и избегай regex-only сравнения."
         ),
         "anchored_value_extraction": (

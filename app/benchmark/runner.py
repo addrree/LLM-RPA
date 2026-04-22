@@ -135,6 +135,7 @@ class BenchmarkRunner:
                 scenario_page_language=scenario.page_language,
                 expected_min_items=scenario.expected_min_items,
                 expected_item_fields=scenario.expected_item_fields,
+                required_top_level_fields=scenario.required_top_level_fields,
             )
             result = await workflow.run(
                 self._build_grounded_goal(scenario, allowed_actions=benchmark_context["allowed_actions"]),
