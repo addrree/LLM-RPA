@@ -62,6 +62,11 @@ PLANNER_SYSTEM_PROMPT = """
    - text (только если текст явно подтвержден snapshot/observe_page контекстом).
    scope_selector и exact=true НЕ ставь по умолчанию: используй их только если это явно подтверждено snapshot/observe_page.
    selector используй только если он специфичный и привязан к блоку.
+16.2) Для navigation_then_extraction после click обязательно ставь strong wait_for:
+   - если click содержит href_contains, wait_for должен использовать url_contains с тем же навигационным ключом;
+   - если click задан через role+name или text, wait_for должен использовать selector в main content (например main h1/article h1/main);
+   - scoped text wait (scope_selector + exact=true) допустим только при явном подтверждении snapshot.
+   Запрещен bare/generic text-only wait_for для navigation family.
 17. Task-family routing policy:
    - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
@@ -89,6 +94,8 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Family policy (navigation_then_extraction): избегай over-constrained text-click контрактов. "
             "Предпочитай href_contains, затем role+name, затем text (только если текст явно подтвержден snapshot). "
             "Не добавляй scope_selector или exact=true без явного подтверждения из observe_page/page snapshot. "
+            "После click используй strong wait_for: href_contains -> wait_for.url_contains(тот же ключ), "
+            "иначе wait_for.selector в main content; bare/generic text-only wait_for запрещен. "
             "Разрешен также специфичный selector."
         ),
         "repeated_structured_items": (
@@ -182,6 +189,11 @@ REPLANNER_SYSTEM_PROMPT = """
 11) Используй только канонические action names из схемы.
 12) Для задач single value (title/header/main value) используй extract_text/extract_html/extract_pattern_from_page_text по смыслу, а extract_value_near_anchor — только если цель действительно anchor/value.
 13) Для click используй детерминированный, но не переусложненный контракт: предпочитай href_contains, затем role+name, затем text (если текст явно подтвержден snapshot). Не добавляй exact=true или scope_selector по умолчанию; только при явном подтверждении из snapshot/observe_page.
+13.1) Для navigation_then_extraction после click всегда формируй strong post-click wait_for:
+   - click.href_contains => wait_for.url_contains с тем же навигационным ключом;
+   - click.role+name или подтвержденный text => wait_for.selector в main content (например main h1/article h1/main);
+   - scoped text wait используй только если snapshot явно подтверждает и обязательно с scope_selector + exact=true.
+   Bare/generic text wait_for запрещен.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между source_a/source_b; формируй section_a_data и section_b_data, а сравнение делай детерминированно.
 16) Для anchored extraction используй anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
@@ -229,7 +241,9 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         ),
         "navigation_then_extraction": (
             "Избегай хрупкого navigation click: приоритет href_contains, затем role+name, затем text только при явном подтверждении в snapshot. "
-            "Не добавляй scope_selector/exact=true без наблюдаемого основания из observe_page."
+            "Не добавляй scope_selector/exact=true без наблюдаемого основания из observe_page. "
+            "После click используй strong wait_for: href_contains -> url_contains(тот же ключ), иначе selector в main content; "
+            "bare/generic text wait_for запрещен."
         ),
         "repeated_structured_items": (
             "Для extract_structured_items pattern должен иметь capture groups, "

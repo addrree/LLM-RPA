@@ -35,6 +35,48 @@ def _snapshot_confirms_click_text(page_snapshot: PageSnapshot | None, text_value
     return False
 
 
+def _is_weak_navigation_wait(args: dict) -> bool:
+    has_selector = bool(str(args.get("selector", "")).strip())
+    has_url_contains = bool(str(args.get("url_contains", "")).strip())
+    text_value = str(args.get("text", "")).strip()
+    has_text = bool(text_value)
+    has_scope = bool(str(args.get("scope_selector", "")).strip())
+    has_exact = bool(args.get("exact", False))
+    weak_text_wait = has_text and not has_selector and not has_url_contains and not has_scope
+    generic_text_wait = text_value.lower() in {"python", "home", "docs", "pricing", "policy"} and not has_exact
+    return weak_text_wait or generic_text_wait
+
+
+def _promote_navigation_wait_for(
+    *,
+    wait_args: dict,
+    navigation_click_args: dict | None,
+) -> bool:
+    if not navigation_click_args:
+        return False
+    href_contains = str(navigation_click_args.get("href_contains", "")).strip()
+    role = str(navigation_click_args.get("role", "")).strip()
+    name = str(navigation_click_args.get("name", "")).strip()
+    selector = str(navigation_click_args.get("selector", "")).strip()
+    has_role_name = bool(role and name)
+    has_selector = bool(selector)
+
+    if href_contains:
+        wait_args["url_contains"] = href_contains
+        wait_args.pop("text", None)
+        wait_args.pop("selector", None)
+        wait_args.pop("scope_selector", None)
+        wait_args.pop("exact", None)
+        return True
+    if has_role_name or has_selector:
+        wait_args["selector"] = "main h1, article h1, [role='main'] h1, main, article, [role='main']"
+        wait_args.pop("text", None)
+        wait_args.pop("scope_selector", None)
+        wait_args.pop("exact", None)
+        return True
+    return False
+
+
 def normalize_benchmark_plan(
     plan: TaskSpec,
     benchmark_context: dict | None,
@@ -69,6 +111,7 @@ def normalize_benchmark_plan(
     normalized_steps: list[dict] = []
     compare_step_idx: int | None = None
     extraction_step_indices: list[int] = []
+    last_navigation_click_args: dict | None = None
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -114,20 +157,19 @@ def normalize_benchmark_plan(
         if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
             args["text"] = "Python"
         if task_family == "navigation_then_extraction" and action == "wait_for":
-            has_selector = bool(str(args.get("selector", "")).strip())
-            has_url_contains = bool(str(args.get("url_contains", "")).strip())
-            text_value = str(args.get("text", "")).strip()
-            has_text = bool(text_value)
-            has_scope = bool(str(args.get("scope_selector", "")).strip())
-            has_exact = bool(args.get("exact", False))
-            weak_text_wait = has_text and not has_selector and not has_url_contains and not has_scope
-            generic_text_wait = text_value.lower() in {"python", "home", "docs", "pricing", "policy"} and not has_exact
-            if weak_text_wait or generic_text_wait:
-                args["__benchmark_guardrail_error"] = (
-                    "benchmark guardrail: navigation_then_extraction wait_for is too weak; "
-                    "use url_contains, visible selector in main content, or scoped text wait "
-                    "(scope_selector + exact=true)"
+            if _is_weak_navigation_wait(args):
+                promoted = _promote_navigation_wait_for(
+                    wait_args=args,
+                    navigation_click_args=last_navigation_click_args,
                 )
+                if not promoted:
+                    args["__benchmark_guardrail_error"] = (
+                        "benchmark guardrail: navigation_then_extraction wait_for is too weak; "
+                        "use url_contains, visible selector in main content, or scoped text wait "
+                        "(scope_selector + exact=true)"
+                    )
+        if action in {"click", "navigate_to_relevant_section"} and task_family == "navigation_then_extraction":
+            last_navigation_click_args = dict(args)
         if action == "wait_for" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 12000
         if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
