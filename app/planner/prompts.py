@@ -105,8 +105,9 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "(с group_index); string-формат field spec запрещен."
         ),
         "multi_step_information_retrieval": (
-            "Family policy (multi_step_information_retrieval): не используй старый regex-first compare путь. "
-            "Используй pipeline: extract_value_from_section / extract_structured_items_from_region для "
+            "Family policy (multi_step_information_retrieval): compare-only через section-aware pipeline. "
+            "НЕ используй extract_structured_items с args.section и НЕ используй regex-first extraction как default. "
+            "Используй extract_value_from_section / extract_structured_items_from_region для "
             "section_a_data и section_b_data, затем compare_structured_values."
         ),
         "anchored_value_extraction": (
@@ -251,8 +252,8 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "Разрешены только int group index или object rule с group_index; string field specs запрещены."
         ),
         "multi_step_information_retrieval": (
-            "Соблюдай compare pipeline: section_a_data + section_b_data через structured extraction, "
-            "затем compare_structured_values; избегай regex-only сравнения."
+            "Соблюдай compare pipeline: section_a_data + section_b_data через section-aware extraction, "
+            "затем compare_structured_values. Не используй extract_structured_items с args.section и избегай regex-only сравнения."
         ),
         "anchored_value_extraction": (
             "Не переводи anchor_text между языками. Не передавай page_language, используй anchor_candidates "

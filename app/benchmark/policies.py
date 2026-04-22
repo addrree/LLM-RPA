@@ -33,8 +33,8 @@ BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY: dict[ScenarioCategory, list[str]] = {
     "multi_step_information_retrieval": [
         "open_url",
         "observe_page",
-        "extract_structured_items",
-        "extract_text",
+        "extract_value_from_section",
+        "extract_structured_items_from_region",
         "compare_structured_values",
         "finish",
     ],
