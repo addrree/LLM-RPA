@@ -57,6 +57,7 @@ def build_benchmark_context(
     scenario_page_language: str | None = None,
     expected_min_items: int | None = None,
     expected_item_fields: list[str] | None = None,
+    required_top_level_fields: list[str] | None = None,
 ) -> dict:
     family = task_family or category
     return {
@@ -68,4 +69,5 @@ def build_benchmark_context(
         "scenario_page_language": str(scenario_page_language or "").strip(),
         "expected_min_items": int(expected_min_items or 0),
         "expected_item_fields": list(expected_item_fields or []),
+        "required_top_level_fields": [str(field).strip() for field in (required_top_level_fields or []) if str(field).strip()],
     }

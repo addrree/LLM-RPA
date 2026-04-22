@@ -1,6 +1,7 @@
 from urllib.parse import urlparse
 import re
 
+from app.benchmark.contract import required_contract_fields
 from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_MAX_VERIFICATION_RETRIES, GLOBAL_TIMEOUT_SEC
 from app.planner.action_vocab import CANONICAL_ACTIONS
 from app.schemas.task_spec import TaskSpec
@@ -17,7 +18,12 @@ class PlanValidationError(Exception):
 
 
 class PlanValidator:
-    def validate(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
+    def validate(
+        self,
+        plan: TaskSpec,
+        allowed_actions: set[str] | None = None,
+        benchmark_context: dict | None = None,
+    ) -> None:
         self._validate_steps_not_empty(plan)
         self._validate_step_count(plan)
         self._validate_actions(plan, allowed_actions=allowed_actions)
@@ -26,6 +32,7 @@ class PlanValidator:
         self._validate_constraints(plan)
         self._validate_domains(plan)
         self._validate_expected_result_consistency(plan)
+        self._validate_benchmark_contract(plan, benchmark_context=benchmark_context)
 
     def _validate_steps_not_empty(self, plan: TaskSpec) -> None:
         if not plan.steps:
@@ -526,6 +533,40 @@ class PlanValidator:
                 raise PlanValidationError(
                     f"Required field '{field}' is not produced by any step."
                 )
+
+
+    def _validate_benchmark_contract(self, plan: TaskSpec, *, benchmark_context: dict | None) -> None:
+        if not benchmark_context:
+            return
+        task_family = str(benchmark_context.get("task_family", "")).strip()
+        required = required_contract_fields(
+            task_family=task_family,
+            scenario_required_fields=benchmark_context.get("required_top_level_fields"),
+        )
+        if not required:
+            return
+
+        if list(plan.expected_result.required_fields) != list(required):
+            raise PlanValidationError(
+                "Benchmark contract mismatch in expected_result.required_fields: "
+                f"expected {required}, got {list(plan.expected_result.required_fields)}"
+            )
+
+        produced = [str(step.save_as).strip() for step in plan.steps if isinstance(step.save_as, str) and step.save_as.strip()]
+        produced_set = set(produced)
+        missing = [field for field in required if field not in produced_set]
+        if missing:
+            raise PlanValidationError(
+                "Benchmark contract missing required top-level fields: "
+                f"{missing}. Produced={sorted(produced_set)}"
+            )
+
+        disallowed = sorted(field for field in produced_set if field not in set(required))
+        if disallowed:
+            raise PlanValidationError(
+                "Benchmark contract disallows extra top-level business fields: "
+                f"{disallowed}. Required={required}"
+            )
 
     @staticmethod
     def _collect_structured_nested_fields(plan: TaskSpec) -> set[str]:

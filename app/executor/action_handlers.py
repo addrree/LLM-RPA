@@ -467,6 +467,7 @@ class ActionHandlers:
             visible_anchor_texts=visible_anchor_texts,
             provided_language=page_language,
         )
+        args["page_language"] = effective_page_language
         if not value_pattern:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
