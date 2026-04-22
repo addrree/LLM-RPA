@@ -447,7 +447,7 @@ def test_normalize_benchmark_plan_anchored_uses_scenario_anchor_candidates_as_so
     assert anchored_step.args["anchor_candidates"] == ["Email", "Contact", "Support"]
     assert "anchor_text" not in anchored_step.args
     assert "page_language" not in anchored_step.args
-    assert normalized.expected_result.required_fields == ["anchor", "value"]
+    assert normalized.expected_result.required_fields == ["value"]
 
 
 def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_text():

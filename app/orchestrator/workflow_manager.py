@@ -1,9 +1,9 @@
 import json
 import logging
+import os
 import re
 from datetime import datetime, timezone
 
-from app.benchmark.contract import normalize_payload_for_task_family_contract
 from app.config import RAW_LLM_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.planner.planner import Planner
@@ -15,6 +15,12 @@ from app.verifier.llm_verifier import LLMVerifier
 
 UTC = timezone.utc
 logger = logging.getLogger(__name__)
+ENABLE_BENCHMARK_CONTRACT_REWRITE = os.getenv("ENABLE_BENCHMARK_CONTRACT_REWRITE", "").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 
 
 def _snapshot_confirms_click_text(page_snapshot: PageSnapshot | None, text_value: str) -> bool:
@@ -359,10 +365,13 @@ def normalize_benchmark_plan(
         step["step_id"] = idx
 
     payload["steps"] = normalized_steps
-    payload = normalize_payload_for_task_family_contract(payload, task_family=task_family)
-    for idx, step in enumerate(payload.get("steps", []), start=1):
-        if isinstance(step, dict):
-            step["step_id"] = idx
+    if ENABLE_BENCHMARK_CONTRACT_REWRITE:
+        from app.benchmark.contract import normalize_payload_for_task_family_contract
+
+        payload = normalize_payload_for_task_family_contract(payload, task_family=task_family)
+        for idx, step in enumerate(payload.get("steps", []), start=1):
+            if isinstance(step, dict):
+                step["step_id"] = idx
 
     return TaskSpec.model_validate(payload)
 
