@@ -471,6 +471,56 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_te
         PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
+def test_normalize_benchmark_plan_promotes_navigation_wait_to_url_contains_from_href_contains_click():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "navigate and extract",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "click", "args": {"href_contains": "/pricing"}},
+                {"step_id": 3, "action": "wait_for", "args": {"text": "Pricing"}},
+                {"step_id": 4, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                {"step_id": 5, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    wait_step = normalized.steps[2]
+    assert wait_step.args["url_contains"] == "/pricing"
+    assert "text" not in wait_step.args
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_normalize_benchmark_plan_promotes_navigation_wait_to_main_selector_for_role_name_click():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "navigate and extract",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "click", "args": {"role": "link", "name": "Pricing"}},
+                {"step_id": 3, "action": "wait_for", "args": {"text": "Pricing"}},
+                {"step_id": 4, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                {"step_id": 5, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    wait_step = normalized.steps[2]
+    assert wait_step.args["selector"] == "main h1, article h1, [role='main'] h1, main, article, [role='main']"
+    assert "text" not in wait_step.args
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
 def test_normalize_benchmark_plan_rejects_overconstrained_navigation_text_click_without_snapshot_evidence():
     plan = TaskSpec.model_validate(
         {
