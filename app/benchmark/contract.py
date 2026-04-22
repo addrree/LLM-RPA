@@ -25,9 +25,12 @@ NAVIGATION_ACTIONS = {"click", "navigate_to_relevant_section"}
 
 
 def required_contract_fields(*, task_family: str, scenario_required_fields: list[str] | None = None) -> list[str]:
-    del scenario_required_fields
     contract = BENCHMARK_CONTRACT_FIELDS_BY_TASK_FAMILY.get(str(task_family).strip())
-    return list(contract) if contract else []
+    if contract:
+        return list(contract)
+    if isinstance(scenario_required_fields, list):
+        return [str(field).strip() for field in scenario_required_fields if str(field).strip()]
+    return []
 
 
 def normalize_payload_for_task_family_contract(payload: dict[str, Any], *, task_family: str) -> dict[str, Any]:
@@ -53,10 +56,6 @@ def normalize_payload_for_task_family_contract(payload: dict[str, Any], *, task_
 
     elif task_family == "navigation_then_extraction":
         nav_idx = _find_first_index(steps, lambda step: step.get("action") in NAVIGATION_ACTIONS)
-        if nav_idx is not None:
-            _ensure_observe_step(steps, index=nav_idx, save_as="source_page")
-            nav_idx = _find_first_index(steps, lambda step: step.get("action") in NAVIGATION_ACTIONS)
-
         target_extract_idx = None
         for idx, step in enumerate(steps):
             if step.get("action") not in EXTRACTION_ACTIONS:
@@ -65,23 +64,18 @@ def normalize_payload_for_task_family_contract(payload: dict[str, Any], *, task_
                 target_extract_idx = idx
                 break
         if target_extract_idx is None:
-            finish_idx = _find_first_index(steps, lambda step: step.get("action") == "finish")
-            insert_idx = finish_idx if finish_idx is not None else len(steps)
-            steps.insert(insert_idx, {"action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"})
-            target_extract_idx = insert_idx
+            target_extract_idx = _find_first_index(steps, lambda step: step.get("action") in EXTRACTION_ACTIONS)
 
         if nav_idx is not None:
-            has_target_observe = False
-            for idx in range(nav_idx + 1, min(target_extract_idx + 1, len(steps))):
-                step = steps[idx]
-                if step.get("action") == "observe_page" and str(step.get("save_as", "")).strip() == "target_page":
-                    has_target_observe = True
-                    break
-            if not has_target_observe:
-                steps.insert(target_extract_idx, {"action": "observe_page", "args": {}, "save_as": "target_page"})
+            _ensure_observe_step(steps, index=nav_idx, save_as="source_page")
+            nav_idx = _find_first_index(steps, lambda step: step.get("action") in NAVIGATION_ACTIONS)
+            if target_extract_idx is not None and target_extract_idx >= nav_idx:
                 target_extract_idx += 1
-
-        steps[target_extract_idx]["save_as"] = "value"
+        if target_extract_idx is not None:
+            if nav_idx is not None:
+                _ensure_observe_step(steps, index=target_extract_idx, save_as="target_page", start_after=nav_idx)
+                target_extract_idx += 1
+            steps[target_extract_idx]["save_as"] = "value"
 
     elif task_family == "multi_step_information_retrieval":
         extraction_indices = [

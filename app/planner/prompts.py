@@ -73,8 +73,8 @@ PLANNER_SYSTEM_PROMPT = """
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
    - navigation_then_extraction: предпочитай navigate_to_relevant_section, затем extraction.
    - multi_step_information_retrieval: используй формальный pipeline:
-     1) extract/save_as=source_a,
-     2) extract/save_as=source_b,
+     1) extract/save_as=section_a_data,
+     2) extract/save_as=section_b_data,
      3) compare_structured_values с save_as=combined_result (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке страницы и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".

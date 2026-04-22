@@ -552,12 +552,8 @@ class PlanValidator:
                 f"expected {required}, got {list(plan.expected_result.required_fields)}"
             )
 
-        produced = [
-            (step.action, str(step.save_as).strip())
-            for step in plan.steps
-            if isinstance(step.save_as, str) and step.save_as.strip()
-        ]
-        produced_set = {name for _, name in produced}
+        produced = [str(step.save_as).strip() for step in plan.steps if isinstance(step.save_as, str) and step.save_as.strip()]
+        produced_set = set(produced)
         missing = [field for field in required if field not in produced_set]
         if missing:
             raise PlanValidationError(
@@ -565,18 +561,11 @@ class PlanValidator:
                 f"{missing}. Produced={sorted(produced_set)}"
             )
 
-        helper_actions = {"observe_page", "screenshot"}
-        extra_business_fields = sorted(
-            name
-            for action, name in produced
-            if name not in set(required)
-            and name not in TECHNICAL_ARTIFACT_FIELDS
-            and action not in helper_actions
-        )
-        if extra_business_fields:
+        disallowed = sorted(field for field in produced_set if field not in set(required))
+        if disallowed:
             raise PlanValidationError(
                 "Benchmark contract disallows extra top-level business fields: "
-                f"{extra_business_fields}. Required={required}"
+                f"{disallowed}. Required={required}"
             )
 
     @staticmethod
