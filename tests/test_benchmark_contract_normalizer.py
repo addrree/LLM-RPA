@@ -27,7 +27,7 @@ def test_required_contract_fields_map_by_task_family():
     assert required_contract_fields(task_family="multi_step_information_retrieval") == ["source_a", "source_b", "combined_result"]
 
 
-def test_navigation_contract_normalizer_enforces_required_top_level_shape():
+def test_navigation_contract_normalizer_does_not_force_top_level_shape_during_rollback():
     plan = _base_plan(
         ["value"],
         [
@@ -45,12 +45,12 @@ def test_navigation_contract_normalizer_enforces_required_top_level_shape():
 
     normalized = normalize_benchmark_plan(plan, ctx)
 
-    assert normalized.expected_result.required_fields == ["source_page", "target_page", "value"]
-    assert [step.save_as for step in normalized.steps if step.action == "observe_page"] == ["source_page", "target_page"]
-    assert any(step.action.startswith("extract") and step.save_as == "value" for step in normalized.steps)
+    assert normalized.expected_result.required_fields == ["value"]
+    assert [step.save_as for step in normalized.steps if step.action == "observe_page"] == []
+    assert any(step.action.startswith("extract") and step.save_as == "heading" for step in normalized.steps)
 
 
-def test_multi_step_contract_normalizer_rewrites_to_combined_result_pipeline():
+def test_multi_step_contract_normalizer_keeps_minimal_compare_rewrite_during_rollback():
     plan = _base_plan(
         ["structured_comparison"],
         [
@@ -70,8 +70,8 @@ def test_multi_step_contract_normalizer_rewrites_to_combined_result_pipeline():
     normalized = normalize_benchmark_plan(plan, ctx)
     compare_step = next(step for step in normalized.steps if step.action == "compare_structured_values")
 
-    assert normalized.expected_result.required_fields == ["source_a", "source_b", "combined_result"]
-    assert compare_step.save_as == "combined_result"
+    assert normalized.expected_result.required_fields == ["structured_comparison"]
+    assert compare_step.save_as == "structured_comparison"
     assert compare_step.args["left_key"] == "source_a"
     assert compare_step.args["right_key"] == "source_b"
 
