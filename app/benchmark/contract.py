@@ -4,10 +4,9 @@ from typing import Any
 
 BENCHMARK_CONTRACT_FIELDS_BY_TASK_FAMILY: dict[str, list[str]] = {
     "single_value_extraction": ["value"],
-    "anchored_value_extraction": ["anchor", "value"],
+    # Controlled rollback: disable strict family-specific contracts temporarily.
+    # Keep only the minimal safe contract for scalar extraction.
     "repeated_structured_items": ["items"],
-    "navigation_then_extraction": ["source_page", "target_page", "value"],
-    "multi_step_information_retrieval": ["source_a", "source_b", "combined_result"],
 }
 
 EXTRACTION_ACTIONS = {
@@ -41,17 +40,5 @@ def normalize_payload_for_task_family_contract(payload: dict[str, Any], *, task_
             if step.get("action") in EXTRACTION_ACTIONS:
                 step["save_as"] = "value"
 
-    elif task_family == "multi_step_information_retrieval":
-        compare_idx = _find_first_index(steps, lambda step: step.get("action") == "compare_structured_values")
-        if compare_idx is not None:
-            steps[compare_idx]["save_as"] = "combined_result"
-
     normalized["steps"] = steps
     return normalized
-
-
-def _find_first_index(steps: list[dict[str, Any]], predicate) -> int | None:
-    for idx, step in enumerate(steps):
-        if predicate(step):
-            return idx
-    return None
