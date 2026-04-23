@@ -103,7 +103,73 @@ def _canonical_section_lines_args(args: dict | None, *, default_heading: str, de
     return canonical
 
 
-def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
+_PLACEHOLDER_HEADING_PATTERNS = [
+    re.compile(r"^\s*section\s+[ab12]\s*$", re.IGNORECASE),
+    re.compile(r"^\s*(first|second)\s+section\s*$", re.IGNORECASE),
+    re.compile(r"^\s*source\s+[ab12]\s*$", re.IGNORECASE),
+]
+_NON_LABEL_SELECTOR_TOKENS = re.compile(r"[#.\[\]>:,+~]|//|/|\s")
+_SIMPLE_LABEL_PATTERN = re.compile(r"^[\w\-]{1,40}$", re.UNICODE)
+_URLISH_OR_SLUG_PATTERN = re.compile(r"^(https?://|/)[^\s]+$|^[a-z0-9]+(?:[-_/][a-z0-9]+)+$", re.IGNORECASE)
+
+
+def _is_placeholder_heading(text: str) -> bool:
+    candidate = str(text or "").strip()
+    if not candidate:
+        return True
+    return any(pattern.match(candidate) for pattern in _PLACEHOLDER_HEADING_PATTERNS)
+
+
+def _extract_page_text_heading_candidates(page_text: str | None) -> list[str]:
+    if not _is_non_empty_str(page_text):
+        return []
+    candidates: list[str] = []
+    for raw_line in str(page_text).splitlines():
+        line = raw_line.strip().strip("#").strip()
+        if not line or len(line) < 3 or len(line) > 80:
+            continue
+        if line.endswith((".", "!", "?", ";", ":")):
+            continue
+        if len(line.split()) > 8:
+            continue
+        if _is_placeholder_heading(line):
+            continue
+        if line not in candidates:
+            candidates.append(line)
+    return candidates
+
+
+def _resolve_compare_headings(page_snapshot: PageSnapshot | None) -> tuple[str | None, str | None]:
+    if page_snapshot is None:
+        return (None, None)
+    ordered_unique: list[str] = []
+    for heading in page_snapshot.visible_headings:
+        clean = str(heading or "").strip()
+        if not clean or clean in ordered_unique or _is_placeholder_heading(clean):
+            continue
+        ordered_unique.append(clean)
+    for heading in _extract_page_text_heading_candidates(page_snapshot.page_text):
+        if heading not in ordered_unique:
+            ordered_unique.append(heading)
+    if len(ordered_unique) >= 2:
+        return (ordered_unique[0], ordered_unique[1])
+    return (None, None)
+
+
+def _selector_looks_like_plain_label(selector: str) -> bool:
+    candidate = str(selector or "").strip()
+    if not candidate:
+        return False
+    if _NON_LABEL_SELECTOR_TOKENS.search(candidate):
+        return False
+    return bool(_SIMPLE_LABEL_PATTERN.match(candidate))
+
+
+def _label_looks_like_url_or_slug(label: str) -> bool:
+    return bool(_URLISH_OR_SLUG_PATTERN.match(str(label or "").strip()))
+
+
+def _canonicalize_multi_step_compare_steps(steps: list[dict], *, page_snapshot: PageSnapshot | None = None) -> list[dict]:
     stable_candidates = [
         step
         for step in steps
@@ -122,6 +188,7 @@ def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
         if action == "observe_page" and observe_step is None:
             observe_step = step
 
+    preferred_a, preferred_b = _resolve_compare_headings(page_snapshot)
     rewritten: list[dict] = []
     if open_step is not None:
         rewritten.append(open_step)
@@ -134,7 +201,7 @@ def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
             "action": "extract_section_lines",
             "args": _canonical_section_lines_args(
                 source_a_candidate.get("args") if source_a_candidate else None,
-                default_heading="Section A",
+                default_heading=preferred_a or "Section A",
                 default_limit=7,
             ),
             "save_as": "source_a",
@@ -145,7 +212,7 @@ def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
             "action": "extract_section_lines",
             "args": _canonical_section_lines_args(
                 source_b_candidate.get("args") if source_b_candidate else None,
-                default_heading="Section B",
+                default_heading=preferred_b or "Section B",
                 default_limit=7,
             ),
             "save_as": "source_b",
@@ -167,12 +234,13 @@ def _canonicalize_family_steps(
     task_family: str,
     goal_text: str,
     fallback_save_as: str | None,
+    page_snapshot: PageSnapshot | None = None,
 ) -> list[dict]:
     if not steps:
         return steps
 
     if task_family == "multi_step_information_retrieval":
-        steps = _canonicalize_multi_step_compare_steps(steps)
+        steps = _canonicalize_multi_step_compare_steps(steps, page_snapshot=page_snapshot)
 
     extraction_indices = [
         index for index, step in enumerate(steps) if str(step.get("action", "")).strip().startswith("extract")
@@ -203,10 +271,23 @@ def _canonicalize_family_steps(
 
         if task_family == "multi_step_information_retrieval" and action == "extract_section_lines":
             canonical = _canonical_section_lines_args(args, default_heading="Section", default_limit=7)
+            if _is_placeholder_heading(canonical.get("heading_text", "")):
+                preferred_a, preferred_b = _resolve_compare_headings(page_snapshot)
+                replacement = preferred_a if str(step.get("save_as", "")).strip() == "source_a" else preferred_b
+                if replacement:
+                    canonical["heading_text"] = replacement
             step["args"] = canonical
             args = canonical
 
         if task_family == "navigation_then_extraction" and action == "click":
+            selector_value = str(args.get("selector", "")).strip()
+            if selector_value and _selector_looks_like_plain_label(selector_value):
+                args.pop("selector", None)
+                if _label_looks_like_url_or_slug(selector_value):
+                    args["href_contains"] = selector_value
+                else:
+                    args["text"] = selector_value
+                    args["exact"] = True
             has_text = _is_non_empty_str(args.get("text"))
             has_exact = bool(args.get("exact"))
             has_scope = _is_non_empty_str(args.get("scope_selector"))
@@ -319,6 +400,7 @@ def normalize_benchmark_plan(
         task_family=task_family,
         goal_text=str(payload.get("goal", "")),
         fallback_save_as=fallback_save_as,
+        page_snapshot=page_snapshot,
     )
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):

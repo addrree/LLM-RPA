@@ -10,14 +10,13 @@ from urllib.parse import urlparse
 
 import requests
 
+logger = logging.getLogger(__name__)
+
 from app.schemas.execution import GenerationMetadata, LLMArtifact
 
 
 class LLMClientError(RuntimeError):
     pass
-
-
-logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -164,6 +163,8 @@ class LLMClient:
         }
 
         last_error: LLMClientError | None = None
+        retry_used = False
+        retry_reason: str | None = None
         for attempt in range(2):
             try:
                 response = self.session.post(url, json=payload, headers=headers or None, timeout=self.timeout_sec)
@@ -174,6 +175,9 @@ class LLMClient:
                     f"(url={url}, model={model}). Increase OLLAMA_TIMEOUT_SEC or simplify the prompt."
                 )
                 if attempt == 0:
+                    retry_used = True
+                    retry_reason = "timeout"
+                    logger.warning("LLM transport retry scheduled due to timeout (model=%s, url=%s)", model, url)
                     time.sleep(0.5)
                     continue
                 raise last_error from exc
@@ -195,6 +199,14 @@ class LLMClient:
                         "Verify OLLAMA_PLANNER_MODEL / OLLAMA_VERIFIER_MODEL / OLLAMA_MODEL."
                     )
                 if response.status_code in {500, 502} and attempt == 0:
+                    retry_used = True
+                    retry_reason = f"http_{response.status_code}"
+                    logger.warning(
+                        "LLM transport retry scheduled due to transient status (status=%s, model=%s, url=%s)",
+                        response.status_code,
+                        model,
+                        url,
+                    )
                     time.sleep(0.5)
                     continue
                 raise LLMClientError(
@@ -230,12 +242,18 @@ class LLMClient:
                 "content_source": content_source,
                 "used_thinking_fallback": used_thinking_fallback,
                 "response_keys": sorted(list(data.keys())),
+                "transport_retry_used": retry_used,
+                "transport_retry_reason": retry_reason,
+                "transport_attempt_count": attempt + 1,
             }
             if cleaned_content:
                 return cleaned_content
 
             last_error = LLMClientError(f"Ollama returned empty content. Full payload: {data}")
             if attempt == 0:
+                retry_used = True
+                retry_reason = "empty_content"
+                logger.warning("LLM transport retry scheduled due to empty content (model=%s, url=%s)", model, url)
                 time.sleep(0.5)
                 continue
             raise last_error
