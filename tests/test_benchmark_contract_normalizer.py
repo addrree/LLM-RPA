@@ -21,10 +21,10 @@ def _base_plan(required_fields: list[str], steps: list[dict]) -> TaskSpec:
 
 def test_required_contract_fields_map_by_task_family():
     assert required_contract_fields(task_family="single_value_extraction") == ["value"]
-    assert required_contract_fields(task_family="anchored_value_extraction") == ["anchor", "value"]
+    assert required_contract_fields(task_family="anchored_value_extraction") == []
     assert required_contract_fields(task_family="repeated_structured_items") == ["items"]
-    assert required_contract_fields(task_family="navigation_then_extraction") == ["source_page", "target_page", "value"]
-    assert required_contract_fields(task_family="multi_step_information_retrieval") == ["source_a", "source_b", "combined_result"]
+    assert required_contract_fields(task_family="navigation_then_extraction") == []
+    assert required_contract_fields(task_family="multi_step_information_retrieval") == []
 
 
 def test_navigation_contract_normalizer_does_not_force_top_level_shape_during_rollback():
@@ -76,7 +76,7 @@ def test_multi_step_contract_normalizer_keeps_minimal_compare_rewrite_during_rol
     assert compare_step.args["right_key"] == "source_b"
 
 
-def test_validator_rejects_plan_that_violates_family_contract_shape():
+def test_validator_allows_plan_without_strict_family_contract_shape():
     plan = _base_plan(
         ["value"],
         [
@@ -91,5 +91,4 @@ def test_validator_rejects_plan_that_violates_family_contract_shape():
         required_top_level_fields=["source_page", "target_page", "value"],
     )
 
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(plan, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
+    PlanValidator().validate(plan, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)

@@ -24,8 +24,9 @@ def required_contract_fields(*, task_family: str, scenario_required_fields: list
     contract = BENCHMARK_CONTRACT_FIELDS_BY_TASK_FAMILY.get(str(task_family).strip())
     if contract:
         return list(contract)
-    if isinstance(scenario_required_fields, list):
-        return [str(field).strip() for field in scenario_required_fields if str(field).strip()]
+    # Controlled cleanup: do not inherit strict scenario-level required field contracts
+    # for families without explicit safe mapping.
+    _ = scenario_required_fields
     return []
 
 

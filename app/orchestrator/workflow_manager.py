@@ -21,12 +21,6 @@ ENABLE_BENCHMARK_CONTRACT_REWRITE = os.getenv("ENABLE_BENCHMARK_CONTRACT_REWRITE
     "yes",
     "on",
 }
-ENABLE_BENCHMARK_PLAN_NORMALIZATION = os.getenv("ENABLE_BENCHMARK_PLAN_NORMALIZATION", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
 
 
 def _snapshot_confirms_click_text(page_snapshot: PageSnapshot | None, text_value: str) -> bool:
@@ -96,8 +90,6 @@ def normalize_benchmark_plan(
     page_snapshot: PageSnapshot | None = None,
 ) -> TaskSpec:
     if not benchmark_context:
-        return plan
-    if not ENABLE_BENCHMARK_PLAN_NORMALIZATION:
         return plan
 
     payload = plan.model_dump(mode="json")
