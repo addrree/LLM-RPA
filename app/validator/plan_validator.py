@@ -9,7 +9,7 @@ from app.schemas.task_spec import TaskSpec
 
 ALLOWED_ACTIONS = CANONICAL_ACTIONS
 
-TECHNICAL_ARTIFACT_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
+TECHNICAL_ARTIFACT_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot", "page_snapshot"}
 TOO_BROAD_CLICK_SELECTORS = {"a", "button", "*", "[role='button']", '[role="button"]'}
 
 
@@ -554,14 +554,15 @@ class PlanValidator:
 
         produced = [str(step.save_as).strip() for step in plan.steps if isinstance(step.save_as, str) and step.save_as.strip()]
         produced_set = set(produced)
-        missing = [field for field in required if field not in produced_set]
+        produced_business_fields = produced_set - TECHNICAL_ARTIFACT_FIELDS
+        missing = [field for field in required if field not in produced_business_fields]
         if missing:
             raise PlanValidationError(
                 "Benchmark contract missing required top-level fields: "
-                f"{missing}. Produced={sorted(produced_set)}"
+                f"{missing}. Produced={sorted(produced_business_fields)}"
             )
 
-        disallowed = sorted(field for field in produced_set if field not in set(required))
+        disallowed = sorted(field for field in produced_business_fields if field not in set(required))
         if disallowed:
             raise PlanValidationError(
                 "Benchmark contract disallows extra top-level business fields: "
