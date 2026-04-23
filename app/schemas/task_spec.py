@@ -15,6 +15,7 @@ ActionType = Literal[
     "extract_html",
     "extract_items",
     "extract_structured_items",
+    "extract_section_lines",
     "extract_value_from_section",
     "extract_structured_items_from_region",
     "compare_structured_values",

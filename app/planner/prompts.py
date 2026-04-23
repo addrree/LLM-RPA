@@ -20,7 +20,7 @@ PLANNER_SYSTEM_PROMPT = """
   "steps": [
     {
       "step_id": 1,
-      "action": "open_url|click|navigate_to_relevant_section|type|wait_for|extract_text|extract_html|extract_items|extract_structured_items|extract_value_from_section|extract_structured_items_from_region|compare_structured_values|assert_page_contains|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
+      "action": "open_url|click|navigate_to_relevant_section|type|wait_for|extract_text|extract_html|extract_items|extract_structured_items|extract_section_lines|extract_value_from_section|extract_structured_items_from_region|compare_structured_values|assert_page_contains|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
       "args": {},
       "save_as": "optional_string"
     }
@@ -74,8 +74,8 @@ PLANNER_SYSTEM_PROMPT = """
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
    - navigation_then_extraction: предпочитай navigate_to_relevant_section, затем extraction.
    - multi_step_information_retrieval: используй формальный pipeline:
-     1) extract/save_as=section_a_data,
-     2) extract/save_as=section_b_data,
+     1) extract_section_lines/save_as=source_a,
+     2) extract_section_lines/save_as=source_b,
      3) compare_structured_values с save_as=combined_result (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке страницы и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
 19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
@@ -98,9 +98,9 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Path hint: open_url -> extract_structured_items(save_as='items') -> finish."
         ),
         "multi_step_information_retrieval": (
-            "Path hint: open_url -> observe_page -> extract_structured_items(save_as='source_a') "
-            "-> extract_structured_items(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
-            "Do not use extract_value_from_section or extract_structured_items_from_region."
+            "Path hint: open_url -> observe_page -> extract_section_lines(save_as='source_a') "
+            "-> extract_section_lines(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
+            "Do not use extract_structured_items for compare-family defaults."
         ),
         "anchored_value_extraction": (
             "Path hint: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish."
@@ -237,9 +237,9 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "Используй стабильный путь: open_url -> extract_structured_items(save_as='items') -> finish."
         ),
         "multi_step_information_retrieval": (
-            "Используй стабильный compare pipeline: open_url -> observe_page -> extract_structured_items(save_as='source_a') "
-            "-> extract_structured_items(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
-            "Не используй extract_value_from_section/extract_structured_items_from_region."
+            "Используй стабильный compare pipeline: open_url -> observe_page -> extract_section_lines(save_as='source_a') "
+            "-> extract_section_lines(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
+            "Не используй regex-based extract_structured_items как compare default."
         ),
         "anchored_value_extraction": (
             "Используй стабильный путь: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
