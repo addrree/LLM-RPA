@@ -439,6 +439,7 @@ def test_normalize_benchmark_plan_anchored_only_drops_page_language():
         scenario_anchor_candidates=["Email", "Contact", "Support"],
         scenario_anchor_matching_mode="auto",
         scenario_page_language="en",
+        required_top_level_fields=["value"],
     )
     normalized = normalize_benchmark_plan(plan, ctx)
     anchored_step = next(step for step in normalized.steps if step.action == "extract_value_near_anchor")

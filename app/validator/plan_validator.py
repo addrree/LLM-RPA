@@ -1,7 +1,6 @@
 from urllib.parse import urlparse
 import re
 
-from app.benchmark.contract import required_contract_fields
 from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_MAX_VERIFICATION_RETRIES, GLOBAL_TIMEOUT_SEC
 from app.planner.action_vocab import CANONICAL_ACTIONS
 from app.schemas.task_spec import TaskSpec
@@ -45,9 +44,6 @@ class PlanValidator:
     def _validate_actions(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
         effective_allowed_actions = allowed_actions or ALLOWED_ACTIONS
         for step in plan.steps:
-            benchmark_guardrail_error = str(step.args.get("__benchmark_guardrail_error", "")).strip()
-            if benchmark_guardrail_error:
-                raise PlanValidationError(benchmark_guardrail_error)
             if step.action not in effective_allowed_actions:
                 raise PlanValidationError(f"Unsupported action: {step.action}")
 
@@ -538,11 +534,11 @@ class PlanValidator:
     def _validate_benchmark_contract(self, plan: TaskSpec, *, benchmark_context: dict | None) -> None:
         if not benchmark_context:
             return
-        task_family = str(benchmark_context.get("task_family", "")).strip()
-        required = required_contract_fields(
-            task_family=task_family,
-            scenario_required_fields=benchmark_context.get("required_top_level_fields"),
-        )
+        required = [
+            str(field).strip()
+            for field in (benchmark_context.get("required_top_level_fields") or [])
+            if str(field).strip() and str(field).strip() not in TECHNICAL_ARTIFACT_FIELDS
+        ]
         if not required:
             return
 
@@ -560,13 +556,6 @@ class PlanValidator:
             raise PlanValidationError(
                 "Benchmark contract missing required top-level fields: "
                 f"{missing}. Produced={sorted(produced_business_fields)}"
-            )
-
-        disallowed = sorted(field for field in produced_business_fields if field not in set(required))
-        if disallowed:
-            raise PlanValidationError(
-                "Benchmark contract disallows extra top-level business fields: "
-                f"{disallowed}. Required={required}"
             )
 
     @staticmethod
