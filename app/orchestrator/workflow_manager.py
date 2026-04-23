@@ -51,93 +51,19 @@ def _infer_anchor_value_type(goal_text: str) -> str:
     return "number"
 
 
-def _fallback_structured_pattern(group_count: int) -> str:
-    if group_count <= 1:
-        return r"(?s)(.+)"
-    groups = ["(.+?)"] * max(group_count - 1, 0) + ["(.+)"]
-    return r"(?s)" + r"\s+".join(groups)
-
-
-def _normalize_structured_fields(
-    fields,
-    *,
-    expected_field_names: list[str] | None = None,
-) -> dict:
+def _canonical_structured_args(args: dict | None, *, default_limit: int) -> dict:
+    payload = args if isinstance(args, dict) else {}
+    pattern = str(payload.get("pattern", "")).strip() or r"(.+)"
+    fields = payload.get("fields")
     if not isinstance(fields, dict) or not fields:
-        normalized_expected = [str(name).strip() for name in (expected_field_names or []) if str(name).strip()]
-        if normalized_expected:
-            return {field_name: index + 1 for index, field_name in enumerate(normalized_expected)}
-        return {"value": 1}
-
-    normalized_fields: dict = {}
-    for raw_name, spec in fields.items():
-        field_name = str(raw_name).strip()
-        if not field_name:
-            continue
-        if isinstance(spec, int):
-            normalized_fields[field_name] = spec if spec > 0 else 1
-            continue
-        if isinstance(spec, dict):
-            group_index = spec.get("group_index", 1)
-            if not isinstance(group_index, int) or group_index <= 0:
-                group_index = 1
-            normalized_rule = {"group_index": group_index}
-            if isinstance(spec.get("normalize_number"), bool):
-                normalized_rule["normalize_number"] = spec["normalize_number"]
-            if spec.get("number_type") in {"int", "float"}:
-                normalized_rule["number_type"] = spec["number_type"]
-            if isinstance(spec.get("strip_plus"), bool):
-                normalized_rule["strip_plus"] = spec["strip_plus"]
-            normalized_fields[field_name] = normalized_rule
-            continue
-        normalized_fields[field_name] = 1
-
-    if normalized_fields:
-        return normalized_fields
-    return {"value": 1}
-
-
-def _max_structured_group_index(fields: dict) -> int:
-    max_index = 1
-    for spec in fields.values():
-        if isinstance(spec, int):
-            max_index = max(max_index, spec)
-        elif isinstance(spec, dict):
-            max_index = max(max_index, int(spec.get("group_index", 1) or 1))
-    return max_index
-
-
-def _canonical_structured_args(
-    args: dict | None,
-    *,
-    default_limit: int,
-    expected_field_names: list[str] | None = None,
-) -> dict:
-    payload = dict(args) if isinstance(args, dict) else {}
-    fields = _normalize_structured_fields(payload.get("fields"), expected_field_names=expected_field_names)
-    max_group_index = _max_structured_group_index(fields)
-
-    pattern = str(payload.get("pattern", "")).strip()
-    if pattern:
-        try:
-            compiled = re.compile(pattern)
-            if compiled.groups < max_group_index:
-                pattern = _fallback_structured_pattern(max_group_index)
-        except re.error:
-            pattern = _fallback_structured_pattern(max_group_index)
-    else:
-        pattern = _fallback_structured_pattern(max_group_index)
-
+        fields = {"value": 1}
     limit = payload.get("limit")
     if not _is_positive_int(limit):
         limit = default_limit
-    payload["pattern"] = pattern
-    payload["fields"] = fields
-    payload["limit"] = limit
-    return payload
+    return {"pattern": pattern, "fields": fields, "limit": limit}
 
 
-def _canonicalize_multi_step_compare_steps(steps: list[dict], *, expected_field_names: list[str] | None = None) -> list[dict]:
+def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
     stable_candidates = [
         step for step in steps if str(step.get("action", "")).strip() == "extract_structured_items"
     ]
@@ -157,7 +83,6 @@ def _canonicalize_multi_step_compare_steps(steps: list[dict], *, expected_field_
             "args": _canonical_structured_args(
                 source_a_candidate.get("args") if source_a_candidate else None,
                 default_limit=5,
-                expected_field_names=expected_field_names,
             ),
             "save_as": "source_a",
         }
@@ -168,7 +93,6 @@ def _canonicalize_multi_step_compare_steps(steps: list[dict], *, expected_field_
             "args": _canonical_structured_args(
                 source_b_candidate.get("args") if source_b_candidate else None,
                 default_limit=5,
-                expected_field_names=expected_field_names,
             ),
             "save_as": "source_b",
         }
@@ -189,7 +113,6 @@ def _canonicalize_family_steps(
     task_family: str,
     goal_text: str,
     fallback_save_as: str | None,
-    expected_item_fields: list[str] | None,
 ) -> list[dict]:
     if not steps:
         return steps
@@ -201,7 +124,7 @@ def _canonicalize_family_steps(
             for step in steps
         )
         if has_unstable_compare_actions:
-            steps = _canonicalize_multi_step_compare_steps(steps, expected_field_names=expected_item_fields)
+            steps = _canonicalize_multi_step_compare_steps(steps)
 
     extraction_indices = [
         index for index, step in enumerate(steps) if str(step.get("action", "")).strip().startswith("extract")
@@ -226,12 +149,8 @@ def _canonicalize_family_steps(
         if task_family == "repeated_structured_items" and action == "extract_structured_items":
             if not _is_non_empty_str(step.get("save_as")):
                 step["save_as"] = "items"
-            step["args"] = _canonical_structured_args(
-                args,
-                default_limit=10,
-                expected_field_names=expected_item_fields,
-            )
-            args = step["args"]
+            if not _is_positive_int(args.get("limit")):
+                args["limit"] = 10
 
         if task_family == "navigation_then_extraction" and action == "click":
             has_text = _is_non_empty_str(args.get("text"))
@@ -260,30 +179,6 @@ def _canonicalize_family_steps(
             ).strip() == "h1":
                 args["selector"] = "h1"
                 args.pop("text", None)
-        if task_family == "navigation_then_extraction" and action == "wait_for":
-            has_wait_contract = any(
-                _is_non_empty_str(args.get(key))
-                for key in ("selector", "url_contains", "text")
-            )
-            if not has_wait_contract:
-                previous_click_args = {}
-                for previous_step in reversed(steps[:index]):
-                    if str(previous_step.get("action", "")).strip() == "click":
-                        previous_click_args = previous_step.get("args") if isinstance(previous_step.get("args"), dict) else {}
-                        break
-                href_contains = str(previous_click_args.get("href_contains", "")).strip()
-                if href_contains:
-                    args["url_contains"] = href_contains
-                else:
-                    args["selector"] = "h1"
-
-        if task_family == "multi_step_information_retrieval" and action == "extract_structured_items":
-            step["args"] = _canonical_structured_args(
-                args,
-                default_limit=5,
-                expected_field_names=expected_item_fields,
-            )
-            args = step["args"]
 
         if final_extraction_index is not None and index == final_extraction_index:
             if task_family in {"single_value_extraction", "navigation_then_extraction"}:
@@ -295,42 +190,6 @@ def _canonicalize_family_steps(
 
     if task_family == "single_value_extraction" and fallback_save_as == "value" and final_extraction_index is not None:
         steps[final_extraction_index]["save_as"] = "value"
-    if task_family == "multi_step_information_retrieval":
-        structured_steps = [step for step in steps if str(step.get("action", "")).strip() == "extract_structured_items"]
-        if len(structured_steps) == 1:
-            duplicate_step = {
-                "action": "extract_structured_items",
-                "args": _canonical_structured_args(
-                    structured_steps[0].get("args") if isinstance(structured_steps[0], dict) else {},
-                    default_limit=5,
-                    expected_field_names=expected_item_fields,
-                ),
-                "save_as": "source_b",
-            }
-            insert_index = steps.index(structured_steps[0]) + 1
-            steps.insert(insert_index, duplicate_step)
-            structured_steps = [step for step in steps if str(step.get("action", "")).strip() == "extract_structured_items"]
-        if structured_steps:
-            structured_steps[0]["save_as"] = "source_a"
-        if len(structured_steps) >= 2:
-            structured_steps[1]["save_as"] = "source_b"
-
-        compare_steps = [step for step in steps if str(step.get("action", "")).strip() == "compare_structured_values"]
-        if compare_steps:
-            compare_step = compare_steps[-1]
-            compare_args = compare_step.get("args") if isinstance(compare_step.get("args"), dict) else {}
-            compare_args["left_key"] = "source_a"
-            compare_args["right_key"] = "source_b"
-            compare_step["args"] = compare_args
-            compare_step["save_as"] = "combined_result"
-        else:
-            steps.append(
-                {
-                    "action": "compare_structured_values",
-                    "args": {"left_key": "source_a", "right_key": "source_b"},
-                    "save_as": "combined_result",
-                }
-            )
     return steps
 
 
@@ -400,11 +259,6 @@ def normalize_benchmark_plan(
         task_family=task_family,
         goal_text=str(payload.get("goal", "")),
         fallback_save_as=fallback_save_as,
-        expected_item_fields=[
-            str(field).strip()
-            for field in (benchmark_context.get("expected_item_fields") or [])
-            if str(field).strip()
-        ],
     )
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
