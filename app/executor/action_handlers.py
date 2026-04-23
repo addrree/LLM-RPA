@@ -249,6 +249,43 @@ class ActionHandlers:
         )
         return items
 
+    async def extract_section_lines(self, page, args, runtime_state=None):
+        heading_text = str(args.get("heading_text", "")).strip()
+        if not heading_text:
+            raise ValueError("extract_section_lines requires non-empty 'heading_text'")
+        limit = int(args.get("limit", 0))
+        if limit <= 0:
+            raise ValueError("extract_section_lines requires positive integer 'limit'")
+
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
+        lines = self._split_visible_lines(source_text)
+        heading_index = self._find_heading_index(lines, heading_text=heading_text, ignore_case=bool(args.get("ignore_case", True)))
+        if heading_index is None:
+            raise ValueError(f"Section heading not found: {heading_text!r}")
+
+        stop_at_heading = bool(args.get("stop_at_heading", True))
+        min_line_length = int(args.get("min_line_length", 1))
+        if min_line_length <= 0:
+            min_line_length = 1
+
+        collected: list[str] = []
+        for line in lines[heading_index + 1 :]:
+            if stop_at_heading and self._looks_like_heading_line(line):
+                break
+            normalized = self._normalize_line(line)
+            if len(normalized) < min_line_length:
+                continue
+            if normalized in collected:
+                continue
+            collected.append(normalized)
+            if len(collected) >= limit:
+                break
+
+        args["_executor_note"] = (
+            f"extract_section_lines heading={heading_text!r}; start_index={heading_index}; collected={len(collected)}"
+        )
+        return collected
+
     async def observe_page(self, page, args, runtime_state=None):
         snapshot = await self.page_observer.observe_page(
             page,
@@ -1075,6 +1112,51 @@ class ActionHandlers:
                 ),
                 details={"requested_group": requested, "available_groups": available_groups},
             ) from exc
+
+    @staticmethod
+    def _normalize_line(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "")).strip(" \t\r\n-•*|")
+
+    @classmethod
+    def _split_visible_lines(cls, text: str) -> list[str]:
+        raw_lines = re.split(r"[\r\n]+", str(text or ""))
+        lines: list[str] = []
+        for line in raw_lines:
+            normalized = cls._normalize_line(line)
+            if normalized:
+                lines.append(normalized)
+        return lines
+
+    @classmethod
+    def _find_heading_index(cls, lines: list[str], *, heading_text: str, ignore_case: bool) -> int | None:
+        target = cls._normalize_line(heading_text)
+        if not target:
+            return None
+        if ignore_case:
+            target_cmp = target.lower()
+            for idx, line in enumerate(lines):
+                candidate = cls._normalize_line(line).lower()
+                if candidate == target_cmp or target_cmp in candidate:
+                    return idx
+            return None
+        for idx, line in enumerate(lines):
+            candidate = cls._normalize_line(line)
+            if candidate == target or target in candidate:
+                return idx
+        return None
+
+    @classmethod
+    def _looks_like_heading_line(cls, line: str) -> bool:
+        token = cls._normalize_line(line)
+        if not token:
+            return False
+        if len(token) <= 80 and re.fullmatch(r"[A-Za-zА-Яа-я0-9][A-Za-zА-Яа-я0-9\s/&:+()\-]{1,79}", token):
+            if token.endswith(":"):
+                return True
+            words = token.split()
+            if 1 <= len(words) <= 8 and sum(ch.isalpha() for ch in token) >= 3:
+                return True
+        return False
 
     async def _collect_anchor_candidates(
         self,

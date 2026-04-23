@@ -76,36 +76,77 @@ def _canonical_structured_args(args: dict | None, *, default_limit: int) -> dict
     return {"pattern": pattern, "fields": fields, "limit": limit}
 
 
+def _canonical_section_lines_args(args: dict | None, *, default_heading: str, default_limit: int) -> dict:
+    payload = args if isinstance(args, dict) else {}
+    heading_text = ""
+    for key in ("heading_text", "section_heading", "section_title", "title", "label", "anchor_text"):
+        value = payload.get(key)
+        if _is_non_empty_str(value):
+            heading_text = str(value).strip()
+            break
+    if not heading_text:
+        heading_text = default_heading
+
+    limit = payload.get("limit")
+    if not _is_positive_int(limit):
+        limit = default_limit
+
+    canonical = {
+        "heading_text": heading_text,
+        "limit": limit,
+        "stop_at_heading": bool(payload.get("stop_at_heading", True)),
+    }
+    if _is_positive_int(payload.get("min_line_length")):
+        canonical["min_line_length"] = int(payload["min_line_length"])
+    if "ignore_case" in payload:
+        canonical["ignore_case"] = bool(payload.get("ignore_case"))
+    return canonical
+
+
 def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
     stable_candidates = [
-        step for step in steps if str(step.get("action", "")).strip() == "extract_structured_items"
+        step
+        for step in steps
+        if str(step.get("action", "")).strip()
+        in {"extract_structured_items", "extract_structured_items_from_region", "extract_value_from_section", "extract_section_lines"}
     ]
     source_a_candidate = stable_candidates[0] if len(stable_candidates) >= 1 else None
     source_b_candidate = stable_candidates[1] if len(stable_candidates) >= 2 else source_a_candidate
 
-    prefix_steps: list[dict] = []
+    open_step = None
+    observe_step = None
     for step in steps:
         action = str(step.get("action", "")).strip()
-        if action in {"open_url", "observe_page"}:
-            prefix_steps.append(step)
+        if action == "open_url" and open_step is None:
+            open_step = step
+        if action == "observe_page" and observe_step is None:
+            observe_step = step
 
-    rewritten = list(prefix_steps)
+    rewritten: list[dict] = []
+    if open_step is not None:
+        rewritten.append(open_step)
+    if observe_step is not None:
+        rewritten.append(observe_step)
+    else:
+        rewritten.append({"action": "observe_page", "args": {}, "save_as": "page_snapshot"})
     rewritten.append(
         {
-            "action": "extract_structured_items",
-            "args": _canonical_structured_args(
+            "action": "extract_section_lines",
+            "args": _canonical_section_lines_args(
                 source_a_candidate.get("args") if source_a_candidate else None,
-                default_limit=5,
+                default_heading="Section A",
+                default_limit=7,
             ),
             "save_as": "source_a",
         }
     )
     rewritten.append(
         {
-            "action": "extract_structured_items",
-            "args": _canonical_structured_args(
+            "action": "extract_section_lines",
+            "args": _canonical_section_lines_args(
                 source_b_candidate.get("args") if source_b_candidate else None,
-                default_limit=5,
+                default_heading="Section B",
+                default_limit=7,
             ),
             "save_as": "source_b",
         }
@@ -160,8 +201,8 @@ def _canonicalize_family_steps(
             step["args"] = canonical
             args = canonical
 
-        if task_family == "multi_step_information_retrieval" and action == "extract_structured_items":
-            canonical = _canonical_structured_args(args, default_limit=5)
+        if task_family == "multi_step_information_retrieval" and action == "extract_section_lines":
+            canonical = _canonical_section_lines_args(args, default_heading="Section", default_limit=7)
             step["args"] = canonical
             args = canonical
 
@@ -173,6 +214,27 @@ def _canonicalize_family_steps(
             has_role_name = _is_non_empty_str(args.get("role")) and _is_non_empty_str(args.get("name"))
             if has_text and not (has_exact or has_scope or has_href or has_role_name):
                 args["exact"] = True
+
+        if task_family == "navigation_then_extraction" and action == "wait_for":
+            has_text = _is_non_empty_str(args.get("text"))
+            has_selector = _is_non_empty_str(args.get("selector"))
+            has_url_contains = _is_non_empty_str(args.get("url_contains"))
+            has_scope = _is_non_empty_str(args.get("scope_selector"))
+            has_exact = bool(args.get("exact"))
+            if has_text and not (has_selector or has_url_contains or has_scope or has_exact):
+                selector_from_future_extract = None
+                for candidate in steps[index + 1 :]:
+                    if str(candidate.get("action", "")).strip() != "extract_text":
+                        continue
+                    candidate_args = candidate.get("args")
+                    if isinstance(candidate_args, dict) and _is_non_empty_str(candidate_args.get("selector")):
+                        selector_from_future_extract = str(candidate_args["selector"]).strip()
+                        break
+                if selector_from_future_extract:
+                    args.pop("text", None)
+                    args["selector"] = selector_from_future_extract
+                else:
+                    args["exact"] = True
 
         if final_extraction_index is not None and index == final_extraction_index:
             if task_family in {"single_value_extraction", "navigation_then_extraction"}:
@@ -213,7 +275,11 @@ def normalize_benchmark_plan(
     fallback_save_as = normalized_required[0] if len(normalized_required) == 1 else None
 
     normalized_steps: list[dict] = []
-    unstable_multi_step_actions = {"extract_value_from_section", "extract_structured_items_from_region"}
+    unstable_multi_step_actions = {
+        "extract_structured_items",
+        "extract_value_from_section",
+        "extract_structured_items_from_region",
+    }
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -285,6 +351,7 @@ class WorkflowManager:
         "extract_html",
         "extract_items",
         "extract_structured_items",
+        "extract_section_lines",
         "extract_value_from_section",
         "extract_structured_items_from_region",
         "compare_structured_values",

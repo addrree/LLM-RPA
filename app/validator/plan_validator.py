@@ -65,6 +65,8 @@ class PlanValidator:
                 self._validate_extract_items(step.args, step.save_as)
             if step.action == "extract_structured_items":
                 self._validate_extract_structured_items(step.args, step.save_as)
+            if step.action == "extract_section_lines":
+                self._validate_extract_section_lines(step.args, step.save_as)
             if step.action == "extract_value_from_section":
                 self._validate_extract_value_from_section(step.args, step.save_as)
             if step.action == "extract_structured_items_from_region":
@@ -351,6 +353,23 @@ class PlanValidator:
             raise PlanValidationError("extract_value_from_section requires 'field_selector' or 'pattern'")
         if not save_as:
             raise PlanValidationError("extract_value_from_section requires 'save_as'")
+
+    @staticmethod
+    def _validate_extract_section_lines(args: dict, save_as: str | None) -> None:
+        if not str(args.get("heading_text", "")).strip():
+            raise PlanValidationError("extract_section_lines requires non-empty 'heading_text'")
+        limit = args.get("limit")
+        if not isinstance(limit, int) or limit <= 0:
+            raise PlanValidationError("extract_section_lines requires positive integer 'limit'")
+        min_line_length = args.get("min_line_length")
+        if min_line_length is not None and (not isinstance(min_line_length, int) or min_line_length <= 0):
+            raise PlanValidationError("extract_section_lines min_line_length must be a positive integer")
+        if "ignore_case" in args and not isinstance(args.get("ignore_case"), bool):
+            raise PlanValidationError("extract_section_lines ignore_case must be boolean")
+        if "stop_at_heading" in args and not isinstance(args.get("stop_at_heading"), bool):
+            raise PlanValidationError("extract_section_lines stop_at_heading must be boolean")
+        if not save_as:
+            raise PlanValidationError("extract_section_lines requires 'save_as'")
 
     @staticmethod
     def _validate_extract_structured_items_from_region(args: dict, save_as: str | None) -> None:
