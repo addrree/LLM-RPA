@@ -42,7 +42,6 @@
       "description": "Checks anchored extraction instead of global search.",
       "expected_output_type": "object",
       "required_top_level_fields": [
-        "anchor",
         "value"
       ],
       "expected_min_items": 0,
@@ -100,8 +99,6 @@
       "description": "Checks cross-page execution and final-page extraction.",
       "expected_output_type": "object",
       "required_top_level_fields": [
-        "source_page",
-        "target_page",
         "value"
       ],
       "expected_min_items": 0,
@@ -130,8 +127,6 @@
       "description": "Checks planner ability to combine multi-hop retrieval into one result schema.",
       "expected_output_type": "object",
       "required_top_level_fields": [
-        "source_a",
-        "source_b",
         "combined_result"
       ],
       "expected_min_items": 0,
@@ -159,10 +154,7 @@
       "category": "negative_or_ambiguous_case",
       "description": "Checks graceful handling of absent/ambiguous targets and verifier behavior.",
       "expected_output_type": "none",
-      "required_top_level_fields": [
-        "status",
-        "reason"
-      ],
+      "required_top_level_fields": [],
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": false,

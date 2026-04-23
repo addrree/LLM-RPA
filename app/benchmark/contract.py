@@ -4,9 +4,11 @@ from typing import Any
 
 BENCHMARK_CONTRACT_FIELDS_BY_TASK_FAMILY: dict[str, list[str]] = {
     "single_value_extraction": ["value"],
-    # Controlled rollback: disable strict family-specific contracts temporarily.
-    # Keep only the minimal safe contract for scalar extraction.
+    "anchored_value_extraction": ["value"],
     "repeated_structured_items": ["items"],
+    "navigation_then_extraction": ["value"],
+    "multi_step_information_retrieval": ["combined_result"],
+    "negative_or_ambiguous_case": [],
 }
 
 EXTRACTION_ACTIONS = {
@@ -24,22 +26,28 @@ def required_contract_fields(*, task_family: str, scenario_required_fields: list
     contract = BENCHMARK_CONTRACT_FIELDS_BY_TASK_FAMILY.get(str(task_family).strip())
     if contract:
         return list(contract)
-    # Controlled cleanup: do not inherit strict scenario-level required field contracts
-    # for families without explicit safe mapping.
-    _ = scenario_required_fields
-    return []
+    return [str(field).strip() for field in (scenario_required_fields or []) if str(field).strip()]
 
 
 def normalize_payload_for_task_family_contract(payload: dict[str, Any], *, task_family: str) -> dict[str, Any]:
     normalized = dict(payload)
     steps = [dict(step) for step in normalized.get("steps", []) if isinstance(step, dict)]
 
-    # Temporary controlled rollback:
-    # keep only minimal, safe rewrites required by current benchmark consumers.
-    if task_family == "single_value_extraction":
+    # Minimal safe mapping: keep scalar extraction stable for benchmark verifiers.
+    if task_family in {"single_value_extraction", "anchored_value_extraction", "navigation_then_extraction"}:
         for step in steps:
             if step.get("action") in EXTRACTION_ACTIONS:
                 step["save_as"] = "value"
+    elif task_family == "repeated_structured_items":
+        for step in steps:
+            if step.get("action") in EXTRACTION_ACTIONS:
+                step["save_as"] = "items"
+                break
+    elif task_family == "multi_step_information_retrieval":
+        for step in steps:
+            if step.get("action") == "compare_structured_values":
+                step["save_as"] = "combined_result"
+                break
 
     normalized["steps"] = steps
     return normalized

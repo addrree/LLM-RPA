@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import re
 from datetime import datetime, timezone
 
 from app.config import RAW_LLM_DIR
@@ -21,69 +20,6 @@ ENABLE_BENCHMARK_CONTRACT_REWRITE = os.getenv("ENABLE_BENCHMARK_CONTRACT_REWRITE
     "yes",
     "on",
 }
-
-
-def _snapshot_confirms_click_text(page_snapshot: PageSnapshot | None, text_value: str) -> bool:
-    needle = str(text_value or "").strip().lower()
-    if not needle or page_snapshot is None:
-        return False
-    candidates = [
-        *(page_snapshot.visible_headings or []),
-        *(page_snapshot.visible_labels or []),
-        *(page_snapshot.visible_buttons or []),
-    ]
-    page_text = str(page_snapshot.page_text or "").strip() or str(page_snapshot.page_text_excerpt or "").strip()
-    if page_text:
-        candidates.append(page_text)
-    for candidate in candidates:
-        haystack = str(candidate).strip().lower()
-        if haystack and needle in haystack:
-            return True
-    return False
-
-
-def _is_weak_navigation_wait(args: dict) -> bool:
-    has_selector = bool(str(args.get("selector", "")).strip())
-    has_url_contains = bool(str(args.get("url_contains", "")).strip())
-    text_value = str(args.get("text", "")).strip()
-    has_text = bool(text_value)
-    has_scope = bool(str(args.get("scope_selector", "")).strip())
-    has_exact = bool(args.get("exact", False))
-    weak_text_wait = has_text and not has_selector and not has_url_contains and not has_scope
-    generic_text_wait = text_value.lower() in {"python", "home", "docs", "pricing", "policy"} and not has_exact
-    return weak_text_wait or generic_text_wait
-
-
-def _promote_navigation_wait_for(
-    *,
-    wait_args: dict,
-    navigation_click_args: dict | None,
-) -> bool:
-    if not navigation_click_args:
-        return False
-    href_contains = str(navigation_click_args.get("href_contains", "")).strip()
-    role = str(navigation_click_args.get("role", "")).strip()
-    name = str(navigation_click_args.get("name", "")).strip()
-    selector = str(navigation_click_args.get("selector", "")).strip()
-    has_role_name = bool(role and name)
-    has_selector = bool(selector)
-
-    if href_contains:
-        wait_args["url_contains"] = href_contains
-        wait_args.pop("text", None)
-        wait_args.pop("selector", None)
-        wait_args.pop("scope_selector", None)
-        wait_args.pop("exact", None)
-        return True
-    if has_role_name or has_selector:
-        wait_args["selector"] = "main h1, article h1, [role='main'] h1, main, article, [role='main']"
-        wait_args.pop("text", None)
-        wait_args.pop("scope_selector", None)
-        wait_args.pop("exact", None)
-        return True
-    return False
-
-
 def normalize_benchmark_plan(
     plan: TaskSpec,
     benchmark_context: dict | None,
@@ -101,13 +37,6 @@ def normalize_benchmark_plan(
         if str(action).strip()
     }
     fallback_save_as = "value"
-    task_family = str((benchmark_context or {}).get("task_family", "")).strip()
-    benchmark_anchor_candidates = [
-        str(item).strip()
-        for item in (benchmark_context or {}).get("scenario_anchor_candidates", [])
-        if str(item).strip()
-    ]
-    benchmark_anchor_matching_mode = str((benchmark_context or {}).get("scenario_anchor_matching_mode", "")).strip().lower()
     if isinstance(required_fields, list) and required_fields:
         normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
         if "value" in normalized_required:
@@ -116,9 +45,6 @@ def normalize_benchmark_plan(
             fallback_save_as = normalized_required[0]
 
     normalized_steps: list[dict] = []
-    compare_step_idx: int | None = None
-    extraction_step_indices: list[int] = []
-    last_navigation_click_args: dict | None = None
     for step in steps:
         if not isinstance(step, dict):
             continue
@@ -135,229 +61,18 @@ def normalize_benchmark_plan(
 
         if action == "extract_text" and not str(args.get("selector", "")).strip():
             args["selector"] = "h1"
-        if action == "extract_pattern_from_page_text" and not str(args.get("pattern", "")).strip():
-            args["pattern"] = "(.{1,200})"
-            args.setdefault("group_index", 1)
         if action == "extract_value_near_anchor":
-            if not str(args.get("anchor_text", "")).strip() and not args.get("anchor_candidates"):
-                args["anchor_candidates"] = ["Contact", "Support", "Email", "Help", "Phone"]
-            if not str(args.get("value_type", "")).strip() and not str(args.get("value_pattern", "")).strip():
-                args["value_type"] = "email"
             # Language is detected by executor from page content/DOM.
             args.pop("page_language", None)
-            if task_family == "anchored_value_extraction":
-                if benchmark_anchor_candidates:
-                    args["anchor_candidates"] = list(benchmark_anchor_candidates)
-                    provided_anchor_text = str(args.get("anchor_text", "")).strip()
-                    if provided_anchor_text and provided_anchor_text not in benchmark_anchor_candidates:
-                        args.pop("anchor_text", None)
-                if benchmark_anchor_matching_mode in {"auto", "exact", "contains"}:
-                    args["anchor_matching_mode"] = benchmark_anchor_matching_mode
-        if action == "extract_value_from_section":
-            if not str(args.get("section_selector", "")).strip():
-                args["section_selector"] = "main"
-            if not str(args.get("field_selector", "")).strip() and not str(args.get("pattern", "")).strip():
-                args["pattern"] = "(.{1,200})"
-        if action == "extract_structured_items_from_region":
-            if not str(args.get("region_selector", "")).strip():
-                args["region_selector"] = "main"
-            if not str(args.get("container_selector", "")).strip():
-                args["container_selector"] = "li, tr, article, section"
-            if not isinstance(args.get("fields"), dict) or not args.get("fields"):
-                args["fields"] = {"value": "*"}
-            limit = args.get("limit")
-            if not isinstance(limit, int) or limit <= 0:
-                args["limit"] = 5
-        if action == "extract_structured_items":
-            if not str(args.get("pattern", "")).strip():
-                args["pattern"] = "(.+)"
-            limit = args.get("limit")
-            if not isinstance(limit, int) or limit <= 0:
-                args["limit"] = 5
-            if not isinstance(args.get("fields"), dict) or not args.get("fields"):
-                args["fields"] = {"value": 1}
-            if task_family == "multi_step_information_retrieval":
-                section_hint = str(args.get("section", "")).strip()
-                region_hint = str(args.get("region", "")).strip()
-                if section_hint or region_hint:
-                    args["__benchmark_guardrail_error"] = (
-                        "benchmark guardrail: multi_step_information_retrieval disallows compare extraction via "
-                        "extract_structured_items + section/region hints; use extract_value_from_section or "
-                        "extract_structured_items_from_region and persist source_a/source_b"
-                    )
-                else:
-                    args["__benchmark_guardrail_error"] = (
-                        "benchmark guardrail: multi_step_information_retrieval disallows legacy "
-                        "extract_structured_items compare path; use section-aware extraction actions"
-                    )
-        if action == "wait_for" and not any(str(args.get(k, "")).strip() for k in ("selector", "url_contains", "text")):
-            args["text"] = "Python"
-        if task_family == "navigation_then_extraction" and action == "wait_for":
-            if _is_weak_navigation_wait(args):
-                promoted = _promote_navigation_wait_for(
-                    wait_args=args,
-                    navigation_click_args=last_navigation_click_args,
-                )
-                if not promoted:
-                    args["__benchmark_guardrail_error"] = (
-                        "benchmark guardrail: navigation_then_extraction wait_for is too weak; "
-                        "use url_contains, visible selector in main content, or scoped text wait "
-                        "(scope_selector + exact=true)"
-                    )
-        if action in {"click", "navigate_to_relevant_section"} and task_family == "navigation_then_extraction":
-            last_navigation_click_args = dict(args)
         if action == "wait_for" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 12000
         if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 20000
 
-        if task_family == "single_value_extraction" and action == "extract_pattern_from_page_text":
-            pattern = str(args.get("pattern", "")).strip()
-            has_capture_groups = False
-            if pattern:
-                try:
-                    has_capture_groups = re.compile(pattern).groups > 0
-                except re.error:
-                    has_capture_groups = False
-            html_only_pattern = "<" in pattern and ">" in pattern
-            if not has_capture_groups and not bool(args.get("normalize_number", False)):
-                step["action"] = "extract_text"
-                step["args"] = {"selector": "h1"}
-            elif html_only_pattern:
-                step["action"] = "extract_text"
-                step["args"] = {"selector": "h1"}
-
-        if task_family == "navigation_then_extraction" and action == "click":
-            text_value = str(args.get("text", "")).strip()
-            has_text = bool(text_value)
-            has_selector = bool(str(args.get("selector", "")).strip())
-            has_role_name = bool(str(args.get("role", "")).strip() and str(args.get("name", "")).strip())
-            has_href_contains = bool(str(args.get("href_contains", "")).strip())
-            has_scope = bool(str(args.get("scope_selector", "")).strip())
-            has_exact = bool(args.get("exact"))
-            if has_text and not (has_selector or has_role_name or has_href_contains or has_scope or has_exact):
-                args["__benchmark_guardrail_error"] = (
-                    "benchmark guardrail: navigation_then_extraction click with bare text is disallowed; "
-                    "prefer href_contains, role+name, or specific selector"
-                )
-            text_only_contract = has_text and not (has_selector or has_role_name or has_href_contains)
-            if text_only_contract and has_scope and has_exact:
-                if not _snapshot_confirms_click_text(page_snapshot=page_snapshot, text_value=text_value):
-                    args["__benchmark_guardrail_error"] = (
-                        "benchmark guardrail: navigation_then_extraction click is over-constrained "
-                        "(text+scope_selector+exact=true) without explicit snapshot confirmation; "
-                        "normalize to href_contains/role+name or trigger corrective replanning"
-                    )
-
-        if task_family == "repeated_structured_items" and action == "extract_structured_items":
-            pattern = str(args.get("pattern", "")).strip()
-            compiled = None
-            if pattern:
-                try:
-                    compiled = re.compile(pattern)
-                except re.error:
-                    compiled = None
-            fields = args.get("fields")
-            if isinstance(fields, dict):
-                string_only_fields = all(isinstance(spec, str) for spec in fields.values())
-                if string_only_fields and fields:
-                    available_groups = compiled.groups if compiled is not None else 0
-                    required_groups = len(fields)
-                    if available_groups >= required_groups:
-                        args["fields"] = {
-                            str(field_name): idx
-                            for idx, field_name in enumerate(fields.keys(), start=1)
-                        }
-                        fields = args["fields"]
-                    else:
-                        args["__benchmark_guardrail_error"] = (
-                            "benchmark guardrail: repeated_structured_items extract_structured_items cannot "
-                            "normalize string field specs because pattern capture groups are insufficient; "
-                            f"need >= {required_groups}, available {available_groups}"
-                        )
-                referenced_groups: set[int] = set()
-                for spec in fields.values():
-                    if isinstance(spec, int):
-                        referenced_groups.add(spec)
-                    elif isinstance(spec, dict) and isinstance(spec.get("group_index"), int):
-                        referenced_groups.add(int(spec["group_index"]))
-                max_requested_group = max([g for g in referenced_groups if g > 0], default=0)
-                available_groups = compiled.groups if compiled is not None else 0
-                if max_requested_group > available_groups:
-                    args["__benchmark_guardrail_error"] = (
-                        "benchmark guardrail: repeated_structured_items extract_structured_items requires capture "
-                        f"groups in pattern; requested group {max_requested_group}, available {available_groups}"
-                    )
-
-        if task_family == "multi_step_information_retrieval":
-            if action == "extract_pattern_from_page_text":
-                args["__benchmark_guardrail_error"] = (
-                    "benchmark guardrail: multi_step_information_retrieval disallows regex-only extraction path; "
-                    "use extract_value_from_section/extract_structured_items_from_region + compare_structured_values"
-                )
-            if action == "compare_structured_values":
-                compare_step_idx = len(normalized_steps)
-                if not step.get("save_as"):
-                    step["save_as"] = "combined_result"
-            if action in {"extract_value_from_section", "extract_structured_items_from_region"}:
-                extraction_step_indices.append(len(normalized_steps))
-                if len(extraction_step_indices) == 1:
-                    step["save_as"] = "source_a"
-                elif len(extraction_step_indices) == 2:
-                    step["save_as"] = "source_b"
-
-        if task_family == "negative_or_ambiguous_case" and action == "extract_pattern_from_page_text":
-            pattern = str(args.get("pattern", "")).strip()
-            has_capture_groups = False
-            try:
-                has_capture_groups = re.compile(pattern).groups > 0 if pattern else False
-            except re.error:
-                has_capture_groups = False
-            if not has_capture_groups:
-                args["__benchmark_guardrail_error"] = (
-                    "benchmark guardrail: negative_or_ambiguous_case requires explicit capture-group regex for "
-                    "extract_pattern_from_page_text; broad prose matching is disallowed"
-                )
-
-        if action.startswith("extract"):
-            if task_family == "single_value_extraction":
-                # Benchmarks in this family require scalar output in top-level `value`
-                # for deterministic verification fast-path compatibility.
-                step["save_as"] = "value"
-            elif not step.get("save_as"):
-                step["save_as"] = fallback_save_as
+        if action.startswith("extract") and not step.get("save_as"):
+            step["save_as"] = fallback_save_as
 
         normalized_steps.append(step)
-
-    if task_family == "multi_step_information_retrieval" and compare_step_idx is not None:
-        compare_step = normalized_steps[compare_step_idx]
-        compare_args = compare_step.get("args", {}) if isinstance(compare_step.get("args"), dict) else {}
-        left_key = str(compare_args.get("left_key", "source_a")).strip() or "source_a"
-        right_key = str(compare_args.get("right_key", "source_b")).strip() or "source_b"
-        compare_args["left_key"] = left_key
-        compare_args["right_key"] = right_key
-        compare_step["args"] = compare_args
-
-        produced_before_compare = {
-            str(step.get("save_as")).strip()
-            for step in normalized_steps[:compare_step_idx]
-            if isinstance(step, dict) and isinstance(step.get("save_as"), str) and step.get("save_as").strip()
-        }
-        missing_key_targets = [key for key in (left_key, right_key) if key not in produced_before_compare]
-        candidate_indices = [
-            idx
-            for idx in extraction_step_indices
-            if idx < compare_step_idx
-            and normalized_steps[idx].get("action") in {"extract_value_from_section", "extract_structured_items_from_region"}
-        ]
-        for missing_key, step_idx in zip(missing_key_targets, candidate_indices):
-            normalized_steps[step_idx]["save_as"] = missing_key
-            produced_before_compare.add(missing_key)
-        if any(key not in produced_before_compare for key in (left_key, right_key)):
-            compare_args["__benchmark_guardrail_error"] = (
-                "benchmark guardrail: multi_step compare requires prior extraction of both "
-                f"'{left_key}' and '{right_key}'"
-            )
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
         normalized_steps.append({"action": "finish", "args": {}})
@@ -368,6 +83,7 @@ def normalize_benchmark_plan(
     if ENABLE_BENCHMARK_CONTRACT_REWRITE:
         from app.benchmark.contract import normalize_payload_for_task_family_contract
 
+        task_family = str((benchmark_context or {}).get("task_family", "")).strip()
         payload = normalize_payload_for_task_family_contract(payload, task_family=task_family)
         for idx, step in enumerate(payload.get("steps", []), start=1):
             if isinstance(step, dict):

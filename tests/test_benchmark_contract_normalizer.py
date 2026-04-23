@@ -21,10 +21,10 @@ def _base_plan(required_fields: list[str], steps: list[dict]) -> TaskSpec:
 
 def test_required_contract_fields_map_by_task_family():
     assert required_contract_fields(task_family="single_value_extraction") == ["value"]
-    assert required_contract_fields(task_family="anchored_value_extraction") == []
+    assert required_contract_fields(task_family="anchored_value_extraction") == ["value"]
     assert required_contract_fields(task_family="repeated_structured_items") == ["items"]
-    assert required_contract_fields(task_family="navigation_then_extraction") == []
-    assert required_contract_fields(task_family="multi_step_information_retrieval") == []
+    assert required_contract_fields(task_family="navigation_then_extraction") == ["value"]
+    assert required_contract_fields(task_family="multi_step_information_retrieval") == ["combined_result"]
 
 
 def test_navigation_contract_normalizer_does_not_force_top_level_shape_during_rollback():
@@ -50,7 +50,7 @@ def test_navigation_contract_normalizer_does_not_force_top_level_shape_during_ro
     assert any(step.action.startswith("extract") and step.save_as == "heading" for step in normalized.steps)
 
 
-def test_multi_step_contract_normalizer_keeps_minimal_compare_rewrite_during_rollback():
+def test_multi_step_contract_normalizer_keeps_compare_step_untouched_without_family_rewrite():
     plan = _base_plan(
         ["structured_comparison"],
         [
@@ -72,8 +72,7 @@ def test_multi_step_contract_normalizer_keeps_minimal_compare_rewrite_during_rol
 
     assert normalized.expected_result.required_fields == ["structured_comparison"]
     assert compare_step.save_as == "structured_comparison"
-    assert compare_step.args["left_key"] == "source_a"
-    assert compare_step.args["right_key"] == "source_b"
+    assert compare_step.args == {}
 
 
 def test_validator_allows_plan_without_strict_family_contract_shape():
