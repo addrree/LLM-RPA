@@ -304,7 +304,7 @@ def test_plan_validator_rejects_actions_outside_benchmark_policy():
         PlanValidator().validate(plan, allowed_actions=set(ctx["allowed_actions"]))
 
 
-def test_normalize_benchmark_plan_single_value_rewrites_brittle_literal_pattern_to_h1():
+def test_normalize_benchmark_plan_keeps_extract_pattern_in_minimal_mode():
     plan = TaskSpec.model_validate(
         {
             "goal": "extract header",
@@ -327,11 +327,10 @@ def test_normalize_benchmark_plan_single_value_rewrites_brittle_literal_pattern_
     ctx = build_benchmark_context(category="single_value_extraction", task_family="single_value_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
     extraction = normalized.steps[1]
-    assert extraction.action == "extract_text"
-    assert extraction.args["selector"] == "h1"
+    assert extraction.action == "extract_pattern_from_page_text"
 
 
-def test_normalize_benchmark_plan_single_value_forces_save_as_value_even_for_alias():
+def test_normalize_benchmark_plan_keeps_existing_save_as_alias():
     plan = TaskSpec.model_validate(
         {
             "goal": "extract header",
@@ -350,7 +349,7 @@ def test_normalize_benchmark_plan_single_value_forces_save_as_value_even_for_ali
     normalized = normalize_benchmark_plan(plan, ctx)
     extraction = normalized.steps[1]
     assert extraction.action == "extract_text"
-    assert extraction.save_as == "value"
+    assert extraction.save_as == "heading"
 
 
 def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click():
@@ -375,7 +374,7 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click(
         PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
-def test_normalize_benchmark_plan_adds_guardrail_for_regex_only_multi_step_compare():
+def test_normalize_benchmark_plan_allows_regex_only_multi_step_compare_without_family_guardrail():
     plan = TaskSpec.model_validate(
         {
             "goal": "compare two sections",
@@ -406,11 +405,10 @@ def test_normalize_benchmark_plan_adds_guardrail_for_regex_only_multi_step_compa
         task_family="multi_step_information_retrieval",
     )
     normalized = normalize_benchmark_plan(plan, ctx)
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
-def test_normalize_benchmark_plan_anchored_uses_scenario_anchor_candidates_as_source_of_truth():
+def test_normalize_benchmark_plan_anchored_only_drops_page_language():
     plan = TaskSpec.model_validate(
         {
             "goal": "extract support email",
@@ -444,8 +442,8 @@ def test_normalize_benchmark_plan_anchored_uses_scenario_anchor_candidates_as_so
     )
     normalized = normalize_benchmark_plan(plan, ctx)
     anchored_step = next(step for step in normalized.steps if step.action == "extract_value_near_anchor")
-    assert anchored_step.args["anchor_candidates"] == ["Email", "Contact", "Support"]
-    assert "anchor_text" not in anchored_step.args
+    assert anchored_step.args["anchor_candidates"] == ["Контакт", "Поддержка"]
+    assert anchored_step.args["anchor_text"] == "Контактная информация"
     assert "page_language" not in anchored_step.args
     assert normalized.expected_result.required_fields == ["value"]
 
@@ -472,7 +470,7 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_te
         PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
-def test_normalize_benchmark_plan_promotes_navigation_wait_to_url_contains_from_href_contains_click():
+def test_normalize_benchmark_plan_keeps_navigation_wait_shape():
     plan = TaskSpec.model_validate(
         {
             "goal": "navigate and extract",
@@ -492,12 +490,12 @@ def test_normalize_benchmark_plan_promotes_navigation_wait_to_url_contains_from_
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
     wait_step = next(step for step in normalized.steps if step.action == "wait_for")
-    assert wait_step.args["url_contains"] == "/pricing"
-    assert "text" not in wait_step.args
-    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    assert wait_step.args["text"] == "Pricing"
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
-def test_normalize_benchmark_plan_promotes_navigation_wait_to_main_selector_for_role_name_click():
+def test_normalize_benchmark_plan_keeps_navigation_wait_text_for_role_name_click():
     plan = TaskSpec.model_validate(
         {
             "goal": "navigate and extract",
@@ -517,12 +515,12 @@ def test_normalize_benchmark_plan_promotes_navigation_wait_to_main_selector_for_
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
     wait_step = next(step for step in normalized.steps if step.action == "wait_for")
-    assert wait_step.args["selector"] == "main h1, article h1, [role='main'] h1, main, article, [role='main']"
-    assert "text" not in wait_step.args
-    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    assert wait_step.args["text"] == "Pricing"
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
-def test_normalize_benchmark_plan_rejects_overconstrained_navigation_text_click_without_snapshot_evidence():
+def test_normalize_benchmark_plan_allows_overconstrained_navigation_click_without_guardrail():
     plan = TaskSpec.model_validate(
         {
             "goal": "navigate and extract",
@@ -556,5 +554,4 @@ def test_normalize_benchmark_plan_rejects_overconstrained_navigation_text_click_
     )
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx, page_snapshot=snapshot)
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
