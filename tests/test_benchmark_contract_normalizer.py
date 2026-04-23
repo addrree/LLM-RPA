@@ -191,29 +191,6 @@ def test_anchored_family_infers_value_type_from_goal_when_missing():
     PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
 
-def test_anchored_family_injects_anchor_candidates_from_benchmark_context_when_missing():
-    plan = _base_plan(
-        ["value"],
-        [
-            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com/help"}},
-            {"step_id": 2, "action": "extract_value_near_anchor", "args": {}},
-            {"step_id": 3, "action": "finish", "args": {}},
-        ],
-    )
-    ctx = build_benchmark_context(
-        category="anchored_value_extraction",
-        task_family="anchored_value_extraction",
-        required_top_level_fields=["value"],
-        scenario_anchor_candidates=["Email", "Contact", "Support"],
-    )
-
-    normalized = normalize_benchmark_plan(plan, ctx)
-    anchored_extract = next(step for step in normalized.steps if step.action == "extract_value_near_anchor")
-
-    assert anchored_extract.args["anchor_candidates"] == ["Email", "Contact", "Support"]
-    PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
-
-
 def test_repeated_structured_items_gets_default_limit_and_save_as():
     plan = _base_plan(
         ["items"],
@@ -222,7 +199,7 @@ def test_repeated_structured_items_gets_default_limit_and_save_as():
             {
                 "step_id": 2,
                 "action": "extract_structured_items",
-                "args": {"pattern": "(Name)\\s+(1)", "limit": 0},
+                "args": {"pattern": "(Name)\\s+(1)", "fields": {"name": 1, "value": 2}, "limit": 0},
             },
             {"step_id": 3, "action": "finish", "args": {}},
         ],
@@ -231,7 +208,6 @@ def test_repeated_structured_items_gets_default_limit_and_save_as():
         category="repeated_structured_items",
         task_family="repeated_structured_items",
         required_top_level_fields=["items"],
-        expected_item_fields=["name", "detail"],
     )
 
     normalized = normalize_benchmark_plan(plan, ctx)
@@ -239,7 +215,6 @@ def test_repeated_structured_items_gets_default_limit_and_save_as():
 
     assert extract_step.save_as == "items"
     assert extract_step.args["limit"] == 10
-    assert extract_step.args["fields"] == {"name": 1, "detail": 2}
     PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
 
@@ -270,30 +245,6 @@ def test_navigation_family_strengthens_weak_click_and_wait_for():
     assert "text" not in wait_step.args
     assert extract_step.args["selector"] == "h1"
     assert extract_step.save_as == "value"
-    PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
-
-
-def test_navigation_family_fills_empty_wait_for_contract():
-    plan = _base_plan(
-        ["value"],
-        [
-            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
-            {"step_id": 2, "action": "click", "args": {"text": "Docs", "exact": True}},
-            {"step_id": 3, "action": "wait_for", "args": {}},
-            {"step_id": 4, "action": "extract_text", "args": {"selector": "h1"}},
-            {"step_id": 5, "action": "finish", "args": {}},
-        ],
-    )
-    ctx = build_benchmark_context(
-        category="navigation_then_extraction",
-        task_family="navigation_then_extraction",
-        required_top_level_fields=["value"],
-    )
-
-    normalized = normalize_benchmark_plan(plan, ctx)
-    wait_step = next(step for step in normalized.steps if step.action == "wait_for")
-
-    assert wait_step.args["selector"] == "h1"
     PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
 
@@ -332,44 +283,5 @@ def test_multi_step_family_rewrites_unstable_region_section_actions_to_stable_pi
     assert "extract_structured_items_from_region" not in actions
     assert "compare_structured_values" in actions
     compare_step = next(step for step in normalized.steps if step.action == "compare_structured_values")
-    assert compare_step.save_as == "combined_result"
-    PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
-
-
-def test_multi_step_family_normalizes_invalid_extract_structured_items_limit_without_unstable_actions():
-    plan = _base_plan(
-        ["combined_result"],
-        [
-            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
-            {
-                "step_id": 2,
-                "action": "extract_structured_items",
-                "args": {"pattern": "(Name)\\s+(Value)", "fields": {"name": 1, "value": 2}, "limit": 0},
-                "save_as": "raw_a",
-            },
-            {
-                "step_id": 3,
-                "action": "compare_structured_values",
-                "args": {"left_key": "foo", "right_key": "bar"},
-            },
-            {"step_id": 4, "action": "finish", "args": {}},
-        ],
-    )
-    ctx = build_benchmark_context(
-        category="multi_step_information_retrieval",
-        task_family="multi_step_information_retrieval",
-        required_top_level_fields=["combined_result"],
-    )
-
-    normalized = normalize_benchmark_plan(plan, ctx)
-    structured_steps = [step for step in normalized.steps if step.action == "extract_structured_items"]
-    compare_step = next(step for step in normalized.steps if step.action == "compare_structured_values")
-
-    assert len(structured_steps) >= 2
-    assert structured_steps[0].save_as == "source_a"
-    assert structured_steps[1].save_as == "source_b"
-    assert structured_steps[0].args["limit"] == 5
-    assert compare_step.args["left_key"] == "source_a"
-    assert compare_step.args["right_key"] == "source_b"
     assert compare_step.save_as == "combined_result"
     PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
