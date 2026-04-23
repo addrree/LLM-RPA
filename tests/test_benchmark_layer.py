@@ -375,6 +375,70 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click(
     PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
+def test_normalize_benchmark_plan_rewrites_navigation_plain_selector_click_to_text_contract():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "navigate and extract",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["value"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "click", "args": {"selector": "Tutorial"}},
+                {"step_id": 3, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+                {"step_id": 4, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
+    normalized = normalize_benchmark_plan(plan, ctx)
+    click_step = next(step for step in normalized.steps if step.action == "click")
+    assert "selector" not in click_step.args
+    assert click_step.args["text"] == "Tutorial"
+    assert click_step.args["exact"] is True
+
+
+def test_normalize_benchmark_plan_replaces_placeholder_compare_headings_from_snapshot():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "compare two sections",
+            "start_url": "https://example.com",
+            "allowed_domains": ["example.com"],
+            "constraints": {"max_steps": 6, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "x", "required_fields": ["combined_result"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+                {"step_id": 2, "action": "extract_section_lines", "args": {"heading_text": "Section A"}, "save_as": "source_a"},
+                {"step_id": 3, "action": "extract_section_lines", "args": {"heading_text": "Section B"}, "save_as": "source_b"},
+                {"step_id": 4, "action": "compare_structured_values", "args": {"left_key": "source_a", "right_key": "source_b"}},
+                {"step_id": 5, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    snapshot = PageSnapshot(
+        url="https://example.com",
+        title="Example",
+        screenshot_path="artifacts/screenshots/x.png",
+        page_text_excerpt="Example page",
+        visible_headings=["Section A", "Pricing", "Documentation", "Pricing"],
+        visible_labels=[],
+        visible_buttons=[],
+        visible_inputs=[],
+        timestamp=datetime.now(timezone.utc),
+        page_text="Pricing\nDocumentation\nMore details paragraph.",
+    )
+    ctx = build_benchmark_context(
+        category="multi_step_information_retrieval",
+        task_family="multi_step_information_retrieval",
+    )
+    normalized = normalize_benchmark_plan(plan, ctx, page_snapshot=snapshot)
+    source_a = next(step for step in normalized.steps if step.save_as == "source_a")
+    source_b = next(step for step in normalized.steps if step.save_as == "source_b")
+    assert source_a.args["heading_text"] == "Pricing"
+    assert source_b.args["heading_text"] == "Documentation"
+
+
 def test_normalize_benchmark_plan_allows_regex_only_multi_step_compare_without_family_guardrail():
     plan = TaskSpec.model_validate(
         {
