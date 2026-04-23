@@ -45,7 +45,7 @@ def test_navigation_contract_normalizer_does_not_force_top_level_shape_during_ro
 
     normalized = normalize_benchmark_plan(plan, ctx)
 
-    assert normalized.expected_result.required_fields == ["value"]
+    assert normalized.expected_result.required_fields == ["source_page", "target_page", "value"]
     assert [step.save_as for step in normalized.steps if step.action == "observe_page"] == []
     assert any(step.action.startswith("extract") and step.save_as == "heading" for step in normalized.steps)
 
@@ -70,9 +70,61 @@ def test_multi_step_contract_normalizer_keeps_compare_step_untouched_without_fam
     normalized = normalize_benchmark_plan(plan, ctx)
     compare_step = next(step for step in normalized.steps if step.action == "compare_structured_values")
 
-    assert normalized.expected_result.required_fields == ["structured_comparison"]
+    assert normalized.expected_result.required_fields == ["source_a", "source_b", "combined_result"]
     assert compare_step.save_as == "structured_comparison"
     assert compare_step.args == {}
+
+
+def test_normalizer_uses_benchmark_required_fields_for_fallback_save_as():
+    plan = _base_plan(
+        ["page_snapshot"],
+        [
+            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+            {"step_id": 2, "action": "extract_text", "args": {"selector": ".price"}},
+            {"step_id": 3, "action": "finish", "args": {}},
+        ],
+    )
+    ctx = build_benchmark_context(
+        category="single_value_extraction",
+        task_family="single_value_extraction",
+        required_top_level_fields=["value"],
+    )
+
+    normalized = normalize_benchmark_plan(plan, ctx)
+    extraction_step = next(step for step in normalized.steps if step.action == "extract_text")
+
+    assert normalized.expected_result.required_fields == ["value"]
+    assert extraction_step.save_as == "value"
+
+
+def test_normalizer_removes_guardrail_and_page_language_args():
+    plan = _base_plan(
+        ["value"],
+        [
+            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+            {
+                "step_id": 2,
+                "action": "extract_value_near_anchor",
+                "args": {
+                    "anchor_text": "Price",
+                    "page_language": "en",
+                    "__benchmark_guardrail_error": "x",
+                },
+            },
+            {"step_id": 3, "action": "finish", "args": {}},
+        ],
+    )
+    ctx = build_benchmark_context(
+        category="anchored_value_extraction",
+        task_family="anchored_value_extraction",
+        required_top_level_fields=["value"],
+    )
+
+    normalized = normalize_benchmark_plan(plan, ctx)
+    extraction_step = next(step for step in normalized.steps if step.action == "extract_value_near_anchor")
+
+    assert "page_language" not in extraction_step.args
+    assert "__benchmark_guardrail_error" not in extraction_step.args
 
 
 def test_validator_allows_plan_without_strict_family_contract_shape():
