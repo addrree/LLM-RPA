@@ -31,12 +31,12 @@ def normalize_benchmark_plan(
         for action in (benchmark_context.get("allowed_actions") or [])
         if str(action).strip()
     }
-    task_family = str(benchmark_context.get("task_family", "")).strip()
     normalized_required = [
         str(field).strip()
         for field in required_fields
         if str(field).strip() and str(field).strip() != "page_snapshot"
     ]
+    fallback_save_as = normalized_required[0] if len(normalized_required) == 1 else None
 
     normalized_steps: list[dict] = []
     for step in steps:
@@ -53,7 +53,6 @@ def normalize_benchmark_plan(
             args = {}
         step["args"] = args
         args.pop("page_language", None)
-        args.pop("__benchmark_guardrail_error", None)
 
         if action == "extract_text" and not str(args.get("selector", "")).strip():
             args["selector"] = "h1"
@@ -62,22 +61,14 @@ def normalize_benchmark_plan(
         if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 20000
 
-        normalized_steps.append(step)
-
-    should_apply_navigation_value_fallback = (
-        task_family == "navigation_then_extraction"
-        and normalized_required == ["value"]
-    )
-    if should_apply_navigation_value_fallback:
-        extraction_steps_without_save_as = [
-            step
-            for step in normalized_steps
-            if isinstance(step, dict)
-            and str(step.get("action", "")).startswith("extract")
+        if (
+            fallback_save_as
+            and action.startswith("extract")
             and not (isinstance(step.get("save_as"), str) and step.get("save_as", "").strip())
-        ]
-        if len(extraction_steps_without_save_as) == 1:
-            extraction_steps_without_save_as[0]["save_as"] = "value"
+        ):
+            step["save_as"] = fallback_save_as
+
+        normalized_steps.append(step)
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
         normalized_steps.append({"action": "finish", "args": {}})
@@ -86,11 +77,7 @@ def normalize_benchmark_plan(
 
     payload["steps"] = normalized_steps
     payload.setdefault("expected_result", {})
-    payload["expected_result"]["required_fields"] = (
-        [str(field).strip() for field in required_fields if str(field).strip()]
-        if isinstance(required_fields, list)
-        else []
-    )
+    payload["expected_result"]["required_fields"] = normalized_required
 
     return TaskSpec.model_validate(payload)
 

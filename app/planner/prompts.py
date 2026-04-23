@@ -89,39 +89,28 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
     allowed = "|".join(allowed_actions)
     family_rules = {
         "single_value_extraction": (
-            "Family policy (single_value_extraction): для title/header/main heading предпочитай "
-            "extract_text с selector='h1' (или другой явный heading selector). "
-            "Не используй literal extract_pattern_from_page_text, если задача не про regex/pattern match."
+            "Family policy: open_url -> extract_text(save_as='value') -> finish. "
+            "Если selector неочевиден, используй h1."
         ),
         "navigation_then_extraction": (
-            "Family policy (navigation_then_extraction): избегай over-constrained text-click контрактов. "
-            "Предпочитай href_contains, затем role+name, затем text (только если текст явно подтвержден snapshot). "
-            "Не добавляй scope_selector или exact=true без явного подтверждения из observe_page/page snapshot. "
-            "После click используй strong wait_for: href_contains -> wait_for.url_contains(тот же ключ), "
-            "иначе wait_for.selector в main content; bare/generic text-only wait_for запрещен. "
-            "Финальный extraction шаг после navigation обязан отдавать top-level результат через save_as='value'. "
-            "Шаги click/wait_for/observe_page не должны использовать save_as='value'. "
-            "Разрешен также специфичный selector."
+            "Family policy: open_url -> click -> wait_for -> extract_text(save_as='value') -> finish. "
+            "Делай стабильный простой navigation path без лишней сложности."
         ),
         "repeated_structured_items": (
-            "Family policy (repeated_structured_items): если используешь extract_structured_items, "
-            "pattern обязан иметь capture groups, а fields должны ссылаться только на существующие groups. "
-            "Для extract_structured_items fields допускают только int group index или object rule "
-            "(с group_index); string-формат field spec запрещен."
+            "Family policy: open_url -> extract_structured_items(save_as='items') -> finish."
         ),
         "multi_step_information_retrieval": (
-            "Family policy (multi_step_information_retrieval): compare-only через section-aware pipeline. "
-            "НЕ используй extract_structured_items с args.section и НЕ используй regex-first extraction как default. "
-            "Используй поэтапное извлечение и compare_structured_values с минимальным итоговым полем."
+            "Family policy: open_url -> observe_page -> extract_structured_items(save_as='source_a') "
+            "-> extract_structured_items(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
+            "Не используй extract_value_from_section/extract_structured_items_from_region."
         ),
         "anchored_value_extraction": (
-            "Family policy (anchored_value_extraction): anchor_text/anchor_candidates должны оставаться в языке "
-            "страницы; не передавай page_language и используй видимые anchors страницы без автоперевода."
+            "Family policy: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
+            "Не передавай page_language."
         ),
         "negative_or_ambiguous_case": (
-            "Family policy (negative_or_ambiguous_case): не используй broad prose regex. "
-            "Для extract_pattern_from_page_text pattern должен иметь capture group под конкретное значение; "
-            "если значения нет, верни компактный результат с явной неопределенностью."
+            "Family policy: open_url -> observe_page(optional) -> extraction(optional) -> finish. "
+            "Без обязательных business fields."
         ),
     }.get(task_family, "")
     return f"""
@@ -135,7 +124,7 @@ Task family: {task_family}
 4) План минимальный и детерминированный (обычно 3-6 шагов).
 5) Не используй legacy aliases.
 6) Не выходи за рамки task family.
-7) Top-level результат должен быть минимальным и соответствовать required_top_level_fields из benchmark context.
+7) expected_result.required_fields копируй из required_top_level_fields benchmark context (только бизнес-поля).
 8) Не передавай page_language и expected answer values в JSON.
 9) {family_rules}
 """
@@ -245,28 +234,22 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
     allowed = "|".join(allowed_actions)
     family_rules = {
         "single_value_extraction": (
-            "Для title/header/main heading сначала пробуй extract_text с selector='h1'; "
-            "не используй literal extract_pattern_from_page_text без regex-intent."
+            "Используй стабильный путь: open_url -> extract_text(save_as='value') -> finish."
         ),
         "navigation_then_extraction": (
-            "Избегай хрупкого navigation click: приоритет href_contains, затем role+name, затем text только при явном подтверждении в snapshot. "
-            "Не добавляй scope_selector/exact=true без наблюдаемого основания из observe_page. "
-            "После click используй strong wait_for: href_contains -> url_contains(тот же ключ), иначе selector в main content; "
-            "bare/generic text wait_for запрещен. Финальный extraction шаг после navigation должен сохранять top-level результат в save_as='value'; "
-            "click/wait_for/observe_page не должны использовать save_as='value'."
+            "Используй стабильный путь: open_url -> click -> wait_for -> extract_text(save_as='value') -> finish."
         ),
         "repeated_structured_items": (
-            "Для extract_structured_items pattern должен иметь capture groups, "
-            "fields могут ссылаться только на существующие группы. "
-            "Разрешены только int group index или object rule с group_index; string field specs запрещены."
+            "Используй стабильный путь: open_url -> extract_structured_items(save_as='items') -> finish."
         ),
         "multi_step_information_retrieval": (
-            "Соблюдай compare pipeline: поэтапное section-aware extraction, "
-            "затем compare_structured_values. Не используй extract_structured_items с args.section и избегай regex-only сравнения."
+            "Используй стабильный compare pipeline: open_url -> observe_page -> extract_structured_items(save_as='source_a') "
+            "-> extract_structured_items(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
+            "Не используй extract_value_from_section/extract_structured_items_from_region."
         ),
         "anchored_value_extraction": (
-            "Не переводи anchor_text между языками. Не передавай page_language, используй anchor_candidates "
-            "как видимые тексты страницы и избегай cross-language mismatch."
+            "Используй стабильный путь: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
+            "Не передавай page_language."
         ),
         "negative_or_ambiguous_case": (
             "Избегай broad prose extraction: regex должен иметь capture group для конкретного value token. "

@@ -2,7 +2,6 @@ import json
 import logging
 from urllib.parse import urlparse
 
-from app.benchmark.contract import required_contract_fields
 from app.planner.action_vocab import normalize_plan_action_aliases
 from app.planner.prompts import (
     CORRECTIVE_REPLANNER_SYSTEM_PROMPT,
@@ -45,11 +44,12 @@ class Replanner:
             family = str(benchmark_context.get("task_family", "")).strip()
             payload["benchmark_policy_hints"] = {
                 "task_family": family,
-                "required_top_level_fields": required_contract_fields(
-                    task_family=family,
-                    scenario_required_fields=benchmark_context.get("required_top_level_fields"),
-                ),
-                "schema_contract_source": "benchmark contract layer",
+                "required_top_level_fields": [
+                    str(field).strip()
+                    for field in (benchmark_context.get("required_top_level_fields") or [])
+                    if str(field).strip() and str(field).strip() != "page_snapshot"
+                ],
+                "schema_contract_source": "benchmark_context.required_top_level_fields",
             }
         system_prompt = REPLANNER_SYSTEM_PROMPT
         if benchmark_context:
@@ -112,11 +112,12 @@ class Replanner:
             family = str(benchmark_context.get("task_family", "")).strip()
             payload["benchmark_policy_hints"] = {
                 "task_family": family,
-                "required_top_level_fields": required_contract_fields(
-                    task_family=family,
-                    scenario_required_fields=benchmark_context.get("required_top_level_fields"),
-                ),
-                "schema_contract_source": "benchmark contract layer",
+                "required_top_level_fields": [
+                    str(field).strip()
+                    for field in (benchmark_context.get("required_top_level_fields") or [])
+                    if str(field).strip() and str(field).strip() != "page_snapshot"
+                ],
+                "schema_contract_source": "benchmark_context.required_top_level_fields",
                 "anchor_language_grounding": (
                     "Detect page language in executor from current page content/html; "
                     "planner JSON must not include page_language; keep anchors in visible page language."
