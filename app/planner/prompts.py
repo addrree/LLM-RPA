@@ -67,6 +67,7 @@ PLANNER_SYSTEM_PROMPT = """
    - если click задан через role+name или text, wait_for должен использовать selector в main content (например main h1/article h1/main);
    - scoped text wait (scope_selector + exact=true) допустим только при явном подтверждении snapshot.
    Запрещен bare/generic text-only wait_for для navigation family.
+16.3) Для navigation_then_extraction после navigation должен быть финальный extraction step, который сохраняет top-level бизнес-результат в save_as="value". Шаги click/wait_for/observe_page не должны использовать save_as="value".
 17. Task-family routing policy:
    - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
@@ -98,6 +99,8 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Не добавляй scope_selector или exact=true без явного подтверждения из observe_page/page snapshot. "
             "После click используй strong wait_for: href_contains -> wait_for.url_contains(тот же ключ), "
             "иначе wait_for.selector в main content; bare/generic text-only wait_for запрещен. "
+            "Финальный extraction шаг после navigation обязан отдавать top-level результат через save_as='value'. "
+            "Шаги click/wait_for/observe_page не должны использовать save_as='value'. "
             "Разрешен также специфичный selector."
         ),
         "repeated_structured_items": (
@@ -198,6 +201,7 @@ REPLANNER_SYSTEM_PROMPT = """
    - click.role+name или подтвержденный text => wait_for.selector в main content (например main h1/article h1/main);
    - scoped text wait используй только если snapshot явно подтверждает и обязательно с scope_selector + exact=true.
    Bare/generic text wait_for запрещен.
+13.2) Для navigation_then_extraction добавляй финальный extraction step после navigation и сохраняй бизнес-результат в save_as="value"; не используй save_as="value" в click/wait_for/observe_page.
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между шагами; делай поэтапное извлечение и сохраняй минимальный итоговый результат.
 16) Для anchored extraction используй anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
@@ -248,7 +252,8 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "Избегай хрупкого navigation click: приоритет href_contains, затем role+name, затем text только при явном подтверждении в snapshot. "
             "Не добавляй scope_selector/exact=true без наблюдаемого основания из observe_page. "
             "После click используй strong wait_for: href_contains -> url_contains(тот же ключ), иначе selector в main content; "
-            "bare/generic text wait_for запрещен."
+            "bare/generic text wait_for запрещен. Финальный extraction шаг после navigation должен сохранять top-level результат в save_as='value'; "
+            "click/wait_for/observe_page не должны использовать save_as='value'."
         ),
         "repeated_structured_items": (
             "Для extract_structured_items pattern должен иметь capture groups, "

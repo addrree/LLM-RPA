@@ -31,15 +31,12 @@ def normalize_benchmark_plan(
         for action in (benchmark_context.get("allowed_actions") or [])
         if str(action).strip()
     }
-    fallback_save_as = "value"
-    if isinstance(required_fields, list) and required_fields:
-        normalized_required = [
-            str(field).strip()
-            for field in required_fields
-            if str(field).strip() and str(field).strip() != "page_snapshot"
-        ]
-        if normalized_required:
-            fallback_save_as = normalized_required[0]
+    task_family = str(benchmark_context.get("task_family", "")).strip()
+    normalized_required = [
+        str(field).strip()
+        for field in required_fields
+        if str(field).strip() and str(field).strip() != "page_snapshot"
+    ]
 
     normalized_steps: list[dict] = []
     for step in steps:
@@ -65,10 +62,22 @@ def normalize_benchmark_plan(
         if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 20000
 
-        if action.startswith("extract") and not step.get("save_as"):
-            step["save_as"] = fallback_save_as
-
         normalized_steps.append(step)
+
+    should_apply_navigation_value_fallback = (
+        task_family == "navigation_then_extraction"
+        and normalized_required == ["value"]
+    )
+    if should_apply_navigation_value_fallback:
+        extraction_steps_without_save_as = [
+            step
+            for step in normalized_steps
+            if isinstance(step, dict)
+            and str(step.get("action", "")).startswith("extract")
+            and not (isinstance(step.get("save_as"), str) and step.get("save_as", "").strip())
+        ]
+        if len(extraction_steps_without_save_as) == 1:
+            extraction_steps_without_save_as[0]["save_as"] = "value"
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
         normalized_steps.append({"action": "finish", "args": {}})

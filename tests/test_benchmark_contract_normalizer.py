@@ -75,7 +75,7 @@ def test_multi_step_contract_normalizer_keeps_compare_step_untouched_without_fam
     assert compare_step.args == {}
 
 
-def test_normalizer_uses_benchmark_required_fields_for_fallback_save_as():
+def test_normalizer_sets_navigation_value_fallback_for_single_unsaved_extraction():
     plan = _base_plan(
         ["page_snapshot"],
         [
@@ -85,8 +85,8 @@ def test_normalizer_uses_benchmark_required_fields_for_fallback_save_as():
         ],
     )
     ctx = build_benchmark_context(
-        category="single_value_extraction",
-        task_family="single_value_extraction",
+        category="navigation_then_extraction",
+        task_family="navigation_then_extraction",
         required_top_level_fields=["value"],
     )
 
@@ -143,3 +143,24 @@ def test_validator_allows_plan_without_strict_family_contract_shape():
     )
 
     PlanValidator().validate(plan, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
+
+
+def test_normalizer_does_not_apply_value_fallback_outside_navigation_family():
+    plan = _base_plan(
+        ["value"],
+        [
+            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+            {"step_id": 2, "action": "extract_text", "args": {"selector": "h1"}},
+            {"step_id": 3, "action": "finish", "args": {}},
+        ],
+    )
+    ctx = build_benchmark_context(
+        category="single_value_extraction",
+        task_family="single_value_extraction",
+        required_top_level_fields=["value"],
+    )
+
+    normalized = normalize_benchmark_plan(plan, ctx)
+    extraction_step = next(step for step in normalized.steps if step.action == "extract_text")
+
+    assert extraction_step.save_as is None
