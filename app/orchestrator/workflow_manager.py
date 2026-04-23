@@ -15,6 +15,183 @@ UTC = timezone.utc
 logger = logging.getLogger(__name__)
 
 
+_BENCHMARK_MINIMAL_REQUIRED_FIELDS_BY_FAMILY = {
+    "single_value_extraction": ["value"],
+    "anchored_value_extraction": ["value"],
+    "repeated_structured_items": ["items"],
+    "navigation_then_extraction": ["value"],
+    "multi_step_information_retrieval": ["combined_result"],
+    "negative_or_ambiguous_case": [],
+}
+
+
+def _is_non_empty_str(value) -> bool:
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_positive_int(value) -> bool:
+    return isinstance(value, int) and value > 0
+
+
+def _fallback_required_fields(*, normalized_required: list[str], task_family: str) -> list[str]:
+    if normalized_required:
+        return normalized_required
+    return list(_BENCHMARK_MINIMAL_REQUIRED_FIELDS_BY_FAMILY.get(task_family, []))
+
+
+def _infer_anchor_value_type(goal_text: str) -> str:
+    normalized = goal_text.lower()
+    if any(token in normalized for token in ("email", "mail", "почт")):
+        return "email"
+    if any(token in normalized for token in ("phone", "tel", "тел")):
+        return "phone"
+    if any(token in normalized for token in ("count", "number", "article")):
+        return "count"
+    return "number"
+
+
+def _canonical_structured_args(args: dict | None, *, default_limit: int) -> dict:
+    payload = args if isinstance(args, dict) else {}
+    pattern = str(payload.get("pattern", "")).strip() or r"(.+)"
+    fields = payload.get("fields")
+    if not isinstance(fields, dict) or not fields:
+        fields = {"value": 1}
+    limit = payload.get("limit")
+    if not _is_positive_int(limit):
+        limit = default_limit
+    return {"pattern": pattern, "fields": fields, "limit": limit}
+
+
+def _canonicalize_multi_step_compare_steps(steps: list[dict]) -> list[dict]:
+    stable_candidates = [
+        step for step in steps if str(step.get("action", "")).strip() == "extract_structured_items"
+    ]
+    source_a_candidate = stable_candidates[0] if len(stable_candidates) >= 1 else None
+    source_b_candidate = stable_candidates[1] if len(stable_candidates) >= 2 else source_a_candidate
+
+    prefix_steps: list[dict] = []
+    for step in steps:
+        action = str(step.get("action", "")).strip()
+        if action in {"open_url", "observe_page"}:
+            prefix_steps.append(step)
+
+    rewritten = list(prefix_steps)
+    rewritten.append(
+        {
+            "action": "extract_structured_items",
+            "args": _canonical_structured_args(
+                source_a_candidate.get("args") if source_a_candidate else None,
+                default_limit=5,
+            ),
+            "save_as": "source_a",
+        }
+    )
+    rewritten.append(
+        {
+            "action": "extract_structured_items",
+            "args": _canonical_structured_args(
+                source_b_candidate.get("args") if source_b_candidate else None,
+                default_limit=5,
+            ),
+            "save_as": "source_b",
+        }
+    )
+    rewritten.append(
+        {
+            "action": "compare_structured_values",
+            "args": {"left_key": "source_a", "right_key": "source_b"},
+            "save_as": "combined_result",
+        }
+    )
+    return rewritten
+
+
+def _canonicalize_family_steps(
+    *,
+    steps: list[dict],
+    task_family: str,
+    goal_text: str,
+    fallback_save_as: str | None,
+) -> list[dict]:
+    if not steps:
+        return steps
+
+    if task_family == "multi_step_information_retrieval":
+        has_unstable_compare_actions = any(
+            str(step.get("action", "")).strip()
+            in {"extract_value_from_section", "extract_structured_items_from_region"}
+            for step in steps
+        )
+        if has_unstable_compare_actions:
+            steps = _canonicalize_multi_step_compare_steps(steps)
+
+    extraction_indices = [
+        index for index, step in enumerate(steps) if str(step.get("action", "")).strip().startswith("extract")
+    ]
+    final_extraction_index = extraction_indices[-1] if extraction_indices else None
+
+    for index, step in enumerate(steps):
+        action = str(step.get("action", "")).strip()
+        args = step.get("args")
+        if not isinstance(args, dict):
+            args = {}
+            step["args"] = args
+
+        if task_family == "anchored_value_extraction" and action == "extract_value_near_anchor":
+            if not _is_non_empty_str(step.get("save_as")):
+                step["save_as"] = "value"
+            has_value_type = _is_non_empty_str(args.get("value_type"))
+            has_value_pattern = _is_non_empty_str(args.get("value_pattern"))
+            if not has_value_type and not has_value_pattern:
+                args["value_type"] = _infer_anchor_value_type(goal_text)
+
+        if task_family == "repeated_structured_items" and action == "extract_structured_items":
+            if not _is_non_empty_str(step.get("save_as")):
+                step["save_as"] = "items"
+            if not _is_positive_int(args.get("limit")):
+                args["limit"] = 10
+
+        if task_family == "navigation_then_extraction" and action == "click":
+            has_text = _is_non_empty_str(args.get("text"))
+            has_exact = bool(args.get("exact"))
+            has_scope = _is_non_empty_str(args.get("scope_selector"))
+            has_href = _is_non_empty_str(args.get("href_contains"))
+            has_role_name = _is_non_empty_str(args.get("role")) and _is_non_empty_str(args.get("name"))
+            if has_text and not (has_exact or has_scope or has_href or has_role_name):
+                args["exact"] = True
+
+        if (
+            task_family == "navigation_then_extraction"
+            and action == "wait_for"
+            and final_extraction_index is not None
+            and final_extraction_index > index
+            and _is_non_empty_str(args.get("text"))
+            and not _is_non_empty_str(args.get("selector"))
+            and not _is_non_empty_str(args.get("url_contains"))
+            and not _is_non_empty_str(args.get("scope_selector"))
+            and not bool(args.get("exact"))
+        ):
+            final_step = steps[final_extraction_index]
+            final_args = final_step.get("args") if isinstance(final_step.get("args"), dict) else {}
+            if str(final_step.get("action", "")).strip() == "extract_text" and str(
+                final_args.get("selector", "")
+            ).strip() == "h1":
+                args["selector"] = "h1"
+                args.pop("text", None)
+
+        if final_extraction_index is not None and index == final_extraction_index:
+            if task_family in {"single_value_extraction", "navigation_then_extraction"}:
+                step["save_as"] = "value"
+            if task_family == "multi_step_information_retrieval" and action == "compare_structured_values":
+                step["save_as"] = "combined_result"
+            if action == "extract_text" and not _is_non_empty_str(args.get("selector")):
+                args["selector"] = "h1"
+
+    if task_family == "single_value_extraction" and fallback_save_as == "value" and final_extraction_index is not None:
+        steps[final_extraction_index]["save_as"] = "value"
+    return steps
+
+
 def normalize_benchmark_plan(
     plan: TaskSpec,
     benchmark_context: dict | None,
@@ -25,6 +202,7 @@ def normalize_benchmark_plan(
 
     payload = plan.model_dump(mode="json")
     steps = payload.get("steps", [])
+    task_family = str(benchmark_context.get("task_family", "")).strip().lower()
     required_fields = benchmark_context.get("required_top_level_fields", [])
     allowed_actions = {
         str(action).strip()
@@ -36,17 +214,22 @@ def normalize_benchmark_plan(
         for field in required_fields
         if str(field).strip() and str(field).strip() != "page_snapshot"
     ]
+    normalized_required = _fallback_required_fields(normalized_required=normalized_required, task_family=task_family)
     fallback_save_as = normalized_required[0] if len(normalized_required) == 1 else None
 
     normalized_steps: list[dict] = []
+    unstable_multi_step_actions = {"extract_value_from_section", "extract_structured_items_from_region"}
     for step in steps:
         if not isinstance(step, dict):
             continue
         action = str(step.get("action", "")).strip()
         if allowed_actions and action not in allowed_actions:
-            if action == "finish":
-                normalized_steps.append({"action": "finish", "args": {}})
-            continue
+            if task_family == "multi_step_information_retrieval" and action in unstable_multi_step_actions:
+                pass
+            else:
+                if action == "finish":
+                    normalized_steps.append({"action": "finish", "args": {}})
+                continue
 
         args = step.get("args")
         if not isinstance(args, dict):
@@ -69,6 +252,13 @@ def normalize_benchmark_plan(
             step["save_as"] = fallback_save_as
 
         normalized_steps.append(step)
+
+    normalized_steps = _canonicalize_family_steps(
+        steps=normalized_steps,
+        task_family=task_family,
+        goal_text=str(payload.get("goal", "")),
+        fallback_save_as=fallback_save_as,
+    )
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
         normalized_steps.append({"action": "finish", "args": {}})
