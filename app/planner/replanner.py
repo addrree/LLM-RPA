@@ -118,13 +118,6 @@ class Replanner:
                     if str(field).strip() and str(field).strip() != "page_snapshot"
                 ],
                 "schema_contract_source": "benchmark_context.required_top_level_fields",
-                "anchor_language_grounding": (
-                    "Detect page language in executor from current page content/html; "
-                    "planner JSON must not include page_language; keep anchors in visible page language."
-                ),
-                "negative_value_policy": (
-                    "Avoid broad prose extraction for negative/ambiguous tasks; require concrete capture token or explicit uncertainty."
-                ),
             }
         system_prompt = CORRECTIVE_REPLANNER_SYSTEM_PROMPT
         if benchmark_context:

@@ -89,28 +89,24 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
     allowed = "|".join(allowed_actions)
     family_rules = {
         "single_value_extraction": (
-            "Family policy: open_url -> extract_text(save_as='value') -> finish. "
-            "Если selector неочевиден, используй h1."
+            "Path hint: open_url -> extract_text(save_as='value') -> finish. If selector unknown, use h1."
         ),
         "navigation_then_extraction": (
-            "Family policy: open_url -> click -> wait_for -> extract_text(save_as='value') -> finish. "
-            "Делай стабильный простой navigation path без лишней сложности."
+            "Path hint: open_url -> click -> wait_for -> extract_text(save_as='value') -> finish."
         ),
         "repeated_structured_items": (
-            "Family policy: open_url -> extract_structured_items(save_as='items') -> finish."
+            "Path hint: open_url -> extract_structured_items(save_as='items') -> finish."
         ),
         "multi_step_information_retrieval": (
-            "Family policy: open_url -> observe_page -> extract_structured_items(save_as='source_a') "
+            "Path hint: open_url -> observe_page -> extract_structured_items(save_as='source_a') "
             "-> extract_structured_items(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
-            "Не используй extract_value_from_section/extract_structured_items_from_region."
+            "Do not use extract_value_from_section or extract_structured_items_from_region."
         ),
         "anchored_value_extraction": (
-            "Family policy: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
-            "Не передавай page_language."
+            "Path hint: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish."
         ),
         "negative_or_ambiguous_case": (
-            "Family policy: open_url -> observe_page(optional) -> extraction(optional) -> finish. "
-            "Без обязательных business fields."
+            "Path hint: open_url -> observe_page(optional) -> extraction(optional) -> finish."
         ),
     }.get(task_family, "")
     return f"""
@@ -118,15 +114,13 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
 Task family: {task_family}
 Разрешенные actions: {allowed}
 Правила:
-1) Только actions из списка.
-2) step_id подряд, последний шаг finish.
-3) open_url всегда с непустым args.url.
-4) План минимальный и детерминированный (обычно 3-6 шагов).
-5) Не используй legacy aliases.
-6) Не выходи за рамки task family.
-7) expected_result.required_fields копируй из required_top_level_fields benchmark context (только бизнес-поля).
-8) Не передавай page_language и expected answer values в JSON.
-9) {family_rules}
+1) JSON only.
+2) Only allowed actions.
+3) expected_result.required_fields must match benchmark_context.required_top_level_fields exactly.
+4) step_id must be sequential; final step must be finish.
+5) open_url must include non-empty args.url.
+6) Do not include page_language or expected answer values in JSON.
+7) {family_rules}
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
@@ -261,10 +255,12 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
 Task family: {task_family}
 Разрешенные actions: {allowed}
 Правила:
-1) Только разрешенные actions.
-2) Не повторяй прошлую ошибку.
-3) План минимальный, с finish в конце.
-4) open_url обязательно содержит args.url.
-5) Не используй legacy aliases.
-6) {family_rules}
+1) JSON only.
+2) Only allowed actions.
+3) expected_result.required_fields must match benchmark_context.required_top_level_fields exactly.
+4) step_id must be sequential; final step must be finish.
+5) open_url must include non-empty args.url.
+6) Do not include page_language or expected answer values in JSON.
+7) Keep plan short and deterministic.
+8) {family_rules}
 """

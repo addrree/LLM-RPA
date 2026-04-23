@@ -1,7 +1,9 @@
+import pytest
+
 from app.benchmark.policies import build_benchmark_context
 from app.orchestrator.workflow_manager import normalize_benchmark_plan
 from app.schemas.task_spec import TaskSpec
-from app.validator.plan_validator import PlanValidator
+from app.validator.plan_validator import PlanValidationError, PlanValidator
 
 
 def _base_plan(required_fields: list[str], steps: list[dict]) -> TaskSpec:
@@ -218,7 +220,7 @@ def test_repeated_structured_items_gets_default_limit_and_save_as():
     PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
 
-def test_navigation_family_strengthens_weak_click_and_wait_for():
+def test_navigation_family_strengthens_weak_click_only():
     plan = _base_plan(
         ["value"],
         [
@@ -237,15 +239,13 @@ def test_navigation_family_strengthens_weak_click_and_wait_for():
 
     normalized = normalize_benchmark_plan(plan, ctx)
     click_step = next(step for step in normalized.steps if step.action == "click")
-    wait_step = next(step for step in normalized.steps if step.action == "wait_for")
     extract_step = next(step for step in normalized.steps if step.action == "extract_text")
 
     assert click_step.args["exact"] is True
-    assert wait_step.args["selector"] == "h1"
-    assert "text" not in wait_step.args
     assert extract_step.args["selector"] == "h1"
     assert extract_step.save_as == "value"
-    PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
+    with pytest.raises(PlanValidationError):
+        PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
 
 def test_multi_step_family_rewrites_unstable_region_section_actions_to_stable_pipeline():

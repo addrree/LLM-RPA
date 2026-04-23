@@ -46,17 +46,30 @@ def _infer_anchor_value_type(goal_text: str) -> str:
         return "email"
     if any(token in normalized for token in ("phone", "tel", "тел")):
         return "phone"
-    if any(token in normalized for token in ("count", "number", "article")):
-        return "count"
     return "number"
+
+
+def _capture_group_count(pattern: str) -> int:
+    try:
+        return re.compile(pattern).groups
+    except re.error:
+        return 0
 
 
 def _canonical_structured_args(args: dict | None, *, default_limit: int) -> dict:
     payload = args if isinstance(args, dict) else {}
     pattern = str(payload.get("pattern", "")).strip() or r"(.+)"
+    groups = _capture_group_count(pattern)
+    if groups == 0:
+        pattern = r"(.+)"
+        groups = 1
+
     fields = payload.get("fields")
     if not isinstance(fields, dict) or not fields:
-        fields = {"value": 1}
+        if groups >= 2:
+            fields = {"name": 1, "detail": 2}
+        else:
+            fields = {"value": 1}
     limit = payload.get("limit")
     if not _is_positive_int(limit):
         limit = default_limit
@@ -118,13 +131,7 @@ def _canonicalize_family_steps(
         return steps
 
     if task_family == "multi_step_information_retrieval":
-        has_unstable_compare_actions = any(
-            str(step.get("action", "")).strip()
-            in {"extract_value_from_section", "extract_structured_items_from_region"}
-            for step in steps
-        )
-        if has_unstable_compare_actions:
-            steps = _canonicalize_multi_step_compare_steps(steps)
+        steps = _canonicalize_multi_step_compare_steps(steps)
 
     extraction_indices = [
         index for index, step in enumerate(steps) if str(step.get("action", "")).strip().startswith("extract")
@@ -149,8 +156,14 @@ def _canonicalize_family_steps(
         if task_family == "repeated_structured_items" and action == "extract_structured_items":
             if not _is_non_empty_str(step.get("save_as")):
                 step["save_as"] = "items"
-            if not _is_positive_int(args.get("limit")):
-                args["limit"] = 10
+            canonical = _canonical_structured_args(args, default_limit=10)
+            step["args"] = canonical
+            args = canonical
+
+        if task_family == "multi_step_information_retrieval" and action == "extract_structured_items":
+            canonical = _canonical_structured_args(args, default_limit=5)
+            step["args"] = canonical
+            args = canonical
 
         if task_family == "navigation_then_extraction" and action == "click":
             has_text = _is_non_empty_str(args.get("text"))
@@ -160,25 +173,6 @@ def _canonicalize_family_steps(
             has_role_name = _is_non_empty_str(args.get("role")) and _is_non_empty_str(args.get("name"))
             if has_text and not (has_exact or has_scope or has_href or has_role_name):
                 args["exact"] = True
-
-        if (
-            task_family == "navigation_then_extraction"
-            and action == "wait_for"
-            and final_extraction_index is not None
-            and final_extraction_index > index
-            and _is_non_empty_str(args.get("text"))
-            and not _is_non_empty_str(args.get("selector"))
-            and not _is_non_empty_str(args.get("url_contains"))
-            and not _is_non_empty_str(args.get("scope_selector"))
-            and not bool(args.get("exact"))
-        ):
-            final_step = steps[final_extraction_index]
-            final_args = final_step.get("args") if isinstance(final_step.get("args"), dict) else {}
-            if str(final_step.get("action", "")).strip() == "extract_text" and str(
-                final_args.get("selector", "")
-            ).strip() == "h1":
-                args["selector"] = "h1"
-                args.pop("text", None)
 
         if final_extraction_index is not None and index == final_extraction_index:
             if task_family in {"single_value_extraction", "navigation_then_extraction"}:

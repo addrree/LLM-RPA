@@ -1,7 +1,9 @@
 import base64
 import json
+import logging
 import os
 import re
+import time
 from pathlib import Path
 from typing import Any, Dict, Optional
 from urllib.parse import urlparse
@@ -13,6 +15,9 @@ from app.schemas.execution import GenerationMetadata, LLMArtifact
 
 class LLMClientError(RuntimeError):
     pass
+
+
+logger = logging.getLogger(__name__)
 
 
 class LLMClient:
@@ -68,13 +73,23 @@ class LLMClient:
         *,
         stage: str = "planner",
     ) -> LLMArtifact:
-        raw_text = self._ollama_chat(
-            model=self.planner_model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            image_path=None,
-        )
-        parsed = self._safe_parse_json(raw_text, stage=stage)
+        try:
+            raw_text = self._ollama_chat(
+                model=self.planner_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_path=None,
+            )
+            parsed = self._safe_parse_json(raw_text, stage=stage)
+        except LLMClientError:
+            logger.exception(
+                "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s)",
+                stage,
+                len(system_prompt or ""),
+                len(user_prompt or ""),
+                self.last_chat_diagnostics.get("content_source", "unknown"),
+            )
+            raise
         fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
         return LLMArtifact(
             raw_response=raw_text,
@@ -148,8 +163,25 @@ class LLMClient:
             ],
         }
 
-        try:
-            response = self.session.post(url, json=payload, headers=headers or None, timeout=self.timeout_sec)
+        last_error: LLMClientError | None = None
+        for attempt in range(2):
+            try:
+                response = self.session.post(url, json=payload, headers=headers or None, timeout=self.timeout_sec)
+            except requests.Timeout as exc:
+                backend_hint = "Ollama Cloud" if self.backend == "ollama_cloud" else "Ollama local"
+                last_error = LLMClientError(
+                    f"{backend_hint} request timed out after {self.timeout_sec}s "
+                    f"(url={url}, model={model}). Increase OLLAMA_TIMEOUT_SEC or simplify the prompt."
+                )
+                if attempt == 0:
+                    time.sleep(0.5)
+                    continue
+                raise last_error from exc
+            except requests.RequestException as exc:
+                raise LLMClientError(
+                    f"Ollama request failed (backend={self.backend}, url={url}, model={model}): {exc}"
+                ) from exc
+
             if not response.ok:
                 details = response.text[:800]
                 if response.status_code in {401, 403}:
@@ -162,54 +194,53 @@ class LLMClient:
                         f"Ollama model not found (status_code=404, url={url}, model={model}). "
                         "Verify OLLAMA_PLANNER_MODEL / OLLAMA_VERIFIER_MODEL / OLLAMA_MODEL."
                     )
+                if response.status_code in {500, 502} and attempt == 0:
+                    time.sleep(0.5)
+                    continue
                 raise LLMClientError(
                     "Ollama request failed "
                     f"(status_code={response.status_code}, url={url}, model={model}). "
                     f"Response: {details}"
                 )
-        except requests.Timeout as exc:
-            backend_hint = "Ollama Cloud" if self.backend == "ollama_cloud" else "Ollama local"
-            raise LLMClientError(
-                f"{backend_hint} request timed out after {self.timeout_sec}s "
-                f"(url={url}, model={model}). Increase OLLAMA_TIMEOUT_SEC or simplify the prompt."
-            ) from exc
-        except requests.RequestException as exc:
-            raise LLMClientError(
-                f"Ollama request failed (backend={self.backend}, url={url}, model={model}): {exc}"
-            ) from exc
 
-        try:
-            data = response.json()
-        except ValueError as exc:
-            raise LLMClientError(f"Ollama returned non-JSON response: {response.text[:300]}") from exc
+            try:
+                data = response.json()
+            except ValueError as exc:
+                raise LLMClientError(f"Ollama returned non-JSON response: {response.text[:300]}") from exc
 
-        message = data.get("message") or {}
-        message_content_raw = str(message.get("content") or "")
-        response_content_raw = str(data.get("response") or "")
-        message_content = message_content_raw.strip()
-        thinking_content = str(message.get("thinking") or "").strip()
-        content_source = "message.content"
-        cleaned_content = str(message_content).strip()
-        used_thinking_fallback = False
-        if not cleaned_content and response_content_raw.strip():
-            cleaned_content = response_content_raw.strip()
-            content_source = "response"
-        if not cleaned_content and thinking_content:
-            extracted_thinking = self._sanitize_llm_json_text(thinking_content)
-            if extracted_thinking:
-                cleaned_content = extracted_thinking
-                content_source = "message.thinking"
-                used_thinking_fallback = True
+            message = data.get("message") or {}
+            message_content_raw = str(message.get("content") or "")
+            response_content_raw = str(data.get("response") or "")
+            message_content = message_content_raw.strip()
+            thinking_content = str(message.get("thinking") or "").strip()
+            content_source = "message.content"
+            cleaned_content = str(message_content).strip()
+            used_thinking_fallback = False
+            if not cleaned_content and response_content_raw.strip():
+                cleaned_content = response_content_raw.strip()
+                content_source = "response"
+            if not cleaned_content and thinking_content:
+                extracted_thinking = self._sanitize_llm_json_text(thinking_content)
+                if extracted_thinking:
+                    cleaned_content = extracted_thinking
+                    content_source = "message.thinking"
+                    used_thinking_fallback = True
 
-        self.last_chat_diagnostics = {
-            "content_source": content_source,
-            "used_thinking_fallback": used_thinking_fallback,
-            "response_keys": sorted(list(data.keys())),
-        }
-        if not cleaned_content:
-            raise LLMClientError(f"Ollama returned empty content. Full payload: {data}")
+            self.last_chat_diagnostics = {
+                "content_source": content_source,
+                "used_thinking_fallback": used_thinking_fallback,
+                "response_keys": sorted(list(data.keys())),
+            }
+            if cleaned_content:
+                return cleaned_content
 
-        return cleaned_content
+            last_error = LLMClientError(f"Ollama returned empty content. Full payload: {data}")
+            if attempt == 0:
+                time.sleep(0.5)
+                continue
+            raise last_error
+
+        raise last_error or LLMClientError("Ollama request failed without diagnostics.")
 
     @staticmethod
     def _encode_image_base64(image_path: str) -> str:

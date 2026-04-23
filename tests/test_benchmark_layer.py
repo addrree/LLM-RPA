@@ -330,7 +330,7 @@ def test_normalize_benchmark_plan_keeps_extract_pattern_in_minimal_mode():
     assert extraction.action == "extract_pattern_from_page_text"
 
 
-def test_normalize_benchmark_plan_keeps_existing_save_as_alias():
+def test_normalize_benchmark_plan_sets_single_value_final_save_as_to_value():
     plan = TaskSpec.model_validate(
         {
             "goal": "extract header",
@@ -349,7 +349,7 @@ def test_normalize_benchmark_plan_keeps_existing_save_as_alias():
     normalized = normalize_benchmark_plan(plan, ctx)
     extraction = normalized.steps[1]
     assert extraction.action == "extract_text"
-    assert extraction.save_as == "heading"
+    assert extraction.save_as == "value"
 
 
 def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click():
@@ -370,8 +370,9 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_bare_text_click(
     )
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    click_step = next(step for step in normalized.steps if step.action == "click")
+    assert click_step.args.get("exact") is True
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
 def test_normalize_benchmark_plan_allows_regex_only_multi_step_compare_without_family_guardrail():
