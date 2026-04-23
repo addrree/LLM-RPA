@@ -1,6 +1,5 @@
 import json
 import logging
-import os
 from datetime import datetime, timezone
 
 from app.config import RAW_LLM_DIR
@@ -14,12 +13,8 @@ from app.verifier.llm_verifier import LLMVerifier
 
 UTC = timezone.utc
 logger = logging.getLogger(__name__)
-ENABLE_BENCHMARK_CONTRACT_REWRITE = os.getenv("ENABLE_BENCHMARK_CONTRACT_REWRITE", "").strip().lower() in {
-    "1",
-    "true",
-    "yes",
-    "on",
-}
+
+
 def normalize_benchmark_plan(
     plan: TaskSpec,
     benchmark_context: dict | None,
@@ -30,7 +25,7 @@ def normalize_benchmark_plan(
 
     payload = plan.model_dump(mode="json")
     steps = payload.get("steps", [])
-    required_fields = payload.get("expected_result", {}).get("required_fields", [])
+    required_fields = benchmark_context.get("required_top_level_fields", [])
     allowed_actions = {
         str(action).strip()
         for action in (benchmark_context.get("allowed_actions") or [])
@@ -38,10 +33,12 @@ def normalize_benchmark_plan(
     }
     fallback_save_as = "value"
     if isinstance(required_fields, list) and required_fields:
-        normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
-        if "value" in normalized_required:
-            fallback_save_as = "value"
-        elif normalized_required:
+        normalized_required = [
+            str(field).strip()
+            for field in required_fields
+            if str(field).strip() and str(field).strip() != "page_snapshot"
+        ]
+        if normalized_required:
             fallback_save_as = normalized_required[0]
 
     normalized_steps: list[dict] = []
@@ -58,12 +55,11 @@ def normalize_benchmark_plan(
         if not isinstance(args, dict):
             args = {}
         step["args"] = args
+        args.pop("page_language", None)
+        args.pop("__benchmark_guardrail_error", None)
 
         if action == "extract_text" and not str(args.get("selector", "")).strip():
             args["selector"] = "h1"
-        if action == "extract_value_near_anchor":
-            # Language is detected by executor from page content/DOM.
-            args.pop("page_language", None)
         if action == "wait_for" and not isinstance(args.get("timeout_ms"), int):
             args["timeout_ms"] = 12000
         if action == "open_url" and not isinstance(args.get("timeout_ms"), int):
@@ -80,14 +76,12 @@ def normalize_benchmark_plan(
         step["step_id"] = idx
 
     payload["steps"] = normalized_steps
-    if ENABLE_BENCHMARK_CONTRACT_REWRITE:
-        from app.benchmark.contract import normalize_payload_for_task_family_contract
-
-        task_family = str((benchmark_context or {}).get("task_family", "")).strip()
-        payload = normalize_payload_for_task_family_contract(payload, task_family=task_family)
-        for idx, step in enumerate(payload.get("steps", []), start=1):
-            if isinstance(step, dict):
-                step["step_id"] = idx
+    payload.setdefault("expected_result", {})
+    payload["expected_result"]["required_fields"] = (
+        [str(field).strip() for field in required_fields if str(field).strip()]
+        if isinstance(required_fields, list)
+        else []
+    )
 
     return TaskSpec.model_validate(payload)
 
