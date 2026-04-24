@@ -18,11 +18,9 @@ class CSVExporter(ResultExporter):
     def export(self, *, run_id: str, extracted_data: Dict[str, Any], structured_output: Dict[str, Any]) -> Path:
         export_path = self.output_dir / f"export_{run_id}.csv"
 
-        list_key = None
         list_items = None
         for key, value in extracted_data.items():
             if isinstance(value, list) and value and all(isinstance(item, dict) for item in value):
-                list_key = key
                 list_items = value
                 break
 
@@ -40,7 +38,5 @@ class CSVExporter(ResultExporter):
 
                 writer.writerow([])
                 writer.writerow(["structured_output", json.dumps(structured_output, ensure_ascii=False)])
-                if list_key:
-                    writer.writerow(["source_list_key", list_key])
 
         return export_path

@@ -7,7 +7,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
-from app.benchmark import BenchmarkRunner, BenchmarkSelection, load_scenario_suite, write_benchmark_report
+from app.benchmark import (
+    BenchmarkRunner,
+    BenchmarkSelection,
+    load_reports,
+    load_scenario_suite,
+    summarize_reports,
+    write_benchmark_report,
+    write_multi_run_summary,
+)
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.orchestrator.persistence import export_results, save_artifacts
 from app.orchestrator.workflow_manager import WorkflowManager
@@ -111,6 +119,7 @@ async def run_benchmark(
     record_video: bool,
     export_formats: list[str] | None,
     two_stage_planning: bool,
+    benchmark_runs: int,
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
@@ -128,14 +137,24 @@ async def run_benchmark(
         export_formats=export_formats,
     )
     selection = BenchmarkSelection(scenario_ids=scenario_ids, categories=categories)
-    report = await runner.run_suite(suite, selection=selection)
-    report_json, report_csv = write_benchmark_report(report)
+    run_reports = []
+    for run_index in range(benchmark_runs):
+        report = await runner.run_suite(suite, selection=selection)
+        report_json, report_csv = write_benchmark_report(report)
+        run_reports.append(report)
 
-    print("\nBENCHMARK SUMMARY:")
-    print(json.dumps(report.metrics.model_dump(mode="json"), ensure_ascii=False, indent=2))
-    print("\nBENCHMARK REPORTS:")
-    print(f"- json: {report_json}")
-    print(f"- csv: {report_csv}")
+        print(f"\nBENCHMARK RUN {run_index + 1}/{benchmark_runs} SUMMARY:")
+        print(json.dumps(report.metrics.model_dump(mode="json"), ensure_ascii=False, indent=2))
+        print("\nBENCHMARK REPORTS:")
+        print(f"- json: {report_json}")
+        print(f"- csv: {report_csv}")
+
+    if benchmark_runs > 1:
+        summary = summarize_reports(run_reports)
+        summary_path = write_multi_run_summary(summary)
+        print("\nMULTI-RUN SUMMARY:")
+        print(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False, indent=2))
+        print(f"- json: {summary_path}")
 
 
 def parse_args():
@@ -207,6 +226,18 @@ def parse_args():
         default=None,
         help="Run only specific category (can be repeated)",
     )
+    parser.add_argument(
+        "--benchmark-runs",
+        type=int,
+        default=1,
+        help="Number of times to execute selected benchmark scenarios sequentially",
+    )
+    parser.add_argument(
+        "--benchmark-summarize-report",
+        action="append",
+        default=None,
+        help="Path to existing benchmark_summary_*.json report (can be repeated) for offline multi-run summary",
+    )
     return parser.parse_args()
 
 
@@ -214,9 +245,18 @@ if __name__ == "__main__":
     load_dotenv()
     args = parse_args()
     benchmark_requested = args.benchmark_all or args.benchmark_scenario or args.benchmark_category
+    benchmark_summary_requested = bool(args.benchmark_summarize_report)
 
     try:
-        if benchmark_requested:
+        if benchmark_summary_requested:
+            report_paths = [Path(path) for path in args.benchmark_summarize_report]
+            reports = load_reports(report_paths)
+            summary = summarize_reports(reports)
+            summary_path = write_multi_run_summary(summary)
+            print("\nMULTI-RUN SUMMARY:")
+            print(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False, indent=2))
+            print(f"- json: {summary_path}")
+        elif benchmark_requested:
             asyncio.run(
                 run_benchmark(
                     suite_path=args.benchmark_suite,
@@ -229,6 +269,7 @@ if __name__ == "__main__":
                     record_video=args.record_video,
                     export_formats=args.export_format,
                     two_stage_planning=args.two_stage_planning,
+                    benchmark_runs=max(args.benchmark_runs, 1),
                 )
             )
         else:
