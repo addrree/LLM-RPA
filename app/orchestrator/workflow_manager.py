@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from urllib.parse import urlparse
 from datetime import datetime, timezone
 
 from app.config import RAW_LLM_DIR
@@ -111,6 +112,10 @@ _PLACEHOLDER_HEADING_PATTERNS = [
 _NON_LABEL_SELECTOR_TOKENS = re.compile(r"[#.\[\]>:,+~]|//|/|\s")
 _SIMPLE_LABEL_PATTERN = re.compile(r"^[\w\-]{1,40}$", re.UNICODE)
 _URLISH_OR_SLUG_PATTERN = re.compile(r"^(https?://|/)[^\s]+$|^[a-z0-9]+(?:[-_/][a-z0-9]+)+$", re.IGNORECASE)
+_GOAL_QUOTED_TARGET_PATTERN = re.compile(r"[\"'“”«»]([^\"'“”«»]{1,60})[\"'“”«»]")
+_GOAL_CAPITALIZED_TARGET_PATTERN = re.compile(r"\b([A-ZА-Я][\w-]{1,30}(?:\s+[A-ZА-Я][\w-]{1,30}){0,2})\b")
+_GOAL_STOP_WORDS = {"Find", "Extract", "Get", "Open", "Navigate", "Click", "Then", "And"}
+_GENERIC_SELECTOR_TAG_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,9}$")
 
 
 def _is_placeholder_heading(text: str) -> bool:
@@ -167,6 +172,76 @@ def _selector_looks_like_plain_label(selector: str) -> bool:
 
 def _label_looks_like_url_or_slug(label: str) -> bool:
     return bool(_URLISH_OR_SLUG_PATTERN.match(str(label or "").strip()))
+
+
+def _step_has_valid_click_target(args: dict | None) -> bool:
+    payload = args if isinstance(args, dict) else {}
+    has_selector = _is_non_empty_str(payload.get("selector"))
+    has_text = _is_non_empty_str(payload.get("text"))
+    has_href = _is_non_empty_str(payload.get("href_contains"))
+    has_role_name = _is_non_empty_str(payload.get("role")) and _is_non_empty_str(payload.get("name"))
+    return bool(has_selector or has_text or has_href or has_role_name)
+
+
+def _candidate_to_href_contains(value: str) -> str | None:
+    candidate = str(value or "").strip()
+    if not candidate:
+        return None
+    if candidate.startswith(("http://", "https://")):
+        parsed = urlparse(candidate)
+        if parsed.path and parsed.path != "/":
+            return parsed.path
+        if parsed.fragment:
+            return parsed.fragment
+        return None
+    if candidate.startswith("/"):
+        return candidate
+    if _label_looks_like_url_or_slug(candidate):
+        return candidate
+    return None
+
+
+def _infer_click_target_from_later_steps(*, steps: list[dict], start_index: int) -> dict | None:
+    for later_step in steps[start_index + 1 :]:
+        later_args = later_step.get("args")
+        if not isinstance(later_args, dict):
+            continue
+
+        direct_href = _candidate_to_href_contains(str(later_args.get("href_contains", "")).strip())
+        if direct_href:
+            return {"href_contains": direct_href}
+
+        for key in ("url_contains", "url", "path", "slug"):
+            candidate_href = _candidate_to_href_contains(str(later_args.get(key, "")).strip())
+            if candidate_href:
+                return {"href_contains": candidate_href}
+
+        selector_value = str(later_args.get("selector", "")).strip()
+        if (
+            selector_value
+            and _selector_looks_like_plain_label(selector_value)
+            and not _GENERIC_SELECTOR_TAG_PATTERN.match(selector_value.lower())
+        ):
+            candidate_href = _candidate_to_href_contains(selector_value)
+            if candidate_href:
+                return {"href_contains": candidate_href}
+            return {"text": selector_value, "exact": True}
+    return None
+
+
+def _infer_click_text_from_goal(goal_text: str) -> str | None:
+    for match in _GOAL_QUOTED_TARGET_PATTERN.finditer(str(goal_text or "")):
+        candidate = match.group(1).strip()
+        if 1 <= len(candidate.split()) <= 4:
+            return candidate
+
+    for match in _GOAL_CAPITALIZED_TARGET_PATTERN.finditer(str(goal_text or "")):
+        candidate = match.group(1).strip()
+        if candidate in _GOAL_STOP_WORDS:
+            continue
+        if len(candidate.split()) <= 4:
+            return candidate
+    return None
 
 
 def _canonicalize_multi_step_compare_steps(steps: list[dict], *, page_snapshot: PageSnapshot | None = None) -> list[dict]:
@@ -295,6 +370,39 @@ def _canonicalize_family_steps(
             has_role_name = _is_non_empty_str(args.get("role")) and _is_non_empty_str(args.get("name"))
             if has_text and not (has_exact or has_scope or has_href or has_role_name):
                 args["exact"] = True
+            if not _step_has_valid_click_target(args):
+                recovered_from_wait = False
+                for look_ahead_index in range(index + 1, len(steps)):
+                    wait_step = steps[look_ahead_index]
+                    if str(wait_step.get("action", "")).strip() != "wait_for":
+                        continue
+                    wait_args = wait_step.get("args")
+                    if not isinstance(wait_args, dict):
+                        wait_args = {}
+                        wait_step["args"] = wait_args
+                    wait_text = str(wait_args.get("text", "")).strip()
+                    wait_url_contains = str(wait_args.get("url_contains", "")).strip()
+                    if wait_text:
+                        args["text"] = wait_text
+                        args["exact"] = True
+                        wait_args.pop("text", None)
+                        recovered_from_wait = True
+                        break
+                    if wait_url_contains:
+                        args["href_contains"] = wait_url_contains
+                        wait_args.pop("url_contains", None)
+                        recovered_from_wait = True
+                        break
+
+                if not recovered_from_wait:
+                    inferred_target = _infer_click_target_from_later_steps(steps=steps, start_index=index)
+                    if inferred_target:
+                        args.update(inferred_target)
+                    else:
+                        goal_label = _infer_click_text_from_goal(goal_text)
+                        if goal_label:
+                            args["text"] = goal_label
+                            args["exact"] = True
 
         if task_family == "navigation_then_extraction" and action == "wait_for":
             has_text = _is_non_empty_str(args.get("text"))
