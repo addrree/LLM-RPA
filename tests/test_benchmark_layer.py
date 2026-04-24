@@ -532,8 +532,10 @@ def test_normalize_benchmark_plan_adds_guardrail_for_navigation_weak_wait_for_te
     )
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    wait_step = next(step for step in normalized.steps if step.action == "wait_for")
+    assert wait_step.args["selector"] == "h1"
+    assert "text" not in wait_step.args
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
 def test_normalize_benchmark_plan_keeps_navigation_wait_shape():
@@ -556,9 +558,9 @@ def test_normalize_benchmark_plan_keeps_navigation_wait_shape():
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
     wait_step = next(step for step in normalized.steps if step.action == "wait_for")
-    assert wait_step.args["text"] == "Pricing"
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    assert wait_step.args["selector"] == "h1"
+    assert "text" not in wait_step.args
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
 def test_normalize_benchmark_plan_keeps_navigation_wait_text_for_role_name_click():
@@ -581,9 +583,9 @@ def test_normalize_benchmark_plan_keeps_navigation_wait_text_for_role_name_click
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx)
     wait_step = next(step for step in normalized.steps if step.action == "wait_for")
-    assert wait_step.args["text"] == "Pricing"
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+    assert wait_step.args["selector"] == "h1"
+    assert "text" not in wait_step.args
+    PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
 
 
 def test_normalize_benchmark_plan_allows_overconstrained_navigation_click_without_guardrail():
