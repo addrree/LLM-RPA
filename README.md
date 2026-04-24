@@ -133,8 +133,9 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 - `multi_step_information_retrieval`
 - `negative_or_ambiguous_case`
 
-Сценарии лежат в `benchmarks/scenarios/core_task_suite.json` и не привязаны к одному домену.
-Это основной benchmark (full generalized suite) и его нельзя заменять smoke-набором.
+Сценарии v1 лежат в `benchmarks/scenarios/core_task_suite.json` и не привязаны к одному домену.
+Дополнительно есть расширенная версия v2: `benchmarks/scenarios/extended_generalized_task_suite.json`
+с теми же task families и дополнительными стабильными публичными сайтами.
 
 Дополнительно есть быстрый smoke-suite: `benchmarks/scenarios/smoke_generalized_suite.json`
 с тремя категориями:
@@ -142,10 +143,16 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 - `anchored_value_extraction`
 - `repeated_structured_items`
 
-Запустить все сценарии:
+Запустить все сценарии v1:
 
 ```bash
 python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/core_task_suite.json --backend ollama
+```
+
+Запустить расширенный suite v2:
+
+```bash
+python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/extended_generalized_task_suite.json --backend ollama
 ```
 
 Запустить smoke-suite отдельно:
@@ -170,6 +177,19 @@ python -m app.main --benchmark-category navigation_then_extraction --backend oll
 
 - `artifacts/benchmarks/benchmark_summary_<suite_id>_<timestamp>.json`
 - `artifacts/benchmarks/benchmark_summary_<suite_id>_<timestamp>.csv`
+- `artifacts/benchmarks/benchmark_multi_run_summary_<suite_id>_<timestamp>.json` (для `--benchmark-runs > 1` или `--benchmark-summarize-report`)
+
+Сделать multi-run и автоматически получить summary по нескольким прогонам:
+
+```bash
+python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/extended_generalized_task_suite.json --benchmark-runs 5 --backend ollama
+```
+
+Построить multi-run summary из уже сохранённых `benchmark_summary_*.json`:
+
+```bash
+python -m app.main   --benchmark-summarize-report artifacts/benchmarks/benchmark_summary_core_generalized_task_suite_v2_20260424_100000.json   --benchmark-summarize-report artifacts/benchmarks/benchmark_summary_core_generalized_task_suite_v2_20260424_103000.json
+```
 
 В summary считаются метрики:
 

@@ -1,0 +1,332 @@
+{
+  "suite_id": "core_generalized_task_suite_v2",
+  "description": "Extended generalized benchmark on deterministic public pages with the same task families as v1.",
+  "scenarios": [
+    {
+      "scenario_id": "single_value_title_or_header_python",
+      "goal": "Open https://www.python.org/ and extract one primary page value (title or main heading) as a single scalar field.",
+      "start_url": "https://www.python.org/",
+      "target_page_hint": "Python homepage hero/header",
+      "preconditions": [
+        "Landing page is publicly accessible without authentication."
+      ],
+      "page_expectations": [
+        "A visible main heading or unambiguous primary title exists."
+      ],
+      "category": "single_value_extraction",
+      "description": "Single-value extraction on python.org baseline source.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": [
+        "value"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Stable public page.",
+      "task_family": "single_value_extraction",
+      "anchor_candidates": [],
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "single_value_title_or_header_iana",
+      "goal": "Open https://www.iana.org/about and extract one primary page value (title or main heading) as a single scalar field.",
+      "start_url": "https://www.iana.org/about",
+      "target_page_hint": "IANA About page heading/title",
+      "preconditions": [
+        "Page is publicly accessible and static."
+      ],
+      "page_expectations": [
+        "A stable heading or title is visible near the top of the page."
+      ],
+      "category": "single_value_extraction",
+      "description": "Single-value extraction on a second public site.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": [
+        "value"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "No auth, deterministic informational page.",
+      "task_family": "single_value_extraction",
+      "anchor_candidates": [],
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "anchored_support_contact_python",
+      "goal": "Open https://www.python.org/about/help/ and extract a value near a contact/support textual anchor.",
+      "start_url": "https://www.python.org/about/help/",
+      "target_page_hint": "Python help/contact sections",
+      "preconditions": [
+        "Page contains support or contact references."
+      ],
+      "page_expectations": [
+        "At least one anchor candidate is present near an extractable support value."
+      ],
+      "category": "anchored_value_extraction",
+      "description": "Anchored extraction on python.org help page.",
+      "expected_output_type": "object",
+      "required_top_level_fields": [
+        "value"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Use anchor-aware extraction; do not hardcode expected value.",
+      "task_family": "anchored_value_extraction",
+      "anchor_candidates": [
+        "Help",
+        "Contact",
+        "Support",
+        "Email"
+      ],
+      "anchor_matching_mode": "contains",
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "anchored_contact_ietf",
+      "goal": "Open https://www.ietf.org/contact/ and extract a value near a contact-related textual anchor.",
+      "start_url": "https://www.ietf.org/contact/",
+      "target_page_hint": "IETF contact page",
+      "preconditions": [
+        "Page is public and includes contact-oriented anchors."
+      ],
+      "page_expectations": [
+        "At least one contact anchor appears near email/phone-like content."
+      ],
+      "category": "anchored_value_extraction",
+      "description": "Anchored extraction on a second public site.",
+      "expected_output_type": "object",
+      "required_top_level_fields": [
+        "value"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Deterministic public page without login.",
+      "task_family": "anchored_value_extraction",
+      "anchor_candidates": [
+        "Contact",
+        "Email",
+        "Support",
+        "Phone"
+      ],
+      "anchor_matching_mode": "contains",
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "repeated_listing_cards_python_downloads",
+      "goal": "Open https://www.python.org/downloads/ and extract a repeated structured list of at least 3 release items with multiple fields per item.",
+      "start_url": "https://www.python.org/downloads/",
+      "target_page_hint": "Python downloads release list",
+      "preconditions": [
+        "Listing page exposes repeated release blocks/cards."
+      ],
+      "page_expectations": [
+        "At least 3 repeated items are available with name and detail/date-like fields."
+      ],
+      "category": "repeated_structured_items",
+      "description": "Structured repeated extraction on python.org downloads.",
+      "expected_output_type": "list",
+      "required_top_level_fields": [
+        "items"
+      ],
+      "expected_min_items": 3,
+      "expected_item_fields": [
+        "name",
+        "detail"
+      ],
+      "should_succeed": true,
+      "notes": "Deterministic listing page.",
+      "task_family": "repeated_structured_items",
+      "anchor_candidates": [],
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "repeated_listing_iana_rootdb",
+      "goal": "Open https://www.iana.org/domains/root/db and extract a repeated structured list of at least 3 items with multiple fields per item.",
+      "start_url": "https://www.iana.org/domains/root/db",
+      "target_page_hint": "IANA root zone database table",
+      "preconditions": [
+        "The page provides a public repeated table/list of records."
+      ],
+      "page_expectations": [
+        "At least 3 repeated entries are available and can be represented as list[object]."
+      ],
+      "category": "repeated_structured_items",
+      "description": "Structured repeated extraction on a non-python public source.",
+      "expected_output_type": "list",
+      "required_top_level_fields": [
+        "items"
+      ],
+      "expected_min_items": 3,
+      "expected_item_fields": [
+        "name",
+        "detail"
+      ],
+      "should_succeed": true,
+      "notes": "Public deterministic directory-style page.",
+      "task_family": "repeated_structured_items",
+      "anchor_candidates": [],
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "navigate_then_extract_docs_python",
+      "goal": "Open https://docs.python.org/3/ homepage, navigate via one click to another section page, then extract a key value from the new page.",
+      "start_url": "https://docs.python.org/3/",
+      "target_page_hint": "Python documentation subsection reached via one internal click",
+      "preconditions": [
+        "At least one stable internal nav link is visible on landing page."
+      ],
+      "page_expectations": [
+        "Final URL differs from start URL and target page has an extractable key value."
+      ],
+      "category": "navigation_then_extraction",
+      "description": "Navigation + extraction on docs.python.org.",
+      "expected_output_type": "object",
+      "required_top_level_fields": [
+        "value"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Final URL should differ from start URL.",
+      "task_family": "navigation_then_extraction",
+      "anchor_candidates": [],
+      "expected_navigation": [
+        "start_page",
+        "internal_section_page"
+      ]
+    },
+    {
+      "scenario_id": "navigate_then_extract_gnu",
+      "goal": "Open https://www.gnu.org/ homepage, navigate via one click to another public section page, then extract one key value from the new page.",
+      "start_url": "https://www.gnu.org/",
+      "target_page_hint": "GNU secondary section page reached by internal link",
+      "preconditions": [
+        "A stable internal navigation link is visible without authentication."
+      ],
+      "page_expectations": [
+        "Final URL should differ from the start URL and include extractable content."
+      ],
+      "category": "navigation_then_extraction",
+      "description": "Navigation + extraction on gnu.org.",
+      "expected_output_type": "object",
+      "required_top_level_fields": [
+        "value"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Public deterministic content pages.",
+      "task_family": "navigation_then_extraction",
+      "anchor_candidates": [],
+      "expected_navigation": [
+        "start_page",
+        "internal_section_page"
+      ]
+    },
+    {
+      "scenario_id": "multi_step_compare_two_sections_python",
+      "goal": "On https://www.python.org/, retrieve information from two different sections or pages and produce one merged structured output.",
+      "start_url": "https://www.python.org/",
+      "target_page_hint": "Two distinct content areas or one additional page plus source page",
+      "preconditions": [
+        "Both sections are public and reachable without login."
+      ],
+      "page_expectations": [
+        "Scenario can gather source_a and source_b before composing combined_result."
+      ],
+      "category": "multi_step_information_retrieval",
+      "description": "Multi-step retrieval baseline on python.org.",
+      "expected_output_type": "object",
+      "required_top_level_fields": [
+        "combined_result"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "Use deterministic sections.",
+      "task_family": "multi_step_information_retrieval",
+      "anchor_candidates": [],
+      "expected_navigation": [
+        "source_a",
+        "source_b"
+      ]
+    },
+    {
+      "scenario_id": "multi_step_compare_two_sections_rfc",
+      "goal": "On https://www.rfc-editor.org/, retrieve information from two different sections and produce one merged structured output.",
+      "start_url": "https://www.rfc-editor.org/",
+      "target_page_hint": "RFC Editor homepage sections",
+      "preconditions": [
+        "Multiple visible public sections are present on page."
+      ],
+      "page_expectations": [
+        "Scenario can extract source_a and source_b before producing combined_result."
+      ],
+      "category": "multi_step_information_retrieval",
+      "description": "Multi-step retrieval on a second deterministic site.",
+      "expected_output_type": "object",
+      "required_top_level_fields": [
+        "combined_result"
+      ],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": true,
+      "notes": "No login-protected content.",
+      "task_family": "multi_step_information_retrieval",
+      "anchor_candidates": [],
+      "expected_navigation": [
+        "source_a",
+        "source_b"
+      ]
+    },
+    {
+      "scenario_id": "missing_or_ambiguous_field_iana",
+      "goal": "Open https://www.iana.org/domains/reserved and attempt to extract a field that is likely absent or ambiguous, returning explicit uncertainty or not-found.",
+      "start_url": "https://www.iana.org/domains/reserved",
+      "target_page_hint": "IANA reserved domains informational page (negative test)",
+      "preconditions": [
+        "Requested field is intentionally underspecified for this page instance."
+      ],
+      "page_expectations": [
+        "Execution should complete, but verifier is expected to reject semantic completion."
+      ],
+      "category": "negative_or_ambiguous_case",
+      "description": "Negative/ambiguous baseline on IANA page.",
+      "expected_output_type": "none",
+      "required_top_level_fields": [],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": false,
+      "notes": "Expected semantic reject.",
+      "task_family": "negative_or_ambiguous_case",
+      "anchor_candidates": [],
+      "expected_navigation": []
+    },
+    {
+      "scenario_id": "missing_or_ambiguous_field_example",
+      "goal": "Open https://example.com and attempt to extract a field that is intentionally underspecified or ambiguous, returning explicit uncertainty or not-found.",
+      "start_url": "https://example.com",
+      "target_page_hint": "Example.com minimal informational page (negative test)",
+      "preconditions": [
+        "Requested value is intentionally ambiguous for this page."
+      ],
+      "page_expectations": [
+        "Execution should complete with semantic uncertainty and expected verifier rejection."
+      ],
+      "category": "negative_or_ambiguous_case",
+      "description": "Negative/ambiguous scenario on deterministic example.com page.",
+      "expected_output_type": "none",
+      "required_top_level_fields": [],
+      "expected_min_items": 0,
+      "expected_item_fields": [],
+      "should_succeed": false,
+      "notes": "Expected behavior is semantic reject, not browser crash.",
+      "task_family": "negative_or_ambiguous_case",
+      "anchor_candidates": [],
+      "expected_navigation": []
+    }
+  ]
+}
