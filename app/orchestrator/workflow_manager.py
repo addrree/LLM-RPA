@@ -302,18 +302,16 @@ def _canonicalize_family_steps(
             has_url_contains = _is_non_empty_str(args.get("url_contains"))
             has_scope = _is_non_empty_str(args.get("scope_selector"))
             has_exact = bool(args.get("exact"))
+            if not (has_selector or has_url_contains or has_text):
+                args["selector"] = "h1"
+                has_selector = True
             if has_text and not (has_selector or has_url_contains or has_scope or has_exact):
-                selector_from_future_extract = None
-                for candidate in steps[index + 1 :]:
-                    if str(candidate.get("action", "")).strip() != "extract_text":
-                        continue
-                    candidate_args = candidate.get("args")
-                    if isinstance(candidate_args, dict) and _is_non_empty_str(candidate_args.get("selector")):
-                        selector_from_future_extract = str(candidate_args["selector"]).strip()
-                        break
-                if selector_from_future_extract:
+                final_extraction_action = None
+                if final_extraction_index is not None:
+                    final_extraction_action = str(steps[final_extraction_index].get("action", "")).strip()
+                if final_extraction_action == "extract_text":
                     args.pop("text", None)
-                    args["selector"] = selector_from_future_extract
+                    args["selector"] = "h1"
                 else:
                     args["exact"] = True
 
@@ -392,6 +390,12 @@ def normalize_benchmark_plan(
             and not (isinstance(step.get("save_as"), str) and step.get("save_as", "").strip())
         ):
             step["save_as"] = fallback_save_as
+        if (
+            task_family == "negative_or_ambiguous_case"
+            and action.startswith("extract")
+            and not (isinstance(step.get("save_as"), str) and step.get("save_as", "").strip())
+        ):
+            step["save_as"] = "_probe"
 
         normalized_steps.append(step)
 

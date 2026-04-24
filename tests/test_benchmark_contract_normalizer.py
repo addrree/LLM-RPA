@@ -241,12 +241,36 @@ def test_navigation_family_strengthens_weak_click_only():
     click_step = next(step for step in normalized.steps if step.action == "click")
     extract_step = next(step for step in normalized.steps if step.action == "extract_text")
 
+    wait_step = next(step for step in normalized.steps if step.action == "wait_for")
     assert click_step.args["exact"] is True
+    assert wait_step.args["selector"] == "h1"
+    assert "text" not in wait_step.args
     assert extract_step.args["selector"] == "h1"
     assert extract_step.save_as == "value"
-    with pytest.raises(PlanValidationError):
-        PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
+    PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
+
+
+def test_negative_family_assigns_technical_save_as_for_extraction_without_contract_fields():
+    plan = _base_plan(
+        [],
+        [
+            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.com"}},
+            {"step_id": 2, "action": "extract_pattern_from_page_text", "args": {"pattern": r"(no data)"}},
+            {"step_id": 3, "action": "finish", "args": {}},
+        ],
+    )
+    ctx = build_benchmark_context(
+        category="negative_or_ambiguous_case",
+        task_family="negative_or_ambiguous_case",
+        required_top_level_fields=[],
+    )
+
+    normalized = normalize_benchmark_plan(plan, ctx)
+    extract_step = next(step for step in normalized.steps if step.action == "extract_pattern_from_page_text")
+
+    assert extract_step.save_as == "_probe"
+    PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
 
 def test_multi_step_family_rewrites_unstable_region_section_actions_to_stable_pipeline():
     plan = _base_plan(
