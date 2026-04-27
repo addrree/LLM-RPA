@@ -4,9 +4,10 @@ from app.executor.action_handlers import ActionHandlers
 
 
 class _FakePage:
-    def __init__(self, table_rows=None, list_rows=None, links=None):
+    def __init__(self, table_rows=None, list_rows=None, entity_rows=None, links=None):
         self._table_rows = table_rows or []
         self._list_rows = list_rows or []
+        self._entity_rows = entity_rows or []
         self._links = links or []
 
     async def evaluate(self, script, payload=None):
@@ -15,6 +16,8 @@ class _FakePage:
             return self._table_rows[: int((payload or {}).get("limit", len(self._table_rows)))]
         if "main a[href], article a[href], ul li, ol li" in text:
             return self._list_rows[: int((payload or {}).get("limit", len(self._list_rows)))]
+        if "main li, article li, main article" in text:
+            return self._entity_rows[: int((payload or {}).get("limit", len(self._entity_rows)))]
         if "querySelectorAll(\"a[href]\")" in text:
             return self._links
         return []
@@ -74,6 +77,46 @@ def test_extract_structured_items_falls_back_to_list_rows_when_table_absent():
         )
     )
     assert result == [{"name": "Software", "detail": "/software/"}, {"name": "Licenses", "detail": "/licenses/"}]
+
+
+def test_broad_repeated_pattern_rejects_low_quality_list_items_fallback():
+    handler = ActionHandlers()
+    page = _FakePage(list_rows=[["Home"], ["About"], ["Contact"], ["Privacy"], ["Terms"]])
+
+    try:
+        asyncio.run(
+            handler.extract_structured_items(
+                page,
+                {"pattern": "(.+)", "limit": 5, "fields": {"name": 1, "detail": 2}},
+                runtime_state={"benchmark_context": {"task_family": "repeated_structured_items"}},
+            )
+        )
+        assert False, "expected low-quality list fallback rejection"
+    except Exception as exc:  # noqa: BLE001
+        assert "high-quality DOM fallback" in str(exc) or "low-quality" in str(exc)
+
+
+def test_repeated_entity_blocks_extract_python_release_like_items_generically():
+    handler = ActionHandlers()
+    page = _FakePage(
+        entity_rows=[
+            {"text": "Python 3.14.0 Oct. 7, 2025 Download", "raw_text": "Python 3.14.0 Oct. 7, 2025 Download", "href": "/downloads/release/python-3140/"},
+            {"text": "Python 3.13.7 September 10, 2025 Notes", "raw_text": "Python 3.13.7 September 10, 2025 Notes", "href": "/downloads/release/python-3137/"},
+        ]
+    )
+    args = {"pattern": "(.+)", "limit": 2, "fields": {"title": 1, "date": 2, "href": 3}}
+    result = asyncio.run(
+        handler.extract_structured_items(
+            page,
+            args,
+            runtime_state={"benchmark_context": {"task_family": "repeated_structured_items"}},
+        )
+    )
+    assert len(result) == 2
+    assert any("Python 3.14.0" in item.get("title", "") for item in result)
+    assert all(item.get("date") for item in result)
+    assert all(str(item.get("href", "")).startswith("/downloads/release/") for item in result)
+    assert "fallback=repeated_entity_blocks" in args.get("_executor_note", "")
 
 
 def test_contact_value_type_supports_email_or_phone():
