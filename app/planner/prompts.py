@@ -107,7 +107,8 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "For contact goals prefer value_type=email|phone|email_or_phone inferred from page evidence."
         ),
         "negative_or_ambiguous_case": (
-            "Path hint: open_url -> observe_page(optional) -> extraction(optional) -> finish."
+            "Path hint: open_url -> observe_page -> probe extraction (extract_text|extract_pattern_from_page_text) -> finish. "
+            "Plan open_url -> finish is forbidden for negative/ambiguous benchmarks."
         ),
     }.get(task_family, "")
     return f"""
@@ -250,8 +251,9 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
             "Не передавай page_language. Для contact/support задач используй value_type=email|phone|email_or_phone."
         ),
         "negative_or_ambiguous_case": (
-            "Избегай broad prose extraction: regex должен иметь capture group для конкретного value token. "
-            "Не возвращай длинные абзацы вместо компактного результата."
+            "Обязателен probe plan: open_url -> observe_page -> попытка extraction/probe -> finish. "
+            "План open_url -> finish запрещен и будет отвергнут verifier. "
+            "Избегай broad prose extraction: regex должен иметь capture group для конкретного value token."
         ),
     }.get(task_family, "")
     return f"""

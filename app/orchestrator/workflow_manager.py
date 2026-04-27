@@ -561,6 +561,7 @@ class WorkflowManager:
     RECOVERABLE_FAILURE_TYPES = {
         "verification_reject",
         "missing_required_field",
+        "missing_probe_attempt",
         "schema_mismatch",
         "anchor_not_found",
         "value_not_found_near_anchor",
@@ -1197,6 +1198,8 @@ class WorkflowManager:
     @classmethod
     def _classify_verifier_failure(cls, issues: list[str]) -> str:
         text = " ".join(issues).lower()
+        if "probe/extraction" in text or "open_url -> finish only" in text:
+            return "missing_probe_attempt"
         if "required" in text or "missing" in text:
             return "missing_required_field"
         if "schema" in text or "format" in text or "structure" in text:

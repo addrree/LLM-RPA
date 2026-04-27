@@ -8,9 +8,12 @@ from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, Bench
 from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
 from app.orchestrator.workflow_manager import normalize_benchmark_plan
 from app.planner.action_vocab import normalize_plan_action_aliases
+from app.schemas.execution import ExecutionResult, StepLog
 from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.task_spec import TaskSpec
+from app.utils.llm_client import DummyLLMClient
 from app.validator.plan_validator import PlanValidationError, PlanValidator
+from app.verifier.llm_verifier import LLMVerifier
 
 
 def test_scenario_suite_contains_required_categories():
@@ -255,6 +258,30 @@ def test_smoke_suite_contains_three_core_categories():
     }
 
 
+def test_extended_suite_replaces_gnu_navigation_with_iana_protocols():
+    suite = load_scenario_suite(Path("benchmarks/scenarios/extended_generalized_task_suite.json"))
+    scenario_ids = {scenario.scenario_id for scenario in suite.scenarios}
+    assert "navigate_then_extract_gnu" not in scenario_ids
+    assert "navigate_then_extract_iana_protocols" in scenario_ids
+
+
+def test_extended_suite_has_no_example_dot_com_urls():
+    suite = load_scenario_suite(Path("benchmarks/scenarios/extended_generalized_task_suite.json"))
+    chunks: list[str] = []
+    for scenario in suite.scenarios:
+        chunks.extend(
+            [
+                scenario.start_url,
+                scenario.goal,
+                scenario.target_page_hint,
+                scenario.description,
+                scenario.notes,
+            ]
+        )
+    all_text = " ".join(chunks)
+    assert "example.com" not in all_text.lower()
+
+
 def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
     scenario = BenchmarkScenario.model_validate(
         {
@@ -287,6 +314,34 @@ def test_benchmark_context_keeps_evaluator_metadata_private_from_prompt_contract
     assert ctx["evaluator_metadata"]["scenario_id"] == "repeated_listing_iana_rootdb"
 
 
+def test_llm_visible_context_excludes_forbidden_answer_hint_fields():
+    scenario = BenchmarkScenario.model_validate(
+        {
+            "scenario_id": "navigate_then_extract_iana_protocols",
+            "goal": "Open https://www.iana.org and extract heading after navigation",
+            "start_url": "https://www.iana.org",
+            "category": "navigation_then_extraction",
+            "description": "d",
+            "expected_output_type": "object",
+            "required_top_level_fields": ["value"],
+        }
+    )
+    goal = BenchmarkRunner._build_grounded_goal(scenario, allowed_actions=["open_url", "observe_page", "finish"])
+    forbidden_tokens = [
+        "expected_answer",
+        "expected_value",
+        "expected_pattern",
+        "expected_heading",
+        "expected_anchor",
+        "anchor_candidates",
+        "target_candidates",
+        "preselected regex",
+        "preselected section names",
+    ]
+    lowered = goal.lower()
+    assert all(token.lower() not in lowered for token in forbidden_tokens)
+
+
 def test_benchmark_allowed_actions_are_category_specific():
     assert BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY["single_value_extraction"] == [
         "open_url",
@@ -296,6 +351,72 @@ def test_benchmark_allowed_actions_are_category_specific():
     ]
     assert "click" not in BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY["single_value_extraction"]
     assert "compare_structured_values" in BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY["multi_step_information_retrieval"]
+
+
+def test_negative_open_url_then_finish_is_rejected_by_verifier_policy():
+    verifier = LLMVerifier(DummyLLMClient())
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Open page and report missing/ambiguous field.",
+            "start_url": "https://www.iana.org/about",
+            "allowed_domains": ["www.iana.org"],
+            "constraints": {"max_steps": 4, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "Negative case", "required_fields": []},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.iana.org/about"}},
+                {"step_id": 2, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    result = ExecutionResult(
+        status="success",
+        extracted_data={},
+        logs=[
+            StepLog(step_id=1, action="open_url", status="success"),
+            StepLog(step_id=2, action="finish", status="success"),
+        ],
+    )
+    verdict = verifier.verify(
+        plan=plan,
+        result=result,
+        benchmark_context={"task_family": "negative_or_ambiguous_case"},
+    )
+    assert verdict.verdict == "reject"
+    assert any("open_url -> finish" in issue for issue in verdict.issues)
+
+
+def test_negative_without_probe_attempt_is_rejected_by_verifier_policy():
+    verifier = LLMVerifier(DummyLLMClient())
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Open page and report missing/ambiguous field.",
+            "start_url": "https://www.iana.org/domains/reserved",
+            "allowed_domains": ["www.iana.org"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "max_verification_retries": 1, "timeout_sec": 30},
+            "expected_result": {"description": "Negative case", "required_fields": []},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://www.iana.org/domains/reserved"}},
+                {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+    result = ExecutionResult(
+        status="success",
+        extracted_data={"status": "not_found"},
+        logs=[
+            StepLog(step_id=1, action="open_url", status="success"),
+            StepLog(step_id=2, action="observe_page", status="success"),
+            StepLog(step_id=3, action="finish", status="success"),
+        ],
+    )
+    verdict = verifier.verify(
+        plan=plan,
+        result=result,
+        benchmark_context={"task_family": "negative_or_ambiguous_case"},
+    )
+    assert verdict.verdict == "reject"
+    assert any("probe/extraction" in issue.lower() for issue in verdict.issues)
 
 
 def test_plan_validator_rejects_actions_outside_benchmark_policy():
