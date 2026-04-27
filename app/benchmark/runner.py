@@ -380,29 +380,18 @@ class BenchmarkRunner:
     def _build_grounded_goal(scenario: BenchmarkScenario, *, allowed_actions: list[str] | None = None) -> str:
         domain = urlparse(str(scenario.start_url)).netloc
         parts = [
-            f"Scenario ID: {scenario.scenario_id}.",
-            f"Task family: {scenario.task_family or scenario.category}.",
-            f"Goal: {scenario.goal.strip()}",
-            f"Start URL: {scenario.start_url}.",
+            f"Task family is {scenario.task_family or scenario.category}.",
+            f"User goal: {scenario.goal.strip()}",
+            f"Open this URL first: {scenario.start_url}.",
         ]
         if domain:
-            parts.append(f"Allowed domains: {domain}.")
-        parts.append(f"Should succeed: {'yes' if scenario.should_succeed else 'no'}.")
-        parts.append("Benchmark rule: infer anchors/headings/value patterns from observe_page or page snapshot.")
-        parts.append("Benchmark rule: do not rely on pre-specified expected candidates or expected values.")
-        if scenario.task_family:
-            parts.append(f"Category: {scenario.category}.")
+            parts.append(f"Stay within domain: {domain}.")
+        parts.append("Infer anchors/headings/value patterns from observe_page or page snapshot.")
+        parts.append("Do not rely on pre-specified expected candidates or expected values.")
         if allowed_actions:
-            parts.append(f"Allowed actions for benchmark: {', '.join(allowed_actions)}.")
+            parts.append(f"Use only these actions: {', '.join(allowed_actions)}.")
         if scenario.preconditions:
             parts.append(f"Constraints: {'; '.join(scenario.preconditions[:3])}.")
-        if scenario.notes:
-            parts.append(f"Notes: {scenario.notes}.")
-        if scenario.required_top_level_fields:
-            parts.append(
-                "Required top-level fields: "
-                f"{', '.join(scenario.required_top_level_fields)}."
-            )
         return "\n".join(parts)
 
 

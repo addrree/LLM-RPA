@@ -124,6 +124,54 @@ def test_click_selector_plain_text_is_canonicalized_before_locator_resolution():
     assert "selector" not in args
 
 
+def test_click_meta_text_uses_anchor_fallback_for_locator_resolution():
+    handler = ActionHandlers()
+
+    class _FakeLocator:
+        def __init__(self, count):
+            self._count = count
+            self.first = self
+
+        async def count(self):
+            return self._count
+
+    class _FakePageForClick(_FakePage):
+        def get_by_role(self, role, name=None, exact=False):
+            if role == "link" and name == "Tutorial":
+                return _FakeLocator(1)
+            return _FakeLocator(0)
+
+        def get_by_text(self, *_args, **_kwargs):
+            return _FakeLocator(0)
+
+        def locator(self, _selector):
+            return _FakeLocator(0)
+
+    args = {"text": "Scenario ID", "anchor": "Tutorial", "exact": True}
+    locator, meta = asyncio.run(
+        handler._resolve_ranked_click_locator(page=_FakePageForClick(), args=args, runtime_state={})
+    )
+    assert locator is not None
+    assert meta["strategy"] in {"role_link_name", "role_link_anchor"}
+    assert args.get("text") == "Tutorial"
+    assert "anchor" not in args
+
+
+def test_click_meta_text_without_fallback_returns_validation_style_error():
+    handler = ActionHandlers()
+    try:
+        asyncio.run(
+            handler._resolve_ranked_click_locator(
+                page=_FakePage(),
+                args={"text": "Scenario ID"},
+                runtime_state={},
+            )
+        )
+        assert False, "expected invalid click target error"
+    except Exception as exc:  # noqa: BLE001
+        assert "meta label" in str(exc)
+
+
 def test_extract_section_lines_rejects_ungrounded_heading_before_execution():
     handler = ActionHandlers()
     args = {"heading_text": "Wikipedia\nСвободная энциклопедия", "limit": 5}

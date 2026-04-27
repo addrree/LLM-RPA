@@ -14,6 +14,18 @@ class StructuredExtractionError(ValueError):
 
 
 class ActionHandlers:
+    _CLICK_META_LABELS = {
+        "scenario id",
+        "scenario",
+        "category",
+        "notes",
+        "required fields",
+        "expected result",
+        "should succeed",
+        "benchmark",
+        "expected",
+    }
+
     def __init__(self):
         self.page_observer = PageObserver()
 
@@ -1041,6 +1053,7 @@ class ActionHandlers:
     async def _resolve_ranked_click_locator(self, *, page, args, runtime_state=None):
         selector = str(args.get("selector", "")).strip()
         text = str(args.get("text", "")).strip()
+        anchor = str(args.get("anchor", "")).strip()
         role = str(args.get("role", "")).strip()
         name = str(args.get("name", "")).strip()
         href_contains = str(args.get("href_contains", "")).strip()
@@ -1051,11 +1064,11 @@ class ActionHandlers:
         visible_only = bool(args.get("visible_only", True))
 
         if selector and self._selector_looks_like_plain_text_click_target(selector):
-            if not text:
+            if not text and not self._is_meta_click_label(selector):
                 text = selector
                 args["text"] = text
                 args.setdefault("exact", True)
-            if not href_contains:
+            if not href_contains and text:
                 inferred_href = self._infer_href_slug_from_text(text)
                 if inferred_href:
                     args["href_contains"] = inferred_href
@@ -1064,11 +1077,41 @@ class ActionHandlers:
             args.pop("selector", None)
             selector = ""
 
+        text_is_meta = self._is_meta_click_label(text)
+        anchor_is_meta = self._is_meta_click_label(anchor)
+        name_is_meta = self._is_meta_click_label(name)
+
+        canonical_text = ""
+        if text and not text_is_meta:
+            canonical_text = text
+        elif anchor and not anchor_is_meta:
+            canonical_text = anchor
+        elif name and not name_is_meta:
+            canonical_text = name
+
+        if canonical_text:
+            text = canonical_text
+            args["text"] = canonical_text
+            args.pop("anchor", None)
+        elif text_is_meta:
+            text = ""
+            args.pop("text", None)
+
+        if text and not href_contains:
+            inferred_href = self._infer_href_slug_from_text(text)
+            if inferred_href:
+                href_contains = inferred_href
+                args["href_contains"] = inferred_href
+
         scope = page.locator(scope_selector) if scope_selector else page
         candidates: list[dict[str, Any]] = []
         if text:
             candidates.append({"strategy": "role_link_name", "locator": scope.get_by_role("link", name=text, exact=exact), "selector": f"role=link, name={text}"})
-        if role and name:
+        if anchor and not anchor_is_meta:
+            candidates.append({"strategy": "role_link_anchor", "locator": scope.get_by_role("link", name=anchor, exact=exact), "selector": f"role=link, name={anchor}"})
+        if name and not name_is_meta:
+            candidates.append({"strategy": "role_link_name_field", "locator": scope.get_by_role("link", name=name, exact=exact), "selector": f"role=link, name={name}"})
+        if role and name and not name_is_meta:
             candidates.append({"strategy": "role_name", "locator": scope.get_by_role(role, name=name, exact=exact), "selector": f"role={role}, name={name}"})
         if label:
             candidates.append({"strategy": "label", "locator": scope.get_by_label(label, exact=exact), "selector": f"label={label}"})
@@ -1102,6 +1145,10 @@ class ActionHandlers:
             candidates.append({"strategy": "generic_selector_fallback", "locator": page.locator(selector), "selector": selector})
 
         if not candidates:
+            if text_is_meta:
+                raise ValueError(
+                    "Invalid click target: args.text is benchmark/meta label and no valid fallback target found."
+                )
             raise ValueError("click requires selector or text/role+name/href_contains/label/placeholder")
 
         diagnostics: list[dict[str, Any]] = []
@@ -1255,6 +1302,11 @@ class ActionHandlers:
     def _infer_href_slug_from_text(text: str) -> str:
         token = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
         return token[:48]
+
+    @classmethod
+    def _is_meta_click_label(cls, value: str) -> bool:
+        token = re.sub(r"\s+", " ", str(value or "").strip().lower()).strip(" :.-_")
+        return bool(token) and token in cls._CLICK_META_LABELS
 
     async def _discover_href_from_visible_links(self, *, page, text: str) -> str | None:
         needle = re.sub(r"\s+", " ", str(text or "").strip().lower())
