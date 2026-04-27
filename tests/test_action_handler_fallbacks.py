@@ -38,6 +38,26 @@ def test_extract_structured_items_falls_back_to_table_rows_when_regex_fails():
     assert result == [{"name": ".aaa", "detail": "aaa"}, {"name": ".aarp", "detail": "aarp"}]
 
 
+def test_extract_structured_items_rejects_broad_pattern_and_prefers_dom_fallback():
+    handler = ActionHandlers()
+    page = _FakePage(table_rows=[["Protocol Registries", "/protocols"], ["Time Zones", "/tz"]])
+
+    async def _raise(*_args, **_kwargs):
+        raise AssertionError("regex extractor must not be called for broad repeated pattern")
+
+    handler.extract_pattern_from_page_text = _raise  # type: ignore[method-assign]
+    args = {"pattern": "(.+)", "limit": 2, "fields": {"name": 1, "href": 2}}
+    result = asyncio.run(
+        handler.extract_structured_items(
+            page,
+            args,
+            runtime_state={"benchmark_context": {"task_family": "repeated_structured_items"}},
+        )
+    )
+    assert result == [{"name": "Protocol Registries", "href": "/protocols"}, {"name": "Time Zones", "href": "/tz"}]
+    assert "fallback=table_rows" in args.get("_executor_note", "")
+
+
 def test_extract_structured_items_falls_back_to_list_rows_when_table_absent():
     handler = ActionHandlers()
     page = _FakePage(list_rows=[["Software", "/software/"], ["Licenses", "/licenses/"]])
@@ -69,3 +89,57 @@ def test_click_helpers_infer_slug_and_href_from_visible_links():
     assert slug == "software"
     href = asyncio.run(handler._discover_href_from_visible_links(page=page, text="Software"))
     assert href == "/software/"
+
+
+def test_click_selector_plain_text_is_canonicalized_before_locator_resolution():
+    handler = ActionHandlers()
+
+    class _FakeLocator:
+        def __init__(self, count):
+            self._count = count
+            self.first = self
+
+        async def count(self):
+            return self._count
+
+    class _FakePageForClick(_FakePage):
+        def get_by_role(self, role, name=None, exact=False):
+            if role == "link" and name == "Protocol Registries":
+                return _FakeLocator(1)
+            return _FakeLocator(0)
+
+        def get_by_text(self, *_args, **_kwargs):
+            return _FakeLocator(0)
+
+        def locator(self, _selector):
+            return _FakeLocator(0)
+
+    args = {"selector": "Protocol Registries"}
+    locator, meta = asyncio.run(
+        handler._resolve_ranked_click_locator(page=_FakePageForClick(), args=args, runtime_state={})
+    )
+    assert locator is not None
+    assert meta["strategy"] == "role_link_name"
+    assert args.get("text") == "Protocol Registries"
+    assert "selector" not in args
+
+
+def test_extract_section_lines_rejects_ungrounded_heading_before_execution():
+    handler = ActionHandlers()
+    args = {"heading_text": "Wikipedia\nСвободная энциклопедия", "limit": 5}
+    runtime_state = {
+        "last_page_snapshot": {
+            "url": "https://www.python.org/",
+            "visible_headings": ["Downloads", "Documentation", "Success Stories"],
+            "page_text": "Welcome to Python.org\nDownloads\nDocumentation",
+        }
+    }
+    try:
+        asyncio.run(handler.extract_section_lines(page=_FakePage(), args=args, runtime_state=runtime_state))
+        assert False, "expected ungrounded heading rejection"
+    except Exception as exc:  # noqa: BLE001
+        message = str(exc)
+        assert "section_heading_not_grounded_in_current_snapshot" in message
+        diagnostic = args.get("_grounding_diagnostic", {})
+        assert diagnostic.get("current_url") == "https://www.python.org/"
+        assert diagnostic.get("heading_text") == "Wikipedia\nСвободная энциклопедия"

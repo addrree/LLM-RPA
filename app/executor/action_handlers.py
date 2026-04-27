@@ -233,6 +233,34 @@ class ActionHandlers:
         limit = int(args["limit"])
         fields = args["fields"]
         flags = args.get("flags")
+        benchmark_context = runtime_state.get("benchmark_context", {}) if isinstance(runtime_state, dict) else {}
+        task_family = str(benchmark_context.get("task_family", "")).strip().lower()
+
+        if task_family == "repeated_structured_items" and self._is_overly_broad_repeated_pattern(pattern):
+            table_rows = await self._extract_table_rows(page=page, limit=limit)
+            if table_rows:
+                projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
+                args["_executor_note"] = (
+                    "extract_structured_items fallback=table_rows; "
+                    f"broad_pattern_rejected={pattern!r}; returned {len(projected)} row(s)"
+                )
+                return projected
+
+            list_rows = await self._extract_repeated_link_or_list_items(page=page, limit=limit)
+            if list_rows:
+                projected = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
+                args["_executor_note"] = (
+                    "extract_structured_items fallback=list_items; "
+                    f"broad_pattern_rejected={pattern!r}; returned {len(projected)} row(s)"
+                )
+                return projected
+            raise StructuredExtractionError(
+                code="broad_regex_rejected_for_repeated_structured_items",
+                message=(
+                    "Regex pattern is too broad for repeated structured extraction and no DOM fallback was found."
+                ),
+                details={"pattern": pattern, "task_family": task_family},
+            )
 
         delegated_args = {
             "pattern": pattern,
@@ -263,7 +291,7 @@ class ActionHandlers:
             if list_rows:
                 projected = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
                 args["_executor_note"] = (
-                    "extract_structured_items fallback=list_rows; "
+                    "extract_structured_items fallback=list_items; "
                     f"regex_error={pattern_error}; returned {len(projected)} row(s)"
                 )
                 return projected
@@ -276,6 +304,11 @@ class ActionHandlers:
         limit = int(args.get("limit", 0))
         if limit <= 0:
             raise ValueError("extract_section_lines requires positive integer 'limit'")
+        self._assert_section_heading_grounded(
+            heading_text=heading_text,
+            runtime_state=runtime_state,
+            action_args=args,
+        )
 
         source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
         lines = self._split_visible_lines(source_text)
@@ -1017,8 +1050,24 @@ class ActionHandlers:
         exact = bool(args.get("exact", False))
         visible_only = bool(args.get("visible_only", True))
 
+        if selector and self._selector_looks_like_plain_text_click_target(selector):
+            if not text:
+                text = selector
+                args["text"] = text
+                args.setdefault("exact", True)
+            if not href_contains:
+                inferred_href = self._infer_href_slug_from_text(text)
+                if inferred_href:
+                    args["href_contains"] = inferred_href
+                    href_contains = inferred_href
+            args["_selector_canonicalized_from_plain_text"] = selector
+            args.pop("selector", None)
+            selector = ""
+
         scope = page.locator(scope_selector) if scope_selector else page
         candidates: list[dict[str, Any]] = []
+        if text:
+            candidates.append({"strategy": "role_link_name", "locator": scope.get_by_role("link", name=text, exact=exact), "selector": f"role=link, name={text}"})
         if role and name:
             candidates.append({"strategy": "role_name", "locator": scope.get_by_role(role, name=name, exact=exact), "selector": f"role={role}, name={name}"})
         if label:
@@ -1126,6 +1175,81 @@ class ActionHandlers:
     @staticmethod
     def _is_too_broad_click_selector(selector: str) -> bool:
         return selector.strip().lower() in {"a", "button", "*", "[role='button']", '[role="button"]'}
+
+    @staticmethod
+    def _selector_looks_like_plain_text_click_target(selector: str) -> bool:
+        candidate = str(selector or "").strip()
+        if not candidate:
+            return False
+        if any(token in candidate for token in ("#", ".", "[", "]", ">", ":", "=", "/", "*")):
+            return False
+        if re.search(r"\s+", candidate):
+            return True
+        words = re.findall(r"[A-Za-zА-Яа-яЁё0-9]+", candidate)
+        if len(words) >= 2 and all(word[:1].isupper() for word in words if word):
+            return True
+        return bool(re.fullmatch(r"[A-Za-zА-Яа-яЁё0-9 _-]{3,80}", candidate))
+
+    @classmethod
+    def _is_overly_broad_repeated_pattern(cls, pattern: str) -> bool:
+        token = str(pattern or "").strip()
+        if not token:
+            return True
+        compact = re.sub(r"\s+", "", token)
+        if compact in {"(.+)", "^(.+)$", "(.*)", ".*", "^.*$"}:
+            return True
+        if re.fullmatch(r"^\^?\((?:\.\\s*)?[\*\+]\)\$?$", compact):
+            return True
+        try:
+            compiled = re.compile(token)
+        except re.error:
+            return False
+        if compiled.groups != 1:
+            return False
+        structural_markers = ("\\t", ",", ";", "\\|", "\\s{2,", "\\n", "\\r", "href", "<", ">")
+        has_structure = any(marker in token for marker in structural_markers)
+        if not has_structure and re.fullmatch(r"^\^?\(\.\*\+?\)\$?$", compact):
+            return True
+        return False
+
+    @classmethod
+    def _assert_section_heading_grounded(
+        cls,
+        *,
+        heading_text: str,
+        runtime_state,
+        action_args: dict,
+    ) -> None:
+        if not isinstance(runtime_state, dict):
+            return
+        snapshot = runtime_state.get("last_page_snapshot")
+        if not isinstance(snapshot, dict):
+            return
+        visible_headings = [cls._normalize_line(item) for item in (snapshot.get("visible_headings") or []) if cls._normalize_line(item)]
+        page_text = str(snapshot.get("page_text") or snapshot.get("page_text_excerpt") or "")
+        normalized_heading = cls._normalize_line(heading_text)
+        heading_lc = normalized_heading.lower()
+        headings_lc = [item.lower() for item in visible_headings]
+        page_text_lc = page_text.lower()
+        if heading_lc and (heading_lc in headings_lc or heading_lc in page_text_lc):
+            return
+        excerpt = re.sub(r"\s+", " ", page_text).strip()[:350]
+        diagnostic = {
+            "code": "section_heading_not_grounded_in_current_snapshot",
+            "current_url": str(snapshot.get("url") or ""),
+            "visible_headings": visible_headings[:12],
+            "page_text_excerpt": excerpt,
+            "heading_text": heading_text,
+            "instruction": "choose heading only from current snapshot evidence",
+        }
+        action_args["_grounding_diagnostic"] = diagnostic
+        raise StructuredExtractionError(
+            code="section_heading_not_grounded_in_current_snapshot",
+            message=(
+                "section_heading_not_grounded_in_current_snapshot: heading_text is absent from current visible_headings/page_text."
+            ),
+            details=diagnostic,
+        )
 
     @staticmethod
     def _infer_href_slug_from_text(text: str) -> str:

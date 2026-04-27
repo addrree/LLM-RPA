@@ -1,7 +1,7 @@
 import asyncio
 from datetime import datetime, timezone
 
-from app.orchestrator.workflow_manager import WorkflowManager
+from app.orchestrator.workflow_manager import WorkflowManager, sanitize_benchmark_context_for_llm
 from app.planner.replanner import Replanner
 from app.schemas.execution import ExecutionResult
 from app.schemas.page_snapshot import PageSnapshot
@@ -56,6 +56,24 @@ def test_ensure_open_url_for_final_plan_keeps_existing_open_url():
     normalized = WorkflowManager._ensure_open_url_for_final_plan(plan)
     assert len(normalized.steps) == 2
     assert normalized.steps[0].action == "open_url"
+
+
+def test_sanitize_benchmark_context_for_llm_strips_expected_leakage_fields():
+    context = {
+        "task_family": "repeated_structured_items",
+        "expected_pattern": "(.+)",
+        "anchor_candidates": ["leak"],
+        "evaluator_metadata": {
+            "scenario_id": "x",
+            "expected_heading": "leak",
+            "expected_item_fields": ["name"],
+        },
+    }
+    sanitized = sanitize_benchmark_context_for_llm(context)
+    assert sanitized is not None
+    assert "expected_pattern" not in sanitized
+    assert "anchor_candidates" not in sanitized
+    assert "expected_heading" not in sanitized["evaluator_metadata"]
 
 
 def test_normalize_final_plan_fills_required_shape_from_context():
