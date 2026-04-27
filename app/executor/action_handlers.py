@@ -243,11 +243,31 @@ class ActionHandlers:
         if flags is not None:
             delegated_args["flags"] = flags
 
-        items = await self.extract_pattern_from_page_text(page, delegated_args, runtime_state)
-        args["_executor_note"] = (
-            f"extract_structured_items matched pattern={pattern!r}; returned {len(items)} repeated item(s)"
-        )
-        return items
+        try:
+            items = await self.extract_pattern_from_page_text(page, delegated_args, runtime_state)
+            args["_executor_note"] = (
+                f"extract_structured_items matched pattern={pattern!r}; returned {len(items)} repeated item(s)"
+            )
+            return items
+        except Exception as pattern_error:  # noqa: BLE001
+            table_rows = await self._extract_table_rows(page=page, limit=limit)
+            if table_rows:
+                projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
+                args["_executor_note"] = (
+                    "extract_structured_items fallback=table_rows; "
+                    f"regex_error={pattern_error}; returned {len(projected)} row(s)"
+                )
+                return projected
+
+            list_rows = await self._extract_repeated_link_or_list_items(page=page, limit=limit)
+            if list_rows:
+                projected = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
+                args["_executor_note"] = (
+                    "extract_structured_items fallback=list_rows; "
+                    f"regex_error={pattern_error}; returned {len(projected)} row(s)"
+                )
+                return projected
+            raise
 
     async def extract_section_lines(self, page, args, runtime_state=None):
         heading_text = str(args.get("heading_text", "")).strip()
@@ -504,7 +524,6 @@ class ActionHandlers:
             visible_anchor_texts=visible_anchor_texts,
             provided_language=page_language,
         )
-        args["page_language"] = effective_page_language
         if not value_pattern:
             value_pattern = self._resolve_value_pattern(value_type)
         if anchor_matching_mode not in {"auto", "exact", "contains"}:
@@ -926,11 +945,13 @@ class ActionHandlers:
             return r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,63})"
         if value_type == "phone":
             return r"(\+?\d[\d\-\(\)\s\.]{6,}\d)"
+        if value_type == "email_or_phone":
+            return r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,63}|\+?\d[\d\-\(\)\s\.]{6,}\d)"
         return None
 
     @staticmethod
     def _default_anchor_candidates(*, value_type: str, page_language: str) -> list[str]:
-        if value_type not in {"email", "phone"}:
+        if value_type not in {"email", "phone", "email_or_phone"}:
             return []
         if page_language in {"ru", "russian"}:
             return ["Контакты", "Поддержка", "Электронная почта", "Почта", "Телефон", "Помощь"]
@@ -950,6 +971,8 @@ class ActionHandlers:
             if len(digits_only) < 8 or len(digits_only) > 15:
                 return False
             return bool(re.fullmatch(r"\+?\d[\d\-\(\)\s\.]{6,}\d", token))
+        if value_type == "email_or_phone":
+            return ActionHandlers._is_valid_typed_contact_value(value=token, value_type="email") or ActionHandlers._is_valid_typed_contact_value(value=token, value_type="phone")
         return True
 
     @staticmethod
@@ -1004,8 +1027,18 @@ class ActionHandlers:
             candidates.append({"strategy": "placeholder", "locator": scope.get_by_placeholder(placeholder), "selector": f"placeholder={placeholder}"})
         if text:
             candidates.append({"strategy": "visible_text", "locator": scope.get_by_text(text, exact=exact), "selector": f"text={text}"})
-            if exact:
-                candidates.append({"strategy": "visible_text_fuzzy", "locator": scope.get_by_text(text, exact=False), "selector": f"text~={text}"})
+            candidates.append({"strategy": "visible_text_fuzzy", "locator": scope.get_by_text(text, exact=False), "selector": f"text~={text}"})
+            normalized_text = re.sub(r"\s+", " ", text).strip()
+            if normalized_text and normalized_text != text:
+                candidates.append({"strategy": "visible_text_normalized", "locator": scope.get_by_text(normalized_text, exact=False), "selector": f"text_norm~={normalized_text}"})
+            escaped = re.escape(text).replace("\\ ", r"\s+")
+            candidates.append({"strategy": "visible_text_casefold", "locator": scope.get_by_text(re.compile(escaped, flags=re.IGNORECASE)), "selector": f"text~/(?i){text}/"})
+            inferred_slug = self._infer_href_slug_from_text(text)
+            if inferred_slug:
+                candidates.append({"strategy": "href_from_text_slug", "locator": scope.locator(f'a[href*="{inferred_slug}"]'), "selector": f'a[href*=\"{inferred_slug}\"]'})
+                discovered_href = await self._discover_href_from_visible_links(page=page, text=text)
+                if discovered_href:
+                    candidates.append({"strategy": "href_from_visible_links", "locator": scope.locator(f'a[href*="{discovered_href}"]'), "selector": f'a[href*=\"{discovered_href}\"]'})
         if href_contains:
             href_selector = f'a[href*="{href_contains}"]'
             candidates.append({"strategy": "href_filter", "locator": scope.locator(href_selector), "selector": href_selector})
@@ -1093,6 +1126,97 @@ class ActionHandlers:
     @staticmethod
     def _is_too_broad_click_selector(selector: str) -> bool:
         return selector.strip().lower() in {"a", "button", "*", "[role='button']", '[role="button"]'}
+
+    @staticmethod
+    def _infer_href_slug_from_text(text: str) -> str:
+        token = re.sub(r"[^a-z0-9]+", "-", str(text or "").lower()).strip("-")
+        return token[:48]
+
+    async def _discover_href_from_visible_links(self, *, page, text: str) -> str | None:
+        needle = re.sub(r"\s+", " ", str(text or "").strip().lower())
+        if not needle:
+            return None
+        payload = await page.evaluate(
+            """
+            () => Array.from(document.querySelectorAll("a[href]")).slice(0, 250).map((a) => ({
+              text: (a.innerText || a.textContent || "").replace(/\\s+/g, " ").trim(),
+              href: a.getAttribute("href") || ""
+            }))
+            """
+        )
+        for item in payload or []:
+            label = str(item.get("text", "")).strip().lower()
+            href = str(item.get("href", "")).strip()
+            if not label or not href:
+                continue
+            if needle in label:
+                return href
+        return None
+
+    async def _extract_table_rows(self, *, page, limit: int) -> list[list[str]]:
+        rows = await page.evaluate(
+            """
+            ({ limit }) => {
+              const results = [];
+              const trNodes = document.querySelectorAll("table tr");
+              for (const tr of trNodes) {
+                const cells = Array.from(tr.querySelectorAll("th,td"))
+                  .map((cell) => (cell.innerText || cell.textContent || "").replace(/\\s+/g, " ").trim())
+                  .filter(Boolean);
+                if (cells.length < 2) continue;
+                results.push(cells);
+                if (results.length >= limit) break;
+              }
+              return results;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        return [list(row) for row in (rows or []) if isinstance(row, list) and len(row) >= 2]
+
+    async def _extract_repeated_link_or_list_items(self, *, page, limit: int) -> list[list[str]]:
+        rows = await page.evaluate(
+            """
+            ({ limit }) => {
+              const results = [];
+              const linkNodes = document.querySelectorAll("main a[href], article a[href], ul li, ol li");
+              for (const node of linkNodes) {
+                const text = (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
+                if (!text || text.length < 2) continue;
+                const href = node.getAttribute ? (node.getAttribute("href") || "") : "";
+                results.push(href ? [text, href] : [text]);
+                if (results.length >= limit) break;
+              }
+              return results;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        return [list(row) for row in (rows or []) if isinstance(row, list) and row]
+
+    @classmethod
+    def _project_structured_rows_to_fields(cls, *, rows: list[list[str]], fields: Any, limit: int) -> list[dict[str, Any]]:
+        if not rows:
+            return []
+        if isinstance(fields, dict) and fields:
+            names = [str(name).strip() for name in fields.keys() if str(name).strip()]
+        elif isinstance(fields, list) and fields:
+            names = [str(name).strip() for name in fields if str(name).strip()]
+        else:
+            names = ["name", "detail"]
+        items: list[dict[str, Any]] = []
+        for row in rows[: max(limit, 1)]:
+            if not row:
+                continue
+            item: dict[str, Any] = {}
+            for idx, name in enumerate(names):
+                if idx < len(row):
+                    item[name] = row[idx]
+                elif row:
+                    item[name] = row[-1]
+            if item:
+                items.append(item)
+        return items
 
     @staticmethod
     def _extract_match_value(match: re.Match[str], group_index: int | None):

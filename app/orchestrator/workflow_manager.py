@@ -47,6 +47,8 @@ def _infer_anchor_value_type(goal_text: str) -> str:
         return "email"
     if any(token in normalized for token in ("phone", "tel", "тел")):
         return "phone"
+    if any(token in normalized for token in ("contact", "support", "help", "контакт", "поддерж")):
+        return "email_or_phone"
     return "number"
 
 

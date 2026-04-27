@@ -416,10 +416,11 @@ class PlanValidator:
             "rating",
             "email",
             "phone",
+            "email_or_phone",
         }:
             raise PlanValidationError(
                 "extract_value_near_anchor supports value_type in "
-                "{'article_count','count','number','float','rating','email','phone'}"
+                "{'article_count','count','number','float','rating','email','phone','email_or_phone'}"
             )
         direction = args.get("search_direction", "after")
         if direction not in {"after", "before", "around"}:

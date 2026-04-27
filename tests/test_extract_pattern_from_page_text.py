@@ -321,4 +321,3 @@ def test_extract_value_near_anchor_auto_language_skips_cross_language_anchor():
     value = asyncio.run(handler.extract_value_near_anchor(page, args, runtime_state={}))
     assert value == "support@example.org"
     assert args["anchor_text"] == "Contact"
-    assert args["page_language"] == "en"

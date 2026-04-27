@@ -269,7 +269,22 @@ def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
     )
     goal = BenchmarkRunner._build_grounded_goal(scenario)
     assert "Page language hint:" not in goal
-    assert "Page language is unknown before navigation" in goal
+    assert "infer anchors/headings/value patterns from observe_page" in goal
+
+
+def test_benchmark_context_keeps_evaluator_metadata_private_from_prompt_contract():
+    ctx = build_benchmark_context(
+        category="repeated_structured_items",
+        task_family="repeated_structured_items",
+        scenario_id="repeated_listing_iana_rootdb",
+        expected_min_items=3,
+        expected_item_fields=["name", "detail"],
+        required_top_level_fields=["items"],
+    )
+    assert "scenario_anchor_candidates" not in ctx
+    assert "scenario_page_language" not in ctx
+    assert ctx["required_top_level_fields"] == ["items"]
+    assert ctx["evaluator_metadata"]["scenario_id"] == "repeated_listing_iana_rootdb"
 
 
 def test_benchmark_allowed_actions_are_category_specific():
@@ -577,9 +592,6 @@ def test_normalize_benchmark_plan_anchored_only_drops_page_language():
     ctx = build_benchmark_context(
         category="anchored_value_extraction",
         task_family="anchored_value_extraction",
-        scenario_anchor_candidates=["Email", "Contact", "Support"],
-        scenario_anchor_matching_mode="auto",
-        scenario_page_language="en",
         required_top_level_fields=["value"],
     )
     normalized = normalize_benchmark_plan(plan, ctx)

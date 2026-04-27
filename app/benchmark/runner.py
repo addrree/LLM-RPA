@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
 from typing import Awaitable, Callable
+from urllib.parse import urlparse
 
 from pydantic import BaseModel, Field
 
@@ -130,9 +131,7 @@ class BenchmarkRunner:
             benchmark_context = build_benchmark_context(
                 category=scenario.category,
                 task_family=scenario.task_family,
-                scenario_anchor_candidates=scenario.anchor_candidates,
-                scenario_anchor_matching_mode=scenario.anchor_matching_mode,
-                scenario_page_language=scenario.page_language,
+                scenario_id=scenario.scenario_id,
                 expected_min_items=scenario.expected_min_items,
                 expected_item_fields=scenario.expected_item_fields,
                 required_top_level_fields=scenario.required_top_level_fields,
@@ -379,41 +378,31 @@ class BenchmarkRunner:
 
     @staticmethod
     def _build_grounded_goal(scenario: BenchmarkScenario, *, allowed_actions: list[str] | None = None) -> str:
-        parts = [scenario.goal.strip()]
+        domain = urlparse(str(scenario.start_url)).netloc
+        parts = [
+            f"Scenario ID: {scenario.scenario_id}.",
+            f"Task family: {scenario.task_family or scenario.category}.",
+            f"Goal: {scenario.goal.strip()}",
+            f"Start URL: {scenario.start_url}.",
+        ]
+        if domain:
+            parts.append(f"Allowed domains: {domain}.")
+        parts.append(f"Should succeed: {'yes' if scenario.should_succeed else 'no'}.")
+        parts.append("Benchmark rule: infer anchors/headings/value patterns from observe_page or page snapshot.")
+        parts.append("Benchmark rule: do not rely on pre-specified expected candidates or expected values.")
         if scenario.task_family:
-            parts.append(f"Task family: {scenario.task_family}.")
+            parts.append(f"Category: {scenario.category}.")
         if allowed_actions:
             parts.append(f"Allowed actions for benchmark: {', '.join(allowed_actions)}.")
-        normalized_language = str(scenario.page_language or "").strip().lower()
-        if normalized_language and normalized_language != "auto":
-            parts.append(f"Page language hint: {scenario.page_language}.")
-        else:
-            parts.append("Page language is unknown before navigation; detect from visible content first.")
-        if scenario.target_page_hint:
-            parts.append(f"Target page hint: {scenario.target_page_hint}.")
-        if scenario.anchor_candidates:
-            anchors = ", ".join(scenario.anchor_candidates[:5])
-            parts.append(f"Anchor candidates: {anchors}.")
-            parts.append(
-                f"Anchor matching mode: {scenario.anchor_matching_mode}. "
-                "Use visible anchor candidates from the current page and avoid cross-language anchor mismatch."
-            )
-        if scenario.expected_navigation:
-            transitions = " -> ".join(scenario.expected_navigation)
-            parts.append(f"Expected navigation flow: {transitions}.")
-        if scenario.page_expectations:
-            expectations = "; ".join(scenario.page_expectations[:3])
-            parts.append(f"Page expectations: {expectations}.")
+        if scenario.preconditions:
+            parts.append(f"Constraints: {'; '.join(scenario.preconditions[:3])}.")
+        if scenario.notes:
+            parts.append(f"Notes: {scenario.notes}.")
         if scenario.required_top_level_fields:
             parts.append(
                 "Required top-level fields: "
                 f"{', '.join(scenario.required_top_level_fields)}."
             )
-        parts.append(f"Expected output type: {scenario.expected_output_type}.")
-        if scenario.expected_min_items > 0:
-            parts.append(f"Expected minimum items: {scenario.expected_min_items}.")
-        if scenario.expected_item_fields:
-            parts.append(f"Expected item fields: {', '.join(scenario.expected_item_fields)}.")
         return "\n".join(parts)
 
 
