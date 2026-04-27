@@ -250,10 +250,11 @@ class LLMVerifier:
                     )
 
         if task_family == "repeated_structured_items" and all(field in extracted_data for field in normalized_required):
-            expected_min_items = int(benchmark_context.get("expected_min_items", 0) or 0)
+            evaluator_metadata = benchmark_context.get("evaluator_metadata", {}) if isinstance(benchmark_context, dict) else {}
+            expected_min_items = int(evaluator_metadata.get("expected_min_items", 0) or 0)
             expected_item_fields = [
                 str(field).strip()
-                for field in (benchmark_context.get("expected_item_fields") or [])
+                for field in (evaluator_metadata.get("expected_item_fields") or [])
                 if str(field).strip()
             ]
             for field in normalized_required:

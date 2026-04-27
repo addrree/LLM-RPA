@@ -307,9 +307,9 @@
     },
     {
       "scenario_id": "missing_or_ambiguous_field_example",
-      "goal": "Open https://example.com and attempt to extract a field that is intentionally underspecified or ambiguous, returning explicit uncertainty or not-found.",
-      "start_url": "https://example.com",
-      "target_page_hint": "Example.com minimal informational page (negative test)",
+      "goal": "Open https://www.spbstu.ru/ and attempt to extract a registrar contact email for domain billing, returning explicit uncertainty or not-found when the field is absent or ambiguous on-page.",
+      "start_url": "https://www.spbstu.ru/",
+      "target_page_hint": "SPbPU public homepage (negative test for absent registrar billing field)",
       "preconditions": [
         "Requested value is intentionally ambiguous for this page."
       ],
@@ -317,7 +317,7 @@
         "Execution should complete with semantic uncertainty and expected verifier rejection."
       ],
       "category": "negative_or_ambiguous_case",
-      "description": "Negative/ambiguous scenario on deterministic example.com page.",
+      "description": "Negative/ambiguous scenario on SPbPU public page without answer leakage.",
       "expected_output_type": "none",
       "required_top_level_fields": [],
       "expected_min_items": 0,

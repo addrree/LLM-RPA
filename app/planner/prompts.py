@@ -103,7 +103,8 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
             "Do not use extract_structured_items for compare-family defaults."
         ),
         "anchored_value_extraction": (
-            "Path hint: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish."
+            "Path hint: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
+            "For contact goals prefer value_type=email|phone|email_or_phone inferred from page evidence."
         ),
         "negative_or_ambiguous_case": (
             "Path hint: open_url -> observe_page(optional) -> extraction(optional) -> finish."
@@ -120,6 +121,9 @@ Task family: {task_family}
 4) step_id must be sequential; final step must be finish.
 5) open_url must include non-empty args.url.
 6) Do not include page_language or expected answer values in JSON.
+6.1) Never use preselected expected candidates/headings/patterns from scenario metadata as answer hints.
+6.2) Infer anchors/headings/value types from observe_page/page_snapshot evidence first.
+6.3) If anchor/value is unclear, add observe_page before choosing extraction primitive.
 7) {family_rules}
 """
 
@@ -243,7 +247,7 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         ),
         "anchored_value_extraction": (
             "Используй стабильный путь: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
-            "Не передавай page_language."
+            "Не передавай page_language. Для contact/support задач используй value_type=email|phone|email_or_phone."
         ),
         "negative_or_ambiguous_case": (
             "Избегай broad prose extraction: regex должен иметь capture group для конкретного value token. "
@@ -261,6 +265,9 @@ Task family: {task_family}
 4) step_id must be sequential; final step must be finish.
 5) open_url must include non-empty args.url.
 6) Do not include page_language or expected answer values in JSON.
+6.1) Never use preselected expected candidates/headings/patterns from scenario metadata as answer hints.
+6.2) Infer anchors/headings/value types from observe_page/page_snapshot evidence first.
+6.3) If anchor/value is unclear, add observe_page before choosing extraction primitive.
 7) Keep plan short and deterministic.
 8) {family_rules}
 """

@@ -302,7 +302,7 @@ def test_multi_step_family_rewrites_unstable_region_section_actions_to_stable_pi
     normalized = normalize_benchmark_plan(plan, ctx)
     actions = [step.action for step in normalized.steps]
 
-    assert actions.count("extract_structured_items") == 2
+    assert actions.count("extract_section_lines") == 2
     assert "extract_value_from_section" not in actions
     assert "extract_structured_items_from_region" not in actions
     assert "compare_structured_values" in actions
