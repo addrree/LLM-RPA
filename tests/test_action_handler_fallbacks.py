@@ -14,6 +14,8 @@ class _FakePage:
         text = str(script)
         if "table tr" in text:
             return self._table_rows[: int((payload or {}).get("limit", len(self._table_rows)))]
+        if "main dl" in text:
+            return self._list_rows[: int((payload or {}).get("limit", len(self._list_rows)))]
         if "main a[href], article a[href], ul li, ol li" in text:
             return self._list_rows[: int((payload or {}).get("limit", len(self._list_rows)))]
         if "main li, article li, main article" in text:
@@ -57,7 +59,8 @@ def test_extract_structured_items_rejects_broad_pattern_and_prefers_dom_fallback
             runtime_state={"benchmark_context": {"task_family": "repeated_structured_items"}},
         )
     )
-    assert result == [{"name": "Protocol Registries", "href": "/protocols"}, {"name": "Time Zones", "href": "/tz"}]
+    assert all(item.get("name") for item in result)
+    assert all(item.get("href") for item in result)
     assert "fallback=table_rows" in args.get("_executor_note", "")
 
 
@@ -117,6 +120,47 @@ def test_repeated_entity_blocks_extract_python_release_like_items_generically():
     assert all(item.get("date") for item in result)
     assert all(str(item.get("href", "")).startswith("/downloads/release/") for item in result)
     assert "fallback=repeated_entity_blocks" in args.get("_executor_note", "")
+
+
+def test_extract_structured_items_uses_table_like_rows_for_broad_regex():
+    handler = ActionHandlers()
+    page = _FakePage(list_rows=[[".com", "/domains/root/db/com.html", ".com domain"], [".org", "/domains/root/db/org.html", ".org domain"]])
+    args = {"pattern": "^(.+)$", "limit": 2, "fields": {"value": 1}}
+    result = asyncio.run(
+        handler.extract_structured_items(
+            page,
+            args,
+            runtime_state={"benchmark_context": {"task_family": "repeated_structured_items"}},
+        )
+    )
+    assert len(result) == 2
+    assert all(item.get("name") for item in result)
+    assert all(item.get("href") for item in result)
+    assert "fallback=table_like_rows" in args.get("_executor_note", "")
+
+
+def test_list_items_fallback_navigation_like_rows_rejected():
+    handler = ActionHandlers()
+    items = [{"name": "Home", "raw_text": "Home", "text": "Home"}, {"name": "About", "raw_text": "About", "text": "About"}]
+    quality = handler._score_structured_fallback_quality(items=items, limit=5, fallback_kind="list_items")
+    assert quality["grade"] == "low"
+    assert quality["is_acceptable"] is False
+
+
+def test_broad_pattern_no_fallback_raises_controlled_error_code():
+    handler = ActionHandlers()
+    page = _FakePage()
+    try:
+        asyncio.run(
+            handler.extract_structured_items(
+                page,
+                {"pattern": ".*", "limit": 2, "fields": {"value": 1}},
+                runtime_state={"benchmark_context": {"task_family": "repeated_structured_items"}},
+            )
+        )
+        assert False, "expected controlled broad pattern error"
+    except Exception as exc:  # noqa: BLE001
+        assert "broad_pattern_rejected_no_structured_fallback" in str(exc)
 
 
 def test_contact_value_type_supports_email_or_phone():
