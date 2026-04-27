@@ -27,6 +27,15 @@ VERIFIER_SYSTEM_PROMPT = """
 
 
 TECHNICAL_REQUIRED_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
+NEGATIVE_PROBE_ACTIONS = {
+    "extract_text",
+    "extract_pattern_from_page_text",
+    "extract_value_near_anchor",
+    "extract_structured_items",
+    "extract_section_lines",
+    "extract_value_from_section",
+    "extract_html",
+}
 
 
 class LLMVerifier:
@@ -65,6 +74,13 @@ class LLMVerifier:
             self._validate_single_value_key_alignment(
                 required_fields=semantic_required_fields,
                 extracted_data=result.extracted_data,
+                benchmark_context=benchmark_context or {},
+            )
+        )
+        deterministic_issues.extend(
+            self._validate_negative_probe_policy(
+                plan=plan,
+                result=result,
                 benchmark_context=benchmark_context or {},
             )
         )
@@ -206,6 +222,52 @@ class LLMVerifier:
                 f"different key(s): {aliases}."
             ]
         return []
+
+    @classmethod
+    def _validate_negative_probe_policy(
+        cls,
+        *,
+        plan: TaskSpec,
+        result: ExecutionResult,
+        benchmark_context: dict,
+    ) -> list[str]:
+        task_family = str(benchmark_context.get("task_family", "")).strip().lower()
+        if task_family != "negative_or_ambiguous_case":
+            return []
+
+        attempted_actions = {
+            str(log.action).strip()
+            for log in result.logs
+            if str(log.status).strip().lower() in {"success", "failed"}
+        }
+        probe_attempted = bool(attempted_actions.intersection(NEGATIVE_PROBE_ACTIONS))
+        if probe_attempted:
+            return []
+
+        observe_attempted = "observe_page" in attempted_actions
+        if observe_attempted and cls._has_explicit_negative_reasoning(result.extracted_data):
+            return []
+
+        if attempted_actions == {"open_url", "finish"} or not attempted_actions:
+            return [
+                "Negative benchmark scenario cannot be accepted with open_url -> finish only; at least one probe/extraction attempt is required."
+            ]
+        return [
+            "Negative benchmark scenario requires probe/extraction action (or observe_page with explicit missing-field evidence)."
+        ]
+
+    @staticmethod
+    def _has_explicit_negative_reasoning(extracted_data: dict) -> bool:
+        if not isinstance(extracted_data, dict):
+            return False
+        status = str(extracted_data.get("status", "")).strip().lower().replace(" ", "_")
+        if not status:
+            return False
+        allowed_prefixes = ("not_found", "ambiguous", "uncertain", "missing", "unknown", "not_available")
+        if not status.startswith(allowed_prefixes):
+            return False
+        evidence_keys = ("reason", "explanation", "evidence", "missing_field_evidence", "probe_result")
+        return any(str(extracted_data.get(key, "")).strip() for key in evidence_keys)
 
     @classmethod
     def _deterministic_fast_path_verdict(

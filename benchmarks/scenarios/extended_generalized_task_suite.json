@@ -199,18 +199,18 @@
       ]
     },
     {
-      "scenario_id": "navigate_then_extract_gnu",
-      "goal": "Open https://www.gnu.org/ homepage, navigate via one click to another public section page, then extract one key value from the new page.",
-      "start_url": "https://www.gnu.org/",
-      "target_page_hint": "GNU secondary section page reached by internal link",
+      "scenario_id": "navigate_then_extract_iana_protocols",
+      "goal": "Open IANA website at https://www.iana.org/, navigate to the Protocol Registries section, then extract the page title or main heading from the opened destination page.",
+      "start_url": "https://www.iana.org/",
+      "target_page_hint": "IANA Protocol Registries section reached via one internal click",
       "preconditions": [
-        "A stable internal navigation link is visible without authentication."
+        "A stable internal navigation link to protocols/registries is visible on the landing page."
       ],
       "page_expectations": [
-        "Final URL should differ from the start URL and include extractable content."
+        "Final URL differs from start URL and destination page has an extractable heading/title value."
       ],
       "category": "navigation_then_extraction",
-      "description": "Navigation + extraction on gnu.org.",
+      "description": "Navigation + extraction on IANA with internal link discovery from page context.",
       "expected_output_type": "object",
       "required_top_level_fields": [
         "value"
@@ -218,7 +218,7 @@
       "expected_min_items": 0,
       "expected_item_fields": [],
       "should_succeed": true,
-      "notes": "Public deterministic content pages.",
+      "notes": "Do not hardcode heading; infer link and extraction target via observe_page/page evidence.",
       "task_family": "navigation_then_extraction",
       "anchor_candidates": [],
       "expected_navigation": [
@@ -306,10 +306,10 @@
       "expected_navigation": []
     },
     {
-      "scenario_id": "missing_or_ambiguous_field_example",
-      "goal": "Open https://www.spbstu.ru/ and attempt to extract a registrar contact email for domain billing, returning explicit uncertainty or not-found when the field is absent or ambiguous on-page.",
-      "start_url": "https://www.spbstu.ru/",
-      "target_page_hint": "SPbPU public homepage (negative test for absent registrar billing field)",
+      "scenario_id": "missing_or_ambiguous_field_iana_billing",
+      "goal": "Open https://www.iana.org/about and attempt to extract a registrar billing contact email, returning explicit uncertainty or not-found if the field is absent or ambiguous on-page.",
+      "start_url": "https://www.iana.org/about",
+      "target_page_hint": "IANA About page (negative test for absent registrar billing field)",
       "preconditions": [
         "Requested value is intentionally ambiguous for this page."
       ],
@@ -317,7 +317,7 @@
         "Execution should complete with semantic uncertainty and expected verifier rejection."
       ],
       "category": "negative_or_ambiguous_case",
-      "description": "Negative/ambiguous scenario on SPbPU public page without answer leakage.",
+      "description": "Negative/ambiguous scenario on IANA public page without answer leakage.",
       "expected_output_type": "none",
       "required_top_level_fields": [],
       "expected_min_items": 0,
