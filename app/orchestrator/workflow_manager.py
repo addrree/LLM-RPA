@@ -529,6 +529,36 @@ def normalize_benchmark_plan(
     return TaskSpec.model_validate(payload)
 
 
+_BENCHMARK_LEAKAGE_KEYS = {
+    "expected_answer",
+    "expected_value",
+    "expected_pattern",
+    "expected_heading",
+    "expected_anchor",
+    "anchor_candidates",
+    "target_candidates",
+    "preselected_regex",
+    "preselected_section_names",
+}
+
+
+def sanitize_benchmark_context_for_llm(benchmark_context: dict | None) -> dict | None:
+    if not isinstance(benchmark_context, dict):
+        return None
+    payload = dict(benchmark_context)
+    evaluator = payload.get("evaluator_metadata")
+    if isinstance(evaluator, dict):
+        payload["evaluator_metadata"] = {
+            key: value
+            for key, value in evaluator.items()
+            if str(key).strip().lower() not in _BENCHMARK_LEAKAGE_KEYS
+        }
+    for key in list(payload.keys()):
+        if str(key).strip().lower() in _BENCHMARK_LEAKAGE_KEYS:
+            payload.pop(key, None)
+    return payload
+
+
 class WorkflowStageError(Exception):
     def __init__(self, stage: str, message: str):
         super().__init__(message)
@@ -569,6 +599,7 @@ class WorkflowManager:
         "ambiguous_click_target",
         "weak_click_target",
         "bad_locator_choice",
+        "section_heading_not_grounded",
     }
 
     def __init__(
@@ -596,6 +627,13 @@ class WorkflowManager:
         return normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context, page_snapshot=page_snapshot)
 
     async def run(self, user_goal: str, benchmark_context: dict | None = None):
+        self.planner.last_artifact = None
+        self.planner.last_initial_artifact = None
+        self.verifier.last_artifact = None
+        if self.replanner is not None:
+            self.replanner.last_artifact = None
+
+        benchmark_context = sanitize_benchmark_context_for_llm(benchmark_context)
         planning_mode = "two_stage" if self.two_stage_planning else "single_stage"
         initial_plan = None
         final_plan = None
@@ -1183,6 +1221,8 @@ class WorkflowManager:
                 failure_type = "weak_click_target"
             elif "regex group reference is out of range" in error_message:
                 failure_type = "regex_group_mismatch"
+            elif "section_heading_not_grounded_in_current_snapshot" in error_message:
+                failure_type = "section_heading_not_grounded"
             elif execution_result.failure_type == "browser_operation_failed" and failed_action == "click":
                 failure_type = "bad_locator_choice"
         if verdict.verdict == "reject" and execution_result.status == "success":
