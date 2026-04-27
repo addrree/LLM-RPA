@@ -131,6 +131,23 @@ class PlaywrightExecutor:
                     if step.save_as:
                         extracted_data[step.save_as] = result
                         runtime_state["extracted_data"] = extracted_data
+                    elif step.action in {
+                        "extract_items",
+                        "extract_structured_items",
+                        "extract_section_lines",
+                        "extract_value_from_section",
+                        "extract_structured_items_from_region",
+                        "extract_pattern_from_page_text",
+                    }:
+                        benchmark_context = runtime_state.get("benchmark_context", {}) if isinstance(runtime_state, dict) else {}
+                        required_fields = benchmark_context.get("required_fields") or []
+                        fallback_key = ""
+                        if isinstance(required_fields, list):
+                            fallback_key = next((str(field).strip() for field in required_fields if str(field).strip()), "")
+                        if not fallback_key:
+                            fallback_key = "items"
+                        extracted_data[fallback_key] = result
+                        runtime_state["extracted_data"] = extracted_data
 
                     if step.action == "screenshot":
                         screenshot_path = result
@@ -359,6 +376,8 @@ class PlaywrightExecutor:
         lowered = message.lower()
         if "regex group reference is out of range" in lowered:
             return "regex_group_mismatch"
+        if "broad_pattern_rejected_no_structured_fallback" in lowered:
+            return "broad_pattern_rejected_no_structured_fallback"
         if cls._is_technical_failure(message):
             return "browser_operation_failed"
         return "execution_step_failed"

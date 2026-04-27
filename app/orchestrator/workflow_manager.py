@@ -650,6 +650,7 @@ class WorkflowManager:
         "weak_click_target",
         "bad_locator_choice",
         "section_heading_not_grounded",
+        "broad_pattern_rejected_no_structured_fallback",
     }
 
     def __init__(
@@ -1271,6 +1272,8 @@ class WorkflowManager:
                 failure_type = "weak_click_target"
             elif "regex group reference is out of range" in error_message:
                 failure_type = "regex_group_mismatch"
+            elif "broad_pattern_rejected_no_structured_fallback" in error_message:
+                failure_type = "broad_pattern_rejected_no_structured_fallback"
             elif "section_heading_not_grounded_in_current_snapshot" in error_message:
                 failure_type = "section_heading_not_grounded"
             elif execution_result.failure_type == "browser_operation_failed" and failed_action == "click":

@@ -309,6 +309,27 @@ def test_failure_context_marks_bad_click_locator_as_recoverable():
     )
 
 
+def test_failure_context_marks_broad_pattern_no_fallback_as_recoverable():
+    execution = ExecutionResult(
+        status="failed",
+        extracted_data={},
+        logs=[],
+        failure_type="execution_step_failed",
+        failed_action="extract_structured_items",
+        failed_args={"pattern": "(.+)", "fields": {"value": 1}},
+        error_message="broad_pattern_rejected_no_structured_fallback: Regex pattern is too broad",
+    )
+    verdict = _Verdict("reject")
+    ctx = WorkflowManager._build_failure_context(execution_result=execution, verdict=verdict)
+    assert ctx["failure_type"] == "broad_pattern_rejected_no_structured_fallback"
+    assert WorkflowManager._should_retry_corrective(
+        failure_type=ctx["failure_type"],
+        prior_corrective_attempts=[],
+        max_retries=2,
+        corrective_attempt_count=0,
+    )
+
+
 def test_workflow_continues_after_invalid_corrective_and_recovers():
     manager = WorkflowManager(
         planner=_StubPlanner(),

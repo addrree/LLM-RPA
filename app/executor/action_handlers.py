@@ -259,9 +259,9 @@ class ActionHandlers:
                 args["_executor_note"] = note
                 return projected
             raise StructuredExtractionError(
-                code="broad_regex_rejected_for_repeated_structured_items",
+                code="broad_pattern_rejected_no_structured_fallback",
                 message=(
-                    "Regex pattern is too broad for repeated structured extraction and no high-quality DOM fallback was found."
+                    "broad_pattern_rejected_no_structured_fallback: Regex pattern is too broad for repeated structured extraction and no high-quality DOM fallback was found."
                 ),
                 details={"pattern": pattern, "task_family": task_family, "fallback_note": note},
             )
@@ -329,24 +329,35 @@ class ActionHandlers:
     ) -> tuple[list[dict[str, Any]], str]:
         table_rows = await self._extract_table_rows(page=page, limit=limit)
         if table_rows:
-            projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
+            projected = self._normalize_table_rows_to_objects(rows=table_rows, limit=limit)
             quality = self._score_structured_fallback_quality(items=projected, limit=limit, fallback_kind="table_rows")
             if quality["is_acceptable"]:
                 return (
                     projected,
                     (
                         f"extract_structured_items fallback=table_rows; {context_note}; "
-                        f"returned {len(projected)} row(s); quality={quality['grade']}"
+                        f"candidate_count={len(table_rows)}; returned_count={len(projected)}; "
+                        f"quality_score={quality['score']:.3f}; quality={quality['grade']}"
+                    ),
+                )
+
+        table_like_rows = await self._extract_table_like_rows(page=page, limit=limit)
+        if table_like_rows:
+            projected = self._normalize_table_rows_to_objects(rows=table_like_rows, limit=limit)
+            quality = self._score_structured_fallback_quality(items=projected, limit=limit, fallback_kind="table_like_rows")
+            if quality["is_acceptable"]:
+                return (
+                    projected,
+                    (
+                        f"extract_structured_items fallback=table_like_rows; {context_note}; "
+                        f"candidate_count={len(table_like_rows)}; returned_count={len(projected)}; "
+                        f"quality_score={quality['score']:.3f}; quality={quality['grade']}"
                     ),
                 )
 
         entity_blocks = await self._extract_repeated_entity_blocks(page=page, limit=limit)
         if entity_blocks:
-            projected_entities = self._project_structured_objects_to_fields(
-                objects=entity_blocks,
-                fields=fields,
-                limit=limit,
-            )
+            projected_entities = entity_blocks[: max(limit, 1)]
             quality = self._score_structured_fallback_quality(
                 items=projected_entities,
                 limit=limit,
@@ -357,27 +368,30 @@ class ActionHandlers:
                     projected_entities,
                     (
                         f"extract_structured_items fallback=repeated_entity_blocks; {context_note}; "
-                        f"returned {len(projected_entities)} row(s); quality={quality['grade']}"
+                        f"candidate_count={len(entity_blocks)}; returned_count={len(projected_entities)}; "
+                        f"quality_score={quality['score']:.3f}; quality={quality['grade']}"
                     ),
                 )
 
         list_rows = await self._extract_repeated_link_or_list_items(page=page, limit=limit)
         if list_rows:
-            projected_list = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
+            projected_list = self._normalize_table_rows_to_objects(rows=list_rows, limit=limit)
             quality = self._score_structured_fallback_quality(items=projected_list, limit=limit, fallback_kind="list_items")
             if quality["is_acceptable"]:
                 return (
                     projected_list,
                     (
                         f"extract_structured_items fallback=list_items; {context_note}; "
-                        f"returned {len(projected_list)} row(s); quality={quality['grade']}"
+                        f"candidate_count={len(list_rows)}; returned_count={len(projected_list)}; "
+                        f"quality_score={quality['score']:.3f}; quality={quality['grade']}"
                     ),
                 )
             return (
                 [],
                 (
                     f"extract_structured_items fallback=list_items_rejected_low_quality; {context_note}; "
-                    f"returned {len(projected_list)} row(s); quality={quality['grade']}; score={quality['score']:.3f}"
+                    f"candidate_count={len(list_rows)}; returned_count={len(projected_list)}; "
+                    f"quality_score={quality['score']:.3f}; quality={quality['grade']}"
                 ),
             )
         return ([], f"extract_structured_items fallback=none; {context_note}; no candidates found")
@@ -1423,17 +1437,59 @@ class ActionHandlers:
         )
         return [list(row) for row in (rows or []) if isinstance(row, list) and len(row) >= 2]
 
+    async def _extract_table_like_rows(self, *, page, limit: int) -> list[list[str]]:
+        table_like = await page.evaluate(
+            """
+            ({ limit }) => {
+              const normalizedText = (value) => (value || "").replace(/\\s+/g, " ").trim();
+              const inContent = (el) => !!el.closest("main, article, [role='main'], #content, .content");
+              const inIgnoredRegion = (el) => !!el.closest("nav, header, footer, aside, [role='navigation']");
+              const rows = [];
+              const candidates = document.querySelectorAll("main dl, article dl, #content dl, .content dl, main ul li, article ul li, #content ul li, .content ul li, main ol li, article ol li");
+              for (const node of candidates) {
+                if (!inContent(node) || inIgnoredRegion(node)) continue;
+                const text = normalizedText(node.innerText || node.textContent || "");
+                if (!text || text.length < 4) continue;
+                const anchor = node.querySelector ? node.querySelector("a[href]") : null;
+                const href = normalizedText(anchor ? anchor.getAttribute("href") : "");
+                const title = normalizedText(anchor ? (anchor.innerText || anchor.textContent || "") : "");
+                const row = [];
+                if (title) row.push(title);
+                if (href) row.push(href);
+                if (!title || text !== title) row.push(text);
+                if (row.length < 2) continue;
+                rows.push(row);
+                if (rows.length >= limit) break;
+              }
+              return rows;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        return [list(row) for row in (table_like or []) if isinstance(row, list) and len(row) >= 2]
+
     async def _extract_repeated_link_or_list_items(self, *, page, limit: int) -> list[list[str]]:
         rows = await page.evaluate(
             """
             ({ limit }) => {
+              const normalizedText = (value) => (value || "").replace(/\\s+/g, " ").trim();
+              const inIgnoredRegion = (el) => !!el.closest("nav, header, footer, aside, [role='navigation']");
+              const inContent = (el) => !!el.closest("main, article, [role='main'], #content, .content");
               const results = [];
               const linkNodes = document.querySelectorAll("main a[href], article a[href], ul li, ol li");
               for (const node of linkNodes) {
-                const text = (node.innerText || node.textContent || "").replace(/\\s+/g, " ").trim();
+                if (inIgnoredRegion(node) || !inContent(node)) continue;
+                const text = normalizedText(node.innerText || node.textContent || "");
                 if (!text || text.length < 2) continue;
                 const href = node.getAttribute ? (node.getAttribute("href") || "") : "";
+                const anchor = node.querySelector ? node.querySelector("a[href]") : null;
+                const resolvedHref = normalizedText(href || (anchor ? anchor.getAttribute("href") : ""));
+                const linkText = normalizedText(anchor ? (anchor.innerText || anchor.textContent || "") : "");
+                if (text.length < 4 && !resolvedHref) continue;
                 results.push(href ? [text, href] : [text]);
+                if (linkText && resolvedHref) {
+                  results[results.length - 1] = [linkText || text, resolvedHref, text];
+                }
                 if (results.length >= limit) break;
               }
               return results;
@@ -1514,6 +1570,36 @@ class ActionHandlers:
         return ranked[: max(limit, 1)]
 
     @classmethod
+    def _normalize_table_rows_to_objects(cls, *, rows: list[list[str]], limit: int) -> list[dict[str, Any]]:
+        items: list[dict[str, Any]] = []
+        for row in rows[: max(limit, 1)]:
+            if not row:
+                continue
+            normalized_cells = [cls._normalize_line(str(cell)) for cell in row if cls._normalize_line(str(cell))]
+            if not normalized_cells:
+                continue
+            title = normalized_cells[0]
+            href = next((cell for cell in normalized_cells if cls._looks_like_href_token(cell)), "")
+            date = next((cell for cell in normalized_cells if cls._extract_date_like_token(cell)), "")
+            version = next((cell for cell in normalized_cells if cls._extract_version_like_token(cell)), "")
+            raw_text = " | ".join(normalized_cells)
+            item: dict[str, Any] = {
+                "title": title,
+                "name": title,
+                "raw_text": raw_text,
+                "text": raw_text,
+            }
+            if href:
+                item["href"] = href
+            if date:
+                item["date"] = cls._extract_date_like_token(date)
+            if version:
+                item["version"] = cls._extract_version_like_token(version)
+            item["columns"] = normalized_cells
+            items.append(item)
+        return items
+
+    @classmethod
     def _project_structured_rows_to_fields(cls, *, rows: list[list[str]], fields: Any, limit: int) -> list[dict[str, Any]]:
         if not rows:
             return []
@@ -1590,12 +1676,16 @@ class ActionHandlers:
         if count == 0:
             return {"score": 0.0, "grade": "low", "is_acceptable": False}
 
-        meaningful_keys = {"name", "title", "version", "date", "href", "url", "link", "detail"}
+        meaningful_keys = {"name", "title", "version", "date", "href", "url", "link", "detail", "text", "raw_text"}
         non_empty = sum(1 for item in items if any(str(v).strip() for v in item.values()))
         rich = 0
         raw_only = 0
         nav_like = 0
+        short_item_count = 0
+        duplicate_count = 0
+        with_anchor_signals = 0
         signatures: list[str] = []
+        fingerprints: set[str] = set()
         for item in items:
             present = {
                 str(key).lower()
@@ -1605,6 +1695,13 @@ class ActionHandlers:
             if len(present) >= 2:
                 rich += 1
             text = str(item.get("raw_text") or item.get("text") or item.get("name") or "")
+            normalized_text = cls._normalize_line(text).lower()
+            if len(normalized_text) < 6:
+                short_item_count += 1
+            if normalized_text:
+                if normalized_text in fingerprints:
+                    duplicate_count += 1
+                fingerprints.add(normalized_text)
             has_structural = any(
                 bool(item.get(key))
                 for key in ("version", "date", "href", "title", "name")
@@ -1613,6 +1710,8 @@ class ActionHandlers:
                 raw_only += 1
             if cls._looks_like_navigation_item(text):
                 nav_like += 1
+            if any(bool(item.get(key)) for key in ("href", "title", "name", "date", "version")):
+                with_anchor_signals += 1
             signature = "|".join(sorted(present))
             if signature:
                 signatures.append(signature)
@@ -1628,22 +1727,46 @@ class ActionHandlers:
         rich_ratio = rich / max(count, 1)
         raw_only_ratio = raw_only / max(count, 1)
         nav_ratio = nav_like / max(count, 1)
+        short_ratio = short_item_count / max(count, 1)
+        duplicate_ratio = duplicate_count / max(count, 1)
+        anchor_signal_ratio = with_anchor_signals / max(count, 1)
 
         score = (
-            0.30 * count_score
-            + 0.25 * non_empty_ratio
-            + 0.25 * rich_ratio
-            + 0.20 * dominant_ratio
-            - 0.25 * raw_only_ratio
-            - 0.25 * nav_ratio
+            0.24 * count_score
+            + 0.15 * non_empty_ratio
+            + 0.23 * rich_ratio
+            + 0.14 * dominant_ratio
+            + 0.16 * anchor_signal_ratio
+            - 0.18 * raw_only_ratio
+            - 0.16 * nav_ratio
+            - 0.10 * short_ratio
+            - 0.10 * duplicate_ratio
         )
         if fallback_kind == "table_rows":
-            score += 0.1
+            table_column_rich = sum(1 for item in items if len(item.get("columns", []) if isinstance(item.get("columns"), list) else []) >= 2)
+            score += 0.08 + 0.12 * (table_column_rich / max(count, 1))
+        if fallback_kind == "table_like_rows":
+            score += 0.08
         if fallback_kind == "repeated_entity_blocks":
-            score += 0.05
+            entity_rich = sum(1 for item in items if item.get("date") and (item.get("title") or item.get("version")))
+            score += 0.05 + 0.08 * (entity_rich / max(count, 1))
+        if fallback_kind == "list_items" and (nav_ratio >= 0.35 or raw_only_ratio >= 0.5 or anchor_signal_ratio < 0.5):
+            score -= 0.20
         score = max(0.0, min(score, 1.0))
-        grade = "high" if score >= 0.75 else ("medium" if score >= 0.55 else "low")
-        return {"score": score, "grade": grade, "is_acceptable": grade in {"high", "medium"}}
+        grade = "high" if score >= 0.70 else ("medium" if score >= 0.52 else "low")
+        is_acceptable = grade == "high" if fallback_kind == "list_items" else grade in {"high", "medium"}
+        return {"score": score, "grade": grade, "is_acceptable": is_acceptable}
+
+    @staticmethod
+    def _looks_like_href_token(value: str) -> bool:
+        token = str(value or "").strip().lower()
+        return bool(token) and (
+            token.startswith("/")
+            or token.startswith("./")
+            or token.startswith("../")
+            or token.startswith("http://")
+            or token.startswith("https://")
+        )
 
     @staticmethod
     def _extract_version_like_token(text: str) -> str:
