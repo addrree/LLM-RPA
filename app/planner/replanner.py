@@ -42,14 +42,14 @@ class Replanner:
             payload["previous_invalid_plan"] = invalid_plan
         if benchmark_context:
             family = str(benchmark_context.get("task_family", "")).strip()
-            payload["benchmark_policy_hints"] = {
+            payload["policy_hints"] = {
                 "task_family": family,
-                "required_top_level_fields": [
+                "output_fields": [
                     str(field).strip()
                     for field in (benchmark_context.get("required_top_level_fields") or [])
                     if str(field).strip() and str(field).strip() != "page_snapshot"
                 ],
-                "schema_contract_source": "benchmark_context.required_top_level_fields",
+                "schema_contract_source": "context.output_fields",
             }
         system_prompt = REPLANNER_SYSTEM_PROMPT
         if benchmark_context:
@@ -110,14 +110,14 @@ class Replanner:
         }
         if benchmark_context:
             family = str(benchmark_context.get("task_family", "")).strip()
-            payload["benchmark_policy_hints"] = {
+            payload["policy_hints"] = {
                 "task_family": family,
-                "required_top_level_fields": [
+                "output_fields": [
                     str(field).strip()
                     for field in (benchmark_context.get("required_top_level_fields") or [])
                     if str(field).strip() and str(field).strip() != "page_snapshot"
                 ],
-                "schema_contract_source": "benchmark_context.required_top_level_fields",
+                "schema_contract_source": "context.output_fields",
             }
         system_prompt = CORRECTIVE_REPLANNER_SYSTEM_PROMPT
         if benchmark_context:

@@ -258,6 +258,34 @@ def test_smoke_suite_contains_three_core_categories():
     }
 
 
+def test_grounded_goal_excludes_benchmark_metadata_labels():
+    scenario = BenchmarkScenario.model_validate(
+        {
+            "scenario_id": "navigate_then_extract_docs_python",
+            "goal": "Open the tutorial and extract heading",
+            "start_url": "https://docs.python.org/3/",
+            "category": "navigation_then_extraction",
+            "task_family": "navigation_then_extraction",
+            "description": "d",
+            "expected_output_type": "scalar",
+            "should_succeed": True,
+            "notes": "internal note should stay hidden from planner prompt",
+            "required_top_level_fields": ["value"],
+        }
+    )
+    goal = BenchmarkRunner._build_grounded_goal(scenario, allowed_actions=["open_url", "click", "extract_text", "finish"])
+    banned_tokens = [
+        "Scenario ID",
+        "Category",
+        "Notes",
+        "Required fields",
+        "Should succeed",
+        "Benchmark",
+        "required_top_level_fields",
+    ]
+    assert all(token not in goal for token in banned_tokens)
+
+
 def test_extended_suite_replaces_gnu_navigation_with_iana_protocols():
     suite = load_scenario_suite(Path("benchmarks/scenarios/extended_generalized_task_suite.json"))
     scenario_ids = {scenario.scenario_id for scenario in suite.scenarios}
@@ -296,7 +324,7 @@ def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
     )
     goal = BenchmarkRunner._build_grounded_goal(scenario)
     assert "Page language hint:" not in goal
-    assert "infer anchors/headings/value patterns from observe_page" in goal
+    assert "Infer anchors/headings/value patterns from observe_page" in goal
 
 
 def test_benchmark_context_keeps_evaluator_metadata_private_from_prompt_contract():

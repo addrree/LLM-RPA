@@ -1,7 +1,7 @@
 import pytest
 
 from app.benchmark.policies import build_benchmark_context
-from app.orchestrator.workflow_manager import normalize_benchmark_plan
+from app.orchestrator.workflow_manager import normalize_benchmark_plan, sanitize_benchmark_context_for_llm
 from app.schemas.task_spec import TaskSpec
 from app.validator.plan_validator import PlanValidationError, PlanValidator
 
@@ -309,3 +309,42 @@ def test_multi_step_family_rewrites_unstable_region_section_actions_to_stable_pi
     compare_step = next(step for step in normalized.steps if step.action == "compare_structured_values")
     assert compare_step.save_as == "combined_result"
     PlanValidator().validate(plan=normalized, allowed_actions=set(ctx["allowed_actions"]), benchmark_context=ctx)
+
+
+def test_navigation_click_meta_text_is_replaced_with_anchor_target():
+    plan = _base_plan(
+        ["value"],
+        [
+            {"step_id": 1, "action": "open_url", "args": {"url": "https://docs.python.org/3/"}},
+            {"step_id": 2, "action": "click", "args": {"text": "Scenario ID", "anchor": "Tutorial", "exact": True}},
+            {"step_id": 3, "action": "extract_text", "args": {"selector": "h1"}, "save_as": "value"},
+            {"step_id": 4, "action": "finish", "args": {}},
+        ],
+    )
+    ctx = build_benchmark_context(
+        category="navigation_then_extraction",
+        task_family="navigation_then_extraction",
+        scenario_id="navigate_then_extract_docs_python",
+        required_top_level_fields=["value"],
+    )
+    normalized = normalize_benchmark_plan(plan, ctx)
+    click_step = next(step for step in normalized.steps if step.action == "click")
+    assert click_step.args["text"] == "Tutorial"
+    assert click_step.args.get("exact") is True
+    assert "anchor" not in click_step.args
+
+
+def test_sanitize_benchmark_context_removes_scenario_metadata_leakage():
+    raw = {
+        "task_family": "navigation_then_extraction",
+        "required_top_level_fields": ["value"],
+        "evaluator_metadata": {
+            "scenario_id": "navigate_then_extract_docs_python",
+            "expected_value": "Tutorial",
+            "notes": "internal",
+        },
+    }
+    sanitized = sanitize_benchmark_context_for_llm(raw)
+    assert sanitized is not None
+    assert "required_top_level_fields" not in sanitized
+    assert "scenario_id" not in sanitized.get("evaluator_metadata", {})

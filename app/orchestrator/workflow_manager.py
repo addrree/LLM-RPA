@@ -118,6 +118,18 @@ _GOAL_QUOTED_TARGET_PATTERN = re.compile(r"[\"'“”«»]([^\"'“”«»]{1,60
 _GOAL_CAPITALIZED_TARGET_PATTERN = re.compile(r"\b([A-ZА-Я][\w-]{1,30}(?:\s+[A-ZА-Я][\w-]{1,30}){0,2})\b")
 _GOAL_STOP_WORDS = {"Find", "Extract", "Get", "Open", "Navigate", "Click", "Then", "And"}
 _GENERIC_SELECTOR_TAG_PATTERN = re.compile(r"^[a-z][a-z0-9]{0,9}$")
+_CLICK_META_LABELS = {
+    "scenario id",
+    "scenario",
+    "category",
+    "notes",
+    "required fields",
+    "expected result",
+    "should succeed",
+    "benchmark",
+    "expected",
+    "required_top_level_fields",
+}
 
 
 def _is_placeholder_heading(text: str) -> bool:
@@ -178,11 +190,26 @@ def _label_looks_like_url_or_slug(label: str) -> bool:
 
 def _step_has_valid_click_target(args: dict | None) -> bool:
     payload = args if isinstance(args, dict) else {}
-    has_selector = _is_non_empty_str(payload.get("selector"))
-    has_text = _is_non_empty_str(payload.get("text"))
+    selector_value = str(payload.get("selector", "")).strip()
+    text_value = str(payload.get("text", "")).strip()
+    anchor_value = str(payload.get("anchor", "")).strip()
+    name_value = str(payload.get("name", "")).strip()
+    has_selector = _is_non_empty_str(selector_value) and not _is_meta_click_label(selector_value)
+    has_text = _is_non_empty_str(text_value) and not _is_meta_click_label(text_value)
+    has_anchor = _is_non_empty_str(anchor_value) and not _is_meta_click_label(anchor_value)
     has_href = _is_non_empty_str(payload.get("href_contains"))
-    has_role_name = _is_non_empty_str(payload.get("role")) and _is_non_empty_str(payload.get("name"))
-    return bool(has_selector or has_text or has_href or has_role_name)
+    has_role_name = (
+        _is_non_empty_str(payload.get("role"))
+        and _is_non_empty_str(name_value)
+        and not _is_meta_click_label(name_value)
+    )
+    has_name = _is_non_empty_str(name_value) and not _is_meta_click_label(name_value)
+    return bool(has_selector or has_text or has_anchor or has_href or has_role_name or has_name)
+
+
+def _is_meta_click_label(value: str) -> bool:
+    token = re.sub(r"\s+", " ", str(value or "").strip().lower()).strip(" :.-_")
+    return bool(token) and token in _CLICK_META_LABELS
 
 
 def _candidate_to_href_contains(value: str) -> str | None:
@@ -365,6 +392,21 @@ def _canonicalize_family_steps(
                 else:
                     args["text"] = selector_value
                     args["exact"] = True
+            text_value = str(args.get("text", "")).strip()
+            anchor_value = str(args.get("anchor", "")).strip()
+            name_value = str(args.get("name", "")).strip()
+            if _is_meta_click_label(text_value):
+                args.pop("text", None)
+                if anchor_value and not _is_meta_click_label(anchor_value):
+                    args["text"] = anchor_value
+                    args.pop("anchor", None)
+                elif name_value and not _is_meta_click_label(name_value):
+                    args["text"] = name_value
+                elif _is_non_empty_str(args.get("href_contains")):
+                    pass
+                elif selector_value and _selector_looks_like_plain_label(selector_value) and not _is_meta_click_label(selector_value):
+                    args["text"] = selector_value
+                    args["exact"] = True
             has_text = _is_non_empty_str(args.get("text"))
             has_exact = bool(args.get("exact"))
             has_scope = _is_non_empty_str(args.get("scope_selector"))
@@ -530,6 +572,13 @@ def normalize_benchmark_plan(
 
 
 _BENCHMARK_LEAKAGE_KEYS = {
+    "scenario_id",
+    "category",
+    "notes",
+    "required_fields",
+    "required_top_level_fields",
+    "should_succeed",
+    "benchmark",
     "expected_answer",
     "expected_value",
     "expected_pattern",
@@ -556,6 +605,7 @@ def sanitize_benchmark_context_for_llm(benchmark_context: dict | None) -> dict |
     for key in list(payload.keys()):
         if str(key).strip().lower() in _BENCHMARK_LEAKAGE_KEYS:
             payload.pop(key, None)
+    payload.pop("required_top_level_fields", None)
     return payload
 
 
