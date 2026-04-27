@@ -249,29 +249,21 @@ class ActionHandlers:
         task_family = str(benchmark_context.get("task_family", "")).strip().lower()
 
         if task_family == "repeated_structured_items" and self._is_overly_broad_repeated_pattern(pattern):
-            table_rows = await self._extract_table_rows(page=page, limit=limit)
-            if table_rows:
-                projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
-                args["_executor_note"] = (
-                    "extract_structured_items fallback=table_rows; "
-                    f"broad_pattern_rejected={pattern!r}; returned {len(projected)} row(s)"
-                )
-                return projected
-
-            list_rows = await self._extract_repeated_link_or_list_items(page=page, limit=limit)
-            if list_rows:
-                projected = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
-                args["_executor_note"] = (
-                    "extract_structured_items fallback=list_items; "
-                    f"broad_pattern_rejected={pattern!r}; returned {len(projected)} row(s)"
-                )
+            projected, note = await self._extract_repeated_structured_with_quality_fallbacks(
+                page=page,
+                fields=fields,
+                limit=limit,
+                context_note=f"broad_pattern_rejected={pattern!r}",
+            )
+            if projected:
+                args["_executor_note"] = note
                 return projected
             raise StructuredExtractionError(
                 code="broad_regex_rejected_for_repeated_structured_items",
                 message=(
-                    "Regex pattern is too broad for repeated structured extraction and no DOM fallback was found."
+                    "Regex pattern is too broad for repeated structured extraction and no high-quality DOM fallback was found."
                 ),
-                details={"pattern": pattern, "task_family": task_family},
+                details={"pattern": pattern, "task_family": task_family, "fallback_note": note},
             )
 
         delegated_args = {
@@ -290,6 +282,24 @@ class ActionHandlers:
             )
             return items
         except Exception as pattern_error:  # noqa: BLE001
+            if task_family == "repeated_structured_items":
+                projected, note = await self._extract_repeated_structured_with_quality_fallbacks(
+                    page=page,
+                    fields=fields,
+                    limit=limit,
+                    context_note=f"regex_error={pattern_error}",
+                )
+                if projected:
+                    args["_executor_note"] = note
+                    return projected
+                raise StructuredExtractionError(
+                    code="repeated_structured_extraction_low_quality_fallback",
+                    message=(
+                        "Regex extraction failed and repeated-structured DOM fallbacks were low-quality or absent."
+                    ),
+                    details={"pattern": pattern, "task_family": task_family, "fallback_note": note},
+                ) from pattern_error
+
             table_rows = await self._extract_table_rows(page=page, limit=limit)
             if table_rows:
                 projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
@@ -308,6 +318,69 @@ class ActionHandlers:
                 )
                 return projected
             raise
+
+    async def _extract_repeated_structured_with_quality_fallbacks(
+        self,
+        *,
+        page,
+        fields: Any,
+        limit: int,
+        context_note: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        table_rows = await self._extract_table_rows(page=page, limit=limit)
+        if table_rows:
+            projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
+            quality = self._score_structured_fallback_quality(items=projected, limit=limit, fallback_kind="table_rows")
+            if quality["is_acceptable"]:
+                return (
+                    projected,
+                    (
+                        f"extract_structured_items fallback=table_rows; {context_note}; "
+                        f"returned {len(projected)} row(s); quality={quality['grade']}"
+                    ),
+                )
+
+        entity_blocks = await self._extract_repeated_entity_blocks(page=page, limit=limit)
+        if entity_blocks:
+            projected_entities = self._project_structured_objects_to_fields(
+                objects=entity_blocks,
+                fields=fields,
+                limit=limit,
+            )
+            quality = self._score_structured_fallback_quality(
+                items=projected_entities,
+                limit=limit,
+                fallback_kind="repeated_entity_blocks",
+            )
+            if quality["is_acceptable"]:
+                return (
+                    projected_entities,
+                    (
+                        f"extract_structured_items fallback=repeated_entity_blocks; {context_note}; "
+                        f"returned {len(projected_entities)} row(s); quality={quality['grade']}"
+                    ),
+                )
+
+        list_rows = await self._extract_repeated_link_or_list_items(page=page, limit=limit)
+        if list_rows:
+            projected_list = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
+            quality = self._score_structured_fallback_quality(items=projected_list, limit=limit, fallback_kind="list_items")
+            if quality["is_acceptable"]:
+                return (
+                    projected_list,
+                    (
+                        f"extract_structured_items fallback=list_items; {context_note}; "
+                        f"returned {len(projected_list)} row(s); quality={quality['grade']}"
+                    ),
+                )
+            return (
+                [],
+                (
+                    f"extract_structured_items fallback=list_items_rejected_low_quality; {context_note}; "
+                    f"returned {len(projected_list)} row(s); quality={quality['grade']}; score={quality['score']:.3f}"
+                ),
+            )
+        return ([], f"extract_structured_items fallback=none; {context_note}; no candidates found")
 
     async def extract_section_lines(self, page, args, runtime_state=None):
         heading_text = str(args.get("heading_text", "")).strip()
@@ -1370,6 +1443,76 @@ class ActionHandlers:
         )
         return [list(row) for row in (rows or []) if isinstance(row, list) and row]
 
+    async def _extract_repeated_entity_blocks(self, *, page, limit: int) -> list[dict[str, str]]:
+        rows = await page.evaluate(
+            """
+            ({ limit }) => {
+              const normalizedText = (value) => (value || "").replace(/\\s+/g, " ").trim();
+              const candidates = [];
+              const nodes = document.querySelectorAll("main li, article li, main article, article article, section li, section article, main div, article div");
+              for (const node of nodes) {
+                const text = normalizedText(node.innerText || node.textContent || "");
+                if (!text || text.length < 8 || text.length > 260) continue;
+                const directHref = node.getAttribute ? (node.getAttribute("href") || "") : "";
+                const nestedAnchor = node.querySelector ? node.querySelector("a[href]") : null;
+                const href = normalizedText(directHref || (nestedAnchor ? nestedAnchor.getAttribute("href") : ""));
+                const linkText = normalizedText(nestedAnchor ? (nestedAnchor.innerText || nestedAnchor.textContent || "") : "");
+                candidates.push({
+                  text,
+                  raw_text: text,
+                  href,
+                  link_text: linkText
+                });
+                if (candidates.length >= Math.max(limit * 10, 60)) break;
+              }
+              return candidates;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        cleaned: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            raw_text = self._normalize_line(str(row.get("raw_text", "") or row.get("text", "")))
+            if not raw_text:
+                continue
+            fingerprint = raw_text.lower()
+            if fingerprint in seen:
+                continue
+            seen.add(fingerprint)
+            version = self._extract_version_like_token(raw_text)
+            date = self._extract_date_like_token(raw_text)
+            title = self._extract_release_like_title(raw_text)
+            href = self._normalize_line(str(row.get("href", "")))
+            item: dict[str, str] = {"raw_text": raw_text, "text": raw_text}
+            if href:
+                item["href"] = href
+            if title:
+                item["title"] = title
+                item["name"] = title
+            if version:
+                item["version"] = version
+            if date:
+                item["date"] = date
+            if not any(item.get(key) for key in ("version", "date", "title", "href")):
+                continue
+            if self._looks_like_navigation_item(raw_text):
+                continue
+            cleaned.append(item)
+        ranked = sorted(
+            cleaned,
+            key=lambda item: (
+                int(bool(item.get("version")) and bool(item.get("date"))),
+                int(bool(item.get("title"))),
+                int(bool(item.get("href"))),
+                len(item.get("raw_text", "")),
+            ),
+            reverse=True,
+        )
+        return ranked[: max(limit, 1)]
+
     @classmethod
     def _project_structured_rows_to_fields(cls, *, rows: list[list[str]], fields: Any, limit: int) -> list[dict[str, Any]]:
         if not rows:
@@ -1393,6 +1536,172 @@ class ActionHandlers:
             if item:
                 items.append(item)
         return items
+
+    @classmethod
+    def _project_structured_objects_to_fields(
+        cls,
+        *,
+        objects: list[dict[str, Any]],
+        fields: Any,
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        if not objects:
+            return []
+        if isinstance(fields, dict) and fields:
+            names = [str(name).strip() for name in fields.keys() if str(name).strip()]
+        elif isinstance(fields, list) and fields:
+            names = [str(name).strip() for name in fields if str(name).strip()]
+        else:
+            names = ["name", "date", "href", "text"]
+
+        items: list[dict[str, Any]] = []
+        for source in objects[: max(limit, 1)]:
+            item: dict[str, Any] = {}
+            for field_name in names:
+                mapped = cls._map_structured_field_from_object(source=source, field_name=field_name)
+                if mapped is not None and mapped != "":
+                    item[field_name] = mapped
+            if item:
+                items.append(item)
+        return items
+
+    @classmethod
+    def _map_structured_field_from_object(cls, *, source: dict[str, Any], field_name: str) -> Any:
+        key = str(field_name or "").strip().lower()
+        if not key:
+            return None
+        if source.get(key) not in (None, ""):
+            return source.get(key)
+        if key in {"name", "title"}:
+            return source.get("title") or source.get("name") or source.get("version") or source.get("text")
+        if "version" in key:
+            return source.get("version") or cls._extract_version_like_token(str(source.get("raw_text", "")))
+        if "date" in key:
+            return source.get("date") or cls._extract_date_like_token(str(source.get("raw_text", "")))
+        if key in {"href", "url", "link"} or "href" in key or "url" in key:
+            return source.get("href")
+        if "text" in key or "raw" in key or "detail" in key or "description" in key:
+            return source.get("text") or source.get("raw_text")
+        return source.get("text") or source.get("raw_text")
+
+    @classmethod
+    def _score_structured_fallback_quality(cls, *, items: list[dict[str, Any]], limit: int, fallback_kind: str) -> dict[str, Any]:
+        count = len(items)
+        if count == 0:
+            return {"score": 0.0, "grade": "low", "is_acceptable": False}
+
+        meaningful_keys = {"name", "title", "version", "date", "href", "url", "link", "detail"}
+        non_empty = sum(1 for item in items if any(str(v).strip() for v in item.values()))
+        rich = 0
+        raw_only = 0
+        nav_like = 0
+        signatures: list[str] = []
+        for item in items:
+            present = {
+                str(key).lower()
+                for key, value in item.items()
+                if value is not None and str(value).strip() and str(key).lower() in meaningful_keys
+            }
+            if len(present) >= 2:
+                rich += 1
+            text = str(item.get("raw_text") or item.get("text") or item.get("name") or "")
+            has_structural = any(
+                bool(item.get(key))
+                for key in ("version", "date", "href", "title", "name")
+            ) or (len(present) >= 2)
+            if not has_structural:
+                raw_only += 1
+            if cls._looks_like_navigation_item(text):
+                nav_like += 1
+            signature = "|".join(sorted(present))
+            if signature:
+                signatures.append(signature)
+
+        dominant_ratio = 0.0
+        if signatures:
+            dominant_count = max(signatures.count(sig) for sig in set(signatures))
+            dominant_ratio = dominant_count / max(len(signatures), 1)
+
+        min_items = min(max(limit, 1), 3)
+        count_score = min(count / max(min_items, 1), 1.0)
+        non_empty_ratio = non_empty / max(count, 1)
+        rich_ratio = rich / max(count, 1)
+        raw_only_ratio = raw_only / max(count, 1)
+        nav_ratio = nav_like / max(count, 1)
+
+        score = (
+            0.30 * count_score
+            + 0.25 * non_empty_ratio
+            + 0.25 * rich_ratio
+            + 0.20 * dominant_ratio
+            - 0.25 * raw_only_ratio
+            - 0.25 * nav_ratio
+        )
+        if fallback_kind == "table_rows":
+            score += 0.1
+        if fallback_kind == "repeated_entity_blocks":
+            score += 0.05
+        score = max(0.0, min(score, 1.0))
+        grade = "high" if score >= 0.75 else ("medium" if score >= 0.55 else "low")
+        return {"score": score, "grade": grade, "is_acceptable": grade in {"high", "medium"}}
+
+    @staticmethod
+    def _extract_version_like_token(text: str) -> str:
+        value = str(text or "")
+        match = re.search(r"\b(?:Python\s*)?(?:v)?\d+\.\d+(?:\.\d+){0,2}\b", value, flags=re.IGNORECASE)
+        return match.group(0).strip() if match else ""
+
+    @staticmethod
+    def _extract_date_like_token(text: str) -> str:
+        value = str(text or "")
+        patterns = [
+            r"\b\d{4}-\d{2}-\d{2}\b",
+            r"\b(?:Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Sept|Oct|Nov|Dec)[a-z]*\.?\s+\d{1,2},\s+\d{4}\b",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, value, flags=re.IGNORECASE)
+            if match:
+                return match.group(0).strip()
+        return ""
+
+    @classmethod
+    def _extract_release_like_title(cls, text: str) -> str:
+        token = cls._normalize_line(text)
+        if not token:
+            return ""
+        if len(token) > 120:
+            token = token[:120].rstrip()
+        if cls._extract_version_like_token(token):
+            return token
+        return ""
+
+    @classmethod
+    def _looks_like_navigation_item(cls, text: str) -> bool:
+        token = cls._normalize_line(text).lower()
+        if not token:
+            return True
+        nav_markers = {
+            "home",
+            "about",
+            "contact",
+            "privacy",
+            "terms",
+            "menu",
+            "skip to content",
+            "sign in",
+            "login",
+            "next",
+            "previous",
+            "copyright",
+            "footer",
+        }
+        if token in nav_markers:
+            return True
+        if len(token) <= 2:
+            return True
+        if re.fullmatch(r"[›»«•|/\\-]+", token):
+            return True
+        return False
 
     @staticmethod
     def _extract_match_value(match: re.Match[str], group_index: int | None):
