@@ -28,6 +28,10 @@ class BenchmarkScenarioResult(BaseModel):
     execution_status: str
     verifier_verdict: str
     runtime_sec: float
+    planning_time_sec: float = 0.0
+    execution_time_sec: float = 0.0
+    verification_time_sec: float = 0.0
+    correction_time_sec: float = 0.0
     corrective_retry_used: bool
     correction_attempt_count: int = 0
     corrective_plan_valid_count: int = 0
@@ -62,6 +66,10 @@ class BenchmarkMetrics(BaseModel):
     corrective_plan_invalid_count: int
     export_success_rate: float
     mean_runtime_sec: float
+    mean_planning_time_sec: float = 0.0
+    mean_execution_time_sec: float = 0.0
+    mean_verification_time_sec: float = 0.0
+    mean_correction_time_sec: float = 0.0
 
 
 class BenchmarkRunReport(BaseModel):
@@ -126,6 +134,7 @@ class BenchmarkRunner:
         retry_artifact_count = 0
         compare_status = None
         technical_failure = False
+        runtime_diagnostics: dict = {}
 
         try:
             benchmark_context = build_benchmark_context(
@@ -164,6 +173,7 @@ class BenchmarkRunner:
             retry_artifact_count = len(execution.retry_artifacts)
             if isinstance(execution.extracted_data.get("structured_comparison"), dict):
                 compare_status = execution.extracted_data["structured_comparison"].get("status")
+            runtime_diagnostics = result.get("runtime_diagnostics", {}) or {}
 
             save_artifacts(result, run_id=run_id)
             try:
@@ -204,6 +214,10 @@ class BenchmarkRunner:
             execution_status=execution_status,
             verifier_verdict=verifier_verdict,
             runtime_sec=runtime_sec,
+            planning_time_sec=round(float(runtime_diagnostics.get("planning_time_sec", 0.0)), 3),
+            execution_time_sec=round(float(runtime_diagnostics.get("execution_time_sec", 0.0)), 3),
+            verification_time_sec=round(float(runtime_diagnostics.get("verification_time_sec", 0.0)), 3),
+            correction_time_sec=round(float(runtime_diagnostics.get("correction_time_sec", 0.0)), 3),
             corrective_retry_used=corrective_retry_used,
             correction_attempt_count=correction_attempt_count,
             corrective_plan_valid_count=corrective_plan_valid_count,
@@ -265,6 +279,10 @@ class BenchmarkRunner:
                 corrective_plan_invalid_count=0,
                 export_success_rate=0.0,
                 mean_runtime_sec=0.0,
+                mean_planning_time_sec=0.0,
+                mean_execution_time_sec=0.0,
+                mean_verification_time_sec=0.0,
+                mean_correction_time_sec=0.0,
             )
 
         positive = [item for item in results if item.should_succeed]
@@ -284,6 +302,10 @@ class BenchmarkRunner:
         corrective_plan_valid_total = sum(item.corrective_plan_valid_count for item in results)
         corrective_plan_invalid_total = sum(item.corrective_plan_invalid_count for item in results)
         mean_runtime = sum(item.runtime_sec for item in results) / total
+        mean_planning_time = sum(item.planning_time_sec for item in results) / total
+        mean_execution_time = sum(item.execution_time_sec for item in results) / total
+        mean_verification_time = sum(item.verification_time_sec for item in results) / total
+        mean_correction_time = sum(item.correction_time_sec for item in results) / total
 
         return BenchmarkMetrics(
             total_scenarios=total,
@@ -296,6 +318,10 @@ class BenchmarkRunner:
             corrective_plan_invalid_count=corrective_plan_invalid_total,
             export_success_rate=export_success / total,
             mean_runtime_sec=round(mean_runtime, 3),
+            mean_planning_time_sec=round(mean_planning_time, 3),
+            mean_execution_time_sec=round(mean_execution_time, 3),
+            mean_verification_time_sec=round(mean_verification_time, 3),
+            mean_correction_time_sec=round(mean_correction_time, 3),
         )
 
     @staticmethod
@@ -412,6 +438,10 @@ def write_benchmark_report(report: BenchmarkRunReport) -> tuple[Path, Path]:
                 "execution_status",
                 "verifier_verdict",
                 "runtime_sec",
+                "planning_time_sec",
+                "execution_time_sec",
+                "verification_time_sec",
+                "correction_time_sec",
                 "corrective_retry_used",
                 "correction_attempt_count",
                 "corrective_plan_valid_count",

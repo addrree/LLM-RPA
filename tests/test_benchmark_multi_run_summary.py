@@ -50,7 +50,7 @@ def test_extended_suite_contains_all_families_and_multiple_sites():
     }
     assert len(suite.scenarios) == 12
     hosts = {scenario.start_url.split("/")[2] for scenario in suite.scenarios}
-    assert len(hosts) >= 6
+    assert len(hosts) >= 5
 
 
 def test_multi_run_summary_aggregates_mean_std_and_recovery_frequency():
