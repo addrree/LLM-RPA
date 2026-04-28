@@ -164,14 +164,29 @@ class Replanner:
         if reason != "empty_section" and "extracted zero lines" not in error:
             return normalized_plan
         failed_heading = str((failure_details or {}).get("failed_heading") or (failed_args or {}).get("heading_text") or "").strip().lower()
-        candidates = []
+        details_available = (failure_details or {}).get("available_non_empty_headings", [])
+        details_suggested = (failure_details or {}).get("suggested_next_headings", [])
+        candidates: list[str] = []
+        for pool in (details_suggested, details_available):
+            if not isinstance(pool, list):
+                continue
+            for item in pool:
+                if not isinstance(item, dict):
+                    continue
+                text = str(item.get("text", "")).strip()
+                line_count = int(item.get("line_count_after", 0) or 0)
+                if not text or line_count <= 0 or text.lower() == failed_heading or text in candidates:
+                    continue
+                candidates.append(text)
         for item in page_snapshot.headings:
             text = str(getattr(item, "text", "") or "").strip()
+            region = str(getattr(item, "region", "unknown") or "unknown").lower()
             if (
                 not text
                 or int(getattr(item, "line_count_after", 0) or 0) <= 0
                 or text.lower() == failed_heading
                 or text in candidates
+                or region in {"nav", "header", "footer", "aside"}
             ):
                 continue
             candidates.append(text)
@@ -182,6 +197,33 @@ class Replanner:
         if not isinstance(steps, list):
             return normalized_plan
         extract_indices = [idx for idx, step in enumerate(steps) if isinstance(step, dict) and step.get("action") == "extract_section_lines"]
+        compare_indices = [idx for idx, step in enumerate(steps) if isinstance(step, dict) and step.get("action") == "compare_structured_values"]
+        if len(candidates) < 2 and extract_indices and compare_indices:
+            first_extract_idx = extract_indices[0]
+            steps[first_extract_idx] = {
+                "step_id": steps[first_extract_idx].get("step_id", first_extract_idx + 1),
+                "action": "extract_text",
+                "args": {"selector": "main"},
+                "save_as": "source_a",
+            }
+            second_idx = extract_indices[1] if len(extract_indices) > 1 else first_extract_idx + 1
+            if second_idx >= len(steps):
+                steps.append(
+                    {
+                        "step_id": len(steps) + 1,
+                        "action": "extract_text",
+                        "args": {"selector": "article"},
+                        "save_as": "source_b",
+                    }
+                )
+            else:
+                steps[second_idx] = {
+                    "step_id": steps[second_idx].get("step_id", second_idx + 1),
+                    "action": "extract_text",
+                    "args": {"selector": "article"},
+                    "save_as": "source_b",
+                }
+            return normalized_plan
         if not extract_indices:
             return normalized_plan
 

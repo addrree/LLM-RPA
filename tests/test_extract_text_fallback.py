@@ -65,16 +65,16 @@ def test_extract_section_lines_empty_is_not_success():
         assert exc.code == "insufficient_section_data"
 
 
-def test_extract_section_lines_empty_heading_returns_actionable_diagnostics():
+def test_extract_section_lines_empty_heading_diagnostics():
     handlers = ActionHandlers()
     args = {"heading_text": "Introduction", "limit": 4}
     runtime_state = {
         "last_page_snapshot": {
             "visible_headings": ["Introduction", "The RFC Series", "RFC Editor"],
             "headings": [
-                {"text": "Introduction", "line_count_after": 0, "visible": True},
-                {"text": "The RFC Series", "line_count_after": 5, "visible": True},
-                {"text": "RFC Editor", "line_count_after": 4, "visible": True},
+                {"text": "Introduction", "line_count_after": 0, "visible": True, "region": "main", "preview_after": []},
+                {"text": "The RFC Series", "line_count_after": 5, "visible": True, "region": "main", "preview_after": ["Line A"]},
+                {"text": "RFC Editor", "line_count_after": 4, "visible": True, "region": "main", "preview_after": ["Line B"]},
             ],
             "page_text": "Introduction",
             "url": "https://example.org",
@@ -94,4 +94,5 @@ def test_extract_section_lines_empty_heading_returns_actionable_diagnostics():
         assert exc.details["reason"] == "empty_section"
         assert exc.details["failed_heading"] == "Introduction"
         assert exc.details["available_non_empty_headings"][0]["text"] == "The RFC Series"
+        assert exc.details["available_non_empty_headings"][0]["region"] == "main"
         assert any(item["text"] == "RFC Editor" for item in exc.details["suggested_next_headings"])
