@@ -923,3 +923,42 @@ def test_observe_page_headings_have_preview_and_line_count():
     assert intro.line_count_after == 0
     assert details.line_count_after == 2
     assert details.preview_after[:2] == ["Detail line 1", "Detail line 2"]
+
+
+def test_observe_page_marks_nav_headings_as_non_content():
+    class _BodyLocator:
+        async def inner_text(self):
+            return "About\nMain Section\nMain line 1\n"
+
+    class _Page:
+        url = "https://example.org"
+
+        def locator(self, selector):
+            if selector == "body":
+                return _BodyLocator()
+            raise AssertionError(selector)
+
+        async def screenshot(self, **_kwargs):
+            return None
+
+        async def title(self):
+            return "Example"
+
+        async def evaluate(self, _script, _args):
+            return [
+                {"text": "About", "level": "h2", "index": 0, "visible": True, "region": "nav", "dom_path": "html>body>nav>h2"},
+                {"text": "Main Section", "level": "h2", "index": 1, "visible": True, "region": "main", "dom_path": "html>body>main>h2"},
+            ]
+
+    observer = PageObserver()
+
+    async def _empty_list(*_args, **_kwargs):
+        return []
+
+    observer._collect_texts = _empty_list  # type: ignore[method-assign]
+    observer._collect_inputs = _empty_list  # type: ignore[method-assign]
+    snapshot = asyncio.run(observer.observe_page(page=_Page(), screenshot_path="artifacts/screenshots/t2.png"))
+    nav_heading = next(item for item in snapshot.headings if item.text == "About")
+    main_heading = next(item for item in snapshot.headings if item.text == "Main Section")
+    assert nav_heading.is_content_heading is False
+    assert main_heading.is_content_heading is True

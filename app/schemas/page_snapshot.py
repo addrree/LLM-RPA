@@ -9,8 +9,11 @@ class HeadingSnapshot(BaseModel):
     level: str
     index: int
     visible: bool
+    dom_path: str = ""
+    region: str = "unknown"
     preview_after: List[str] = Field(default_factory=list)
     line_count_after: int = 0
+    is_content_heading: bool = False
 
 
 class PageSnapshot(BaseModel):

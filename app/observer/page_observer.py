@@ -74,12 +74,36 @@ class PageObserver:
                 const rect = el.getBoundingClientRect();
                 return rect.width > 0 && rect.height > 0;
               };
+              const buildDomPath = (node) => {
+                const parts = [];
+                let current = node;
+                let depth = 0;
+                while (current && current.nodeType === 1 && depth < 8) {
+                  const tag = (current.tagName || "").toLowerCase();
+                  if (!tag) break;
+                  parts.unshift(tag);
+                  if (tag === "body" || tag === "html") break;
+                  current = current.parentElement;
+                  depth += 1;
+                }
+                return parts.join(">");
+              };
+              const inferRegion = (node) => {
+                if (!node) return "unknown";
+                const explicit = node.closest("main, article, nav, header, footer, aside");
+                if (explicit) return explicit.tagName.toLowerCase();
+                const contentHint = node.closest("[role='main'], [id*='content'], [class*='content']");
+                if (contentHint) return "content";
+                return "unknown";
+              };
               const nodes = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).slice(0, limit);
               return nodes.map((node, index) => ({
                 text: normalize(node.innerText || node.textContent || ""),
                 level: (node.tagName || "h2").toLowerCase(),
                 index,
                 visible: isVisible(node),
+                dom_path: buildDomPath(node),
+                region: inferRegion(node),
               }));
             }
             """,
@@ -102,6 +126,8 @@ class PageObserver:
                     "level": str(item.get("level", "h2")).lower(),
                     "index": int(item.get("index", len(normalized_payload))),
                     "visible": bool(item.get("visible", True)),
+                    "dom_path": str(item.get("dom_path", "") or ""),
+                    "region": str(item.get("region", "unknown") or "unknown").lower(),
                 }
             )
 
@@ -132,14 +158,24 @@ class PageObserver:
                     for line in normalized_lines[start_line + 1 : end_line]
                     if line.strip() and line.strip().lower() != heading["text"].lower()
                 ]
+            region = heading.get("region", "unknown")
+            is_content_heading = bool(
+                heading.get("visible", True)
+                and len(section_lines) > 0
+                and region in {"main", "article", "content", "unknown"}
+                and region not in {"nav", "header", "footer", "aside"}
+            )
             snapshots.append(
                 HeadingSnapshot(
                     text=heading["text"],
                     level=heading["level"],
                     index=heading["index"],
                     visible=heading["visible"],
+                    dom_path=heading.get("dom_path", ""),
+                    region=region,
                     preview_after=section_lines[:3],
                     line_count_after=len(section_lines),
+                    is_content_heading=is_content_heading,
                 )
             )
         return snapshots

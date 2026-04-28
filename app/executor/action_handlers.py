@@ -416,8 +416,8 @@ class ActionHandlers:
 
         source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
         lines = self._split_visible_lines(source_text)
-        heading_index = self._find_heading_index(lines, heading_text=heading_text, ignore_case=bool(args.get("ignore_case", True)))
-        if heading_index is None:
+        heading_candidates = self._find_heading_indices(lines, heading_text=heading_text, ignore_case=bool(args.get("ignore_case", True)))
+        if not heading_candidates:
             raise ValueError(f"Section heading not found: {heading_text!r}")
 
         stop_at_heading = bool(args.get("stop_at_heading", True))
@@ -425,17 +425,28 @@ class ActionHandlers:
         if min_line_length <= 0:
             min_line_length = 1
 
+        prioritized_candidates = self._prioritize_heading_indices(
+            heading_indices=heading_candidates,
+            heading_text=heading_text,
+            runtime_state=runtime_state,
+        )
         collected: list[str] = []
-        for line in lines[heading_index + 1 :]:
-            if stop_at_heading and self._looks_like_heading_line(line):
-                break
-            normalized = self._normalize_line(line)
-            if len(normalized) < min_line_length:
-                continue
-            if normalized in collected:
-                continue
-            collected.append(normalized)
-            if len(collected) >= limit:
+        heading_index = prioritized_candidates[0]
+        for candidate_index in prioritized_candidates:
+            heading_index = candidate_index
+            collected = []
+            for line in lines[candidate_index + 1 :]:
+                if stop_at_heading and self._looks_like_heading_line(line):
+                    break
+                normalized = self._normalize_line(line)
+                if len(normalized) < min_line_length:
+                    continue
+                if normalized in collected:
+                    continue
+                collected.append(normalized)
+                if len(collected) >= limit:
+                    break
+            if collected:
                 break
 
         args["_executor_note"] = (
@@ -1444,14 +1455,97 @@ class ActionHandlers:
                     "text": text,
                     "line_count_after": line_count,
                     "visible": bool(item.get("visible", True)),
+                    "region": str(item.get("region", "unknown") or "unknown"),
+                    "preview_after": [cls._normalize_line(v) for v in item.get("preview_after", []) if cls._normalize_line(v)],
+                    "is_content_heading": bool(item.get("is_content_heading", False)),
                 }
             )
-        available = sorted(available, key=lambda x: int(x.get("line_count_after", 0)), reverse=True)
+        available = [
+            item
+            for item in available
+            if item["visible"]
+            and item["line_count_after"] > 0
+            and item["preview_after"]
+            and item["region"] not in {"nav", "header", "footer", "aside"}
+        ]
+        available = sorted(
+            available,
+            key=lambda x: (1 if x.get("is_content_heading") else 0, int(x.get("line_count_after", 0))),
+            reverse=True,
+        )
         suggested = [item for item in available if cls._normalize_line(item.get("text", "")).lower() != failed_norm][:5]
         return {
-            "available_non_empty_headings": [{"text": item["text"], "line_count_after": item["line_count_after"]} for item in available],
-            "suggested_next_headings": [{"text": item["text"], "line_count_after": item["line_count_after"]} for item in suggested],
+            "available_non_empty_headings": [
+                {
+                    "text": item["text"],
+                    "line_count_after": item["line_count_after"],
+                    "region": item["region"],
+                    "preview_after": item["preview_after"][:2],
+                }
+                for item in available
+            ],
+            "suggested_next_headings": [
+                {
+                    "text": item["text"],
+                    "line_count_after": item["line_count_after"],
+                    "region": item["region"],
+                    "preview_after": item["preview_after"][:2],
+                }
+                for item in suggested
+            ],
         }
+
+    @classmethod
+    def _find_heading_indices(cls, lines: list[str], *, heading_text: str, ignore_case: bool) -> list[int]:
+        target = cls._normalize_line(heading_text)
+        if not target:
+            return []
+        matches: list[int] = []
+        target_cmp = target.lower() if ignore_case else target
+        for idx, line in enumerate(lines):
+            candidate = cls._normalize_line(line)
+            candidate_cmp = candidate.lower() if ignore_case else candidate
+            if candidate_cmp == target_cmp or target_cmp in candidate_cmp:
+                matches.append(idx)
+        return matches
+
+    @classmethod
+    def _prioritize_heading_indices(
+        cls,
+        *,
+        heading_indices: list[int],
+        heading_text: str,
+        runtime_state,
+    ) -> list[int]:
+        if len(heading_indices) <= 1 or not isinstance(runtime_state, dict):
+            return heading_indices
+        snapshot = runtime_state.get("last_page_snapshot")
+        headings_payload = snapshot.get("headings") if isinstance(snapshot, dict) else []
+        candidate_meta: list[dict[str, Any]] = []
+        heading_norm = cls._normalize_line(heading_text).lower()
+        for item in headings_payload if isinstance(headings_payload, list) else []:
+            if not isinstance(item, dict):
+                continue
+            text = cls._normalize_line(item.get("text", "")).lower()
+            if text != heading_norm:
+                continue
+            candidate_meta.append(
+                {
+                    "region": str(item.get("region", "unknown") or "unknown").lower(),
+                    "line_count_after": int(item.get("line_count_after", 0) or 0),
+                    "preview_after": [cls._normalize_line(v) for v in item.get("preview_after", []) if cls._normalize_line(v)],
+                }
+            )
+        if not candidate_meta:
+            return heading_indices
+        scored: list[tuple[int, int]] = []
+        for order, idx in enumerate(heading_indices):
+            meta = candidate_meta[min(order, len(candidate_meta) - 1)]
+            region = meta["region"]
+            region_score = 2 if region in {"main", "article", "content"} else (1 if region == "unknown" else -2)
+            content_score = 2 if meta["line_count_after"] > 0 and meta["preview_after"] else 0
+            scored.append((idx, region_score + content_score))
+        return [idx for idx, _score in sorted(scored, key=lambda item: item[1], reverse=True)]
 
     @staticmethod
     def _infer_href_slug_from_text(text: str) -> str:
