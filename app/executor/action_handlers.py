@@ -190,8 +190,13 @@ class ActionHandlers:
                 f'Selector "{selector}" matched {match_count} elements; used index={index}.'
             )
         elif self._is_heading_selector(selector):
-            target_locator, note = await self._resolve_primary_heading_locator(page=page, fallback_locator=locator)
+            extracted_value, note = await self._extract_text_with_heading_fallback(
+                page=page,
+                selector=selector,
+                fallback_locator=locator,
+            )
             args["_executor_note"] = note
+            return extracted_value
         else:
             target_locator = locator.first
             if match_count > 1:
@@ -436,6 +441,23 @@ class ActionHandlers:
         args["_executor_note"] = (
             f"extract_section_lines heading={heading_text!r}; start_index={heading_index}; collected={len(collected)}"
         )
+        if len(collected) == 0 and not bool(args.get("allow_empty", False)):
+            raise StructuredExtractionError(
+                code="insufficient_section_data",
+                message=(
+                    "section heading found but extracted zero lines; choose another visible heading or "
+                    "use page snapshot headings"
+                ),
+                details={
+                    "heading_text": heading_text,
+                    "collected": 0,
+                    "allow_empty": False,
+                    "instruction": (
+                        "section heading found but extracted zero lines; choose another visible heading "
+                        "or use page snapshot headings"
+                    ),
+                },
+            )
         return collected
 
     async def observe_page(self, page, args, runtime_state=None):
@@ -1275,6 +1297,8 @@ class ActionHandlers:
 
     @staticmethod
     def _build_structured_comparison(*, left: Any, right: Any, label_left: str, label_right: str) -> dict[str, Any]:
+        left_is_empty = ActionHandlers._is_empty_structured_value(left)
+        right_is_empty = ActionHandlers._is_empty_structured_value(right)
         left_keys = sorted(left.keys()) if isinstance(left, dict) else []
         right_keys = sorted(right.keys()) if isinstance(right, dict) else []
         differing_keys: list[str] = []
@@ -1288,7 +1312,7 @@ class ActionHandlers:
                         label_right: right.get(key),
                     }
 
-        return {
+        comparison = {
             "compared": True,
             "compared_at": datetime.now(timezone.utc).isoformat(),
             "left_key": label_left,
@@ -1305,6 +1329,13 @@ class ActionHandlers:
             "differing_values": differing_values,
             "status": "equal" if left == right else "different",
         }
+        if left_is_empty or right_is_empty:
+            comparison["status"] = "insufficient_data"
+            comparison["exact_match"] = False
+            comparison["reason"] = "empty_source"
+            comparison["left_is_empty"] = left_is_empty
+            comparison["right_is_empty"] = right_is_empty
+        return comparison
 
     @staticmethod
     def _is_too_broad_click_selector(selector: str) -> bool:
@@ -2188,6 +2219,111 @@ class ActionHandlers:
         count = await fallback_locator.count()
         note = f'Selector "h1" primary heading resolution failed; fallback to first of {count}.'
         return fallback_locator.first, note
+
+    async def _extract_text_with_heading_fallback(self, *, page, selector: str, fallback_locator):
+        primary_count = await fallback_locator.count()
+        if primary_count > 0:
+            try:
+                target_locator, note = await self._resolve_primary_heading_locator(page=page, fallback_locator=fallback_locator)
+                await target_locator.wait_for(state="visible", timeout=1200)
+                text = self._normalize_line(await target_locator.inner_text())
+                if text:
+                    return text, f"{note} extract_text fallback=visible_h1"
+            except Exception:  # noqa: BLE001
+                pass
+
+        fallback_payload = await page.evaluate(
+            r"""
+            () => {
+              const normalize = (value) => (value || "").replace(/\s+/g, " ").trim();
+              const isVisible = (el) => {
+                if (!el || !el.isConnected) return false;
+                if (el.closest("[hidden], [aria-hidden='true']")) return false;
+                const style = window.getComputedStyle(el);
+                if (!style || style.display === "none" || style.visibility === "hidden" || Number(style.opacity || "1") === 0) {
+                  return false;
+                }
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              };
+              const firstMeaningfulText = (root) => {
+                if (!root) return "";
+                const textCandidates = root.querySelectorAll("h1,h2,h3,p,li,dt,dd,div,span,a");
+                for (const node of textCandidates) {
+                  if (!isVisible(node)) continue;
+                  const text = normalize(node.innerText || node.textContent || "");
+                  if (text.length >= 12) return text;
+                }
+                const rootText = normalize(root.innerText || root.textContent || "");
+                return rootText.length >= 12 ? rootText : "";
+              };
+
+              const headingSelectors = ["h1", "h2"];
+              for (const sel of headingSelectors) {
+                const nodes = Array.from(document.querySelectorAll(sel));
+                for (const node of nodes) {
+                  if (!isVisible(node)) continue;
+                  const text = normalize(node.innerText || node.textContent || "");
+                  if (text) return { value: text, fallback: `visible_${sel}` };
+                }
+              }
+
+              const headingLikeSelectors = [
+                "[class*='title']",
+                "[class*='Title']",
+                "[class*='heading']",
+                "[class*='header']"
+              ];
+              for (const sel of headingLikeSelectors) {
+                const nodes = Array.from(document.querySelectorAll(sel));
+                for (const node of nodes) {
+                  if (!isVisible(node)) continue;
+                  const text = normalize(node.innerText || node.textContent || "");
+                  if (text.length >= 4) return { value: text, fallback: "visible_heading_like" };
+                }
+              }
+
+              const contentRoots = Array.from(document.querySelectorAll("main, section, article"));
+              for (const root of contentRoots) {
+                if (!isVisible(root)) continue;
+                const text = firstMeaningfulText(root);
+                if (text) return { value: text, fallback: "visible_main_section_article_text" };
+              }
+
+              const title = normalize(document.title || "");
+              if (title) return { value: title, fallback: "document_title" };
+
+              const ogTitle = normalize(document.querySelector("meta[property='og:title']")?.getAttribute("content") || "");
+              if (ogTitle) return { value: ogTitle, fallback: "meta_og_title" };
+              const metaTitle = normalize(document.querySelector("meta[name='title']")?.getAttribute("content") || "");
+              if (metaTitle) return { value: metaTitle, fallback: "meta_title" };
+
+              return { value: "", fallback: "none" };
+            }
+            """
+        )
+        value = self._normalize_line(str((fallback_payload or {}).get("value", "")))
+        fallback_name = str((fallback_payload or {}).get("fallback", "none"))
+        if value:
+            note = (
+                f'Selector "{selector}" heading fallback resolution used fallback={fallback_name}; '
+                f"primary_match_count={primary_count}."
+            )
+            return value, note
+        return (
+            self._normalize_line(await page.title()),
+            f'Selector "{selector}" fallback chain exhausted; fallback=document_title.',
+        )
+
+    @staticmethod
+    def _is_empty_structured_value(value: Any) -> bool:
+        if value is None:
+            return True
+        if isinstance(value, str):
+            return not bool(value.strip())
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value) == 0
+        return False
 
     @staticmethod
     def _distance_from_anchor(anchor_idx: int, match: re.Match[str], direction: str) -> int | None:

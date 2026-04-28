@@ -48,6 +48,7 @@ class LLMClient:
         self.session = requests.Session()
         self.session.trust_env = False
         self.last_chat_diagnostics: Dict[str, Any] = {}
+        self.last_prompt_chars: int = 0
 
     @staticmethod
     def _resolve_timeout_sec() -> int:
@@ -165,6 +166,7 @@ class LLMClient:
         last_error: LLMClientError | None = None
         retry_used = False
         retry_reason: str | None = None
+        self.last_prompt_chars = len(system_prompt or "") + len(user_prompt or "")
         for attempt in range(2):
             try:
                 response = self.session.post(url, json=payload, headers=headers or None, timeout=self.timeout_sec)
@@ -245,6 +247,7 @@ class LLMClient:
                 "transport_retry_used": retry_used,
                 "transport_retry_reason": retry_reason,
                 "transport_attempt_count": attempt + 1,
+                "prompt_chars": self.last_prompt_chars,
             }
             if cleaned_content:
                 return cleaned_content

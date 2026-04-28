@@ -46,3 +46,18 @@ def test_augment_multi_step_comparison_sets_compare_status():
     assert result.extracted_data["compare_status"] == "equal"
     assert result.extracted_data["comparison"]["exact_match"] is True
     assert "combined_result" in result.extracted_data
+
+
+def test_compare_structured_values_empty_sources_not_equal():
+    handlers = ActionHandlers()
+    runtime_state = {
+        "extracted_data": {
+            "source_a": {},
+            "source_b": {},
+        }
+    }
+    args = {"left_key": "source_a", "right_key": "source_b"}
+    comparison = asyncio.run(handlers.compare_structured_values(page=None, args=args, runtime_state=runtime_state))
+    assert comparison["status"] == "insufficient_data"
+    assert comparison["exact_match"] is False
+    assert comparison["reason"] == "empty_source"
