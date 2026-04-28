@@ -1,11 +1,13 @@
 from datetime import datetime, timezone
 from pathlib import Path
+import asyncio
 
 import pytest
 
 from app.benchmark.policies import BENCHMARK_ALLOWED_ACTIONS_BY_CATEGORY, build_benchmark_context
 from app.benchmark.runner import BenchmarkRunner, BenchmarkScenarioResult, BenchmarkSelection
 from app.benchmark.scenario_loader import BenchmarkScenario, load_scenario_suite
+from app.observer.page_observer import PageObserver
 from app.orchestrator.workflow_manager import normalize_benchmark_plan
 from app.planner.action_vocab import normalize_plan_action_aliases
 from app.schemas.execution import ExecutionResult, StepLog
@@ -871,3 +873,53 @@ def test_normalize_benchmark_plan_allows_overconstrained_navigation_click_withou
     ctx = build_benchmark_context(category="navigation_then_extraction", task_family="navigation_then_extraction")
     normalized = normalize_benchmark_plan(plan, ctx, page_snapshot=snapshot)
     PlanValidator().validate(normalized, allowed_actions=set(ctx["allowed_actions"]))
+
+
+def test_observe_page_headings_have_preview_and_line_count():
+    class _BodyLocator:
+        async def inner_text(self):
+            return (
+                "Overview\n"
+                "Overview line 1\n"
+                "Overview line 2\n"
+                "Introduction\n"
+                "Details\n"
+                "Detail line 1\n"
+                "Detail line 2\n"
+            )
+
+    class _Page:
+        url = "https://example.org"
+
+        def locator(self, selector):
+            if selector == "body":
+                return _BodyLocator()
+            raise AssertionError(selector)
+
+        async def screenshot(self, **_kwargs):
+            return None
+
+        async def title(self):
+            return "Example"
+
+        async def evaluate(self, _script, _args):
+            return [
+                {"text": "Overview", "level": "h2", "index": 0, "visible": True},
+                {"text": "Introduction", "level": "h2", "index": 1, "visible": True},
+                {"text": "Details", "level": "h2", "index": 2, "visible": True},
+            ]
+
+    observer = PageObserver()
+
+    async def _empty_list(*_args, **_kwargs):
+        return []
+
+    observer._collect_texts = _empty_list  # type: ignore[method-assign]
+    observer._collect_inputs = _empty_list  # type: ignore[method-assign]
+    snapshot = asyncio.run(observer.observe_page(page=_Page(), screenshot_path="artifacts/screenshots/t.png"))
+    headings = snapshot.headings
+    intro = next(item for item in headings if item.text == "Introduction")
+    details = next(item for item in headings if item.text == "Details")
+    assert intro.line_count_after == 0
+    assert details.line_count_after == 2
+    assert details.preview_after[:2] == ["Detail line 1", "Detail line 2"]

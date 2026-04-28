@@ -4,7 +4,7 @@ from datetime import datetime, timezone
 from typing import List
 
 from app.config import SCREENSHOTS_DIR
-from app.schemas.page_snapshot import PageSnapshot
+from app.schemas.page_snapshot import HeadingSnapshot, PageSnapshot
 
 UTC = timezone.utc
 
@@ -17,7 +17,8 @@ class PageObserver:
         body_text = (await page.locator("body").inner_text()).strip()
         title = await page.title()
 
-        headings = await self._collect_texts(page, "h1, h2, h3", limit=20)
+        headings_meta = await self._collect_headings_with_context(page=page, body_text=body_text, limit=30)
+        headings = [item.text for item in headings_meta if item.visible]
         labels = await self._collect_texts(page, "label", limit=30)
         buttons = await self._collect_texts(page, "button, [role='button']", limit=30)
         inputs = await self._collect_inputs(page, limit=30)
@@ -28,6 +29,7 @@ class PageObserver:
             screenshot_path=screenshot_target,
             page_text_excerpt=body_text[:text_limit],
             visible_headings=headings,
+            headings=headings_meta,
             visible_labels=labels,
             visible_buttons=buttons,
             visible_inputs=inputs,
@@ -58,3 +60,86 @@ class PageObserver:
             if desc:
                 values.append(desc)
         return values
+
+    async def _collect_headings_with_context(self, *, page, body_text: str, limit: int) -> List[HeadingSnapshot]:
+        payload = await page.evaluate(
+            """
+            ({ limit }) => {
+              const normalize = (value) => (value || "").replace(/\\s+/g, " ").trim();
+              const isVisible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                if (!style) return false;
+                if (style.visibility === "hidden" || style.display === "none") return false;
+                const rect = el.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0;
+              };
+              const nodes = Array.from(document.querySelectorAll("h1,h2,h3,h4,h5,h6")).slice(0, limit);
+              return nodes.map((node, index) => ({
+                text: normalize(node.innerText || node.textContent || ""),
+                level: (node.tagName || "h2").toLowerCase(),
+                index,
+                visible: isVisible(node),
+              }));
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        return self._attach_heading_context(body_text=body_text, headings_payload=payload or [])
+
+    @staticmethod
+    def _attach_heading_context(*, body_text: str, headings_payload: list[dict]) -> List[HeadingSnapshot]:
+        lines = [line.strip() for line in str(body_text or "").splitlines()]
+        normalized_lines = [line for line in lines if line]
+        normalized_payload: list[dict] = []
+        for item in headings_payload:
+            text = str(item.get("text", "")).strip()
+            if not text:
+                continue
+            normalized_payload.append(
+                {
+                    "text": text,
+                    "level": str(item.get("level", "h2")).lower(),
+                    "index": int(item.get("index", len(normalized_payload))),
+                    "visible": bool(item.get("visible", True)),
+                }
+            )
+
+        heading_to_line_idx: list[int | None] = []
+        cursor = 0
+        for heading in normalized_payload:
+            found = None
+            target = heading["text"].lower()
+            for idx in range(cursor, len(normalized_lines)):
+                if normalized_lines[idx].lower() == target:
+                    found = idx
+                    cursor = idx + 1
+                    break
+            heading_to_line_idx.append(found)
+
+        snapshots: List[HeadingSnapshot] = []
+        for idx, heading in enumerate(normalized_payload):
+            start_line = heading_to_line_idx[idx]
+            end_line = len(normalized_lines)
+            for next_idx in range(idx + 1, len(heading_to_line_idx)):
+                if heading_to_line_idx[next_idx] is not None:
+                    end_line = heading_to_line_idx[next_idx]
+                    break
+            section_lines: list[str] = []
+            if start_line is not None:
+                section_lines = [
+                    line.strip()
+                    for line in normalized_lines[start_line + 1 : end_line]
+                    if line.strip() and line.strip().lower() != heading["text"].lower()
+                ]
+            snapshots.append(
+                HeadingSnapshot(
+                    text=heading["text"],
+                    level=heading["level"],
+                    index=heading["index"],
+                    visible=heading["visible"],
+                    preview_after=section_lines[:3],
+                    line_count_after=len(section_lines),
+                )
+            )
+        return snapshots

@@ -36,5 +36,6 @@ class ExecutionResult(BaseModel):
     failure_type: Optional[str] = None
     failed_action: Optional[str] = None
     failed_args: Dict[str, Any] = Field(default_factory=dict)
+    failure_details: Dict[str, Any] = Field(default_factory=dict)
     technical_failure: bool = False
     retry_artifacts: List[Dict[str, Any]] = Field(default_factory=list)

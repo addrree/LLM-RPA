@@ -63,3 +63,35 @@ def test_extract_section_lines_empty_is_not_success():
         assert False, "expected insufficient section data failure"
     except StructuredExtractionError as exc:
         assert exc.code == "insufficient_section_data"
+
+
+def test_extract_section_lines_empty_heading_returns_actionable_diagnostics():
+    handlers = ActionHandlers()
+    args = {"heading_text": "Introduction", "limit": 4}
+    runtime_state = {
+        "last_page_snapshot": {
+            "visible_headings": ["Introduction", "The RFC Series", "RFC Editor"],
+            "headings": [
+                {"text": "Introduction", "line_count_after": 0, "visible": True},
+                {"text": "The RFC Series", "line_count_after": 5, "visible": True},
+                {"text": "RFC Editor", "line_count_after": 4, "visible": True},
+            ],
+            "page_text": "Introduction",
+            "url": "https://example.org",
+        }
+    }
+
+    async def _fake_source_text(**_kwargs):
+        return "Introduction\n\n"
+
+    handlers._load_source_text = _fake_source_text  # type: ignore[method-assign]
+
+    try:
+        asyncio.run(handlers.extract_section_lines(page=None, args=args, runtime_state=runtime_state))
+        assert False, "expected insufficient section data failure"
+    except StructuredExtractionError as exc:
+        assert exc.code == "insufficient_section_data"
+        assert exc.details["reason"] == "empty_section"
+        assert exc.details["failed_heading"] == "Introduction"
+        assert exc.details["available_non_empty_headings"][0]["text"] == "The RFC Series"
+        assert any(item["text"] == "RFC Editor" for item in exc.details["suggested_next_headings"])

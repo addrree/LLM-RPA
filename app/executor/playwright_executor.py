@@ -208,6 +208,9 @@ class PlaywrightExecutor:
             )
 
         except Exception as e:
+            failure_details = {}
+            if isinstance(e, StructuredExtractionError):
+                failure_details = {"code": e.code, **(e.details or {})}
             if session and session.get("context") is not None:
                 trace_path = VIDEOS_DIR / f"trace_failure_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.zip"
                 try:
@@ -277,6 +280,7 @@ class PlaywrightExecutor:
                 failure_type=self._classify_failure_type(str(e)),
                 failed_action=current_step.action if current_step else (logs[-1].action if logs else None),
                 failed_args=dict(current_step.args) if current_step else {},
+                failure_details=failure_details,
                 technical_failure=self._is_technical_failure(str(e)),
                 retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
             )

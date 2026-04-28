@@ -85,6 +85,7 @@ class Replanner:
         failure_type: str | None = None,
         failed_action: str | None = None,
         failed_args: dict | None = None,
+        failure_details: dict | None = None,
         error_message: str | None = None,
         verifier_issues: list[str] | None = None,
         previous_attempt_signatures: list[str] | None = None,
@@ -101,6 +102,7 @@ class Replanner:
             "failure_type": failure_type,
             "failed_action": failed_action,
             "failed_args": failed_args or execution_result.get("failed_args", {}),
+            "failure_details": failure_details or execution_result.get("failure_details", {}),
             "error_message": error_message or execution_result.get("error_message"),
             "verifier_issues": verifier_issues or verifier_verdict.get("issues", []),
             "verifier_summary": verifier_verdict.get("summary"),
@@ -139,7 +141,59 @@ class Replanner:
             previous_plan=previous_plan,
             page_snapshot=page_snapshot,
         )
+        normalized = self._repair_empty_section_corrective_plan(
+            normalized_plan=normalized,
+            page_snapshot=page_snapshot,
+            failed_args=failed_args or execution_result.get("failed_args", {}),
+            failure_details=failure_details or execution_result.get("failure_details", {}),
+            error_message=error_message or execution_result.get("error_message"),
+        )
         return TaskSpec.model_validate(normalized)
+
+    @staticmethod
+    def _repair_empty_section_corrective_plan(
+        *,
+        normalized_plan: dict,
+        page_snapshot: PageSnapshot,
+        failed_args: dict,
+        failure_details: dict,
+        error_message: str | None,
+    ) -> dict:
+        reason = str((failure_details or {}).get("reason", "")).strip().lower()
+        error = str(error_message or "").lower()
+        if reason != "empty_section" and "extracted zero lines" not in error:
+            return normalized_plan
+        failed_heading = str((failure_details or {}).get("failed_heading") or (failed_args or {}).get("heading_text") or "").strip().lower()
+        candidates = []
+        for item in page_snapshot.headings:
+            text = str(getattr(item, "text", "") or "").strip()
+            if (
+                not text
+                or int(getattr(item, "line_count_after", 0) or 0) <= 0
+                or text.lower() == failed_heading
+                or text in candidates
+            ):
+                continue
+            candidates.append(text)
+        if not candidates:
+            return normalized_plan
+
+        steps = normalized_plan.get("steps")
+        if not isinstance(steps, list):
+            return normalized_plan
+        extract_indices = [idx for idx, step in enumerate(steps) if isinstance(step, dict) and step.get("action") == "extract_section_lines"]
+        if not extract_indices:
+            return normalized_plan
+
+        for order, idx in enumerate(extract_indices):
+            step = steps[idx]
+            args = step.get("args")
+            if not isinstance(args, dict):
+                args = {}
+                step["args"] = args
+            replacement = candidates[min(order, len(candidates) - 1)]
+            args["heading_text"] = replacement
+        return normalized_plan
 
     @staticmethod
     def normalize_final_plan(
