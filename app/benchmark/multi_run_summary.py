@@ -60,6 +60,10 @@ def summarize_reports(reports: list[BenchmarkRunReport]) -> MultiRunBenchmarkSum
         "correction_recovery_rate",
         "export_success_rate",
         "mean_runtime_sec",
+        "mean_planning_time_sec",
+        "mean_execution_time_sec",
+        "mean_verification_time_sec",
+        "mean_correction_time_sec",
     ]
 
     key_metrics: dict[str, MultiRunMetricStats] = {}

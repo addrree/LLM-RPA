@@ -1,0 +1,79 @@
+{
+  "suite_id": "core_generalized_task_suite_v3",
+  "description": "Generalized cross-site benchmark extension with public pages and no answer-leaking hints in scenarios.",
+  "scenarios": [
+    {
+      "scenario_id": "single_value_extract_openstreetmap",
+      "goal": "Open https://www.openstreetmap.org/about and extract one primary page value as a single scalar field.",
+      "start_url": "https://www.openstreetmap.org/about",
+      "category": "single_value_extraction",
+      "description": "Single value extraction on a public informational page.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": ["value"],
+      "task_family": "single_value_extraction",
+      "should_succeed": true,
+      "notes": "Public informational site with stable heading structure."
+    },
+    {
+      "scenario_id": "repeated_listing_iana_root_db",
+      "goal": "Open https://www.iana.org/domains/root/db and extract a repeated structured listing of entries from the main content area.",
+      "start_url": "https://www.iana.org/domains/root/db",
+      "category": "repeated_structured_items",
+      "description": "Repeated listing extraction from tabular content.",
+      "expected_output_type": "list",
+      "required_top_level_fields": ["items"],
+      "expected_min_items": 5,
+      "task_family": "repeated_structured_items",
+      "should_succeed": true,
+      "notes": "Designed to validate table_rows/table_like fallbacks without regex overfitting."
+    },
+    {
+      "scenario_id": "navigation_then_extract_python_docs",
+      "goal": "Open https://www.python.org, navigate to a documentation-related page through visible navigation, then extract one primary value from the destination page.",
+      "start_url": "https://www.python.org/",
+      "category": "navigation_then_extraction",
+      "description": "Navigation then extraction on stable global navigation.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": ["value"],
+      "task_family": "navigation_then_extraction",
+      "should_succeed": true,
+      "notes": "Focuses on click role/name and href_contains navigation robustness."
+    },
+    {
+      "scenario_id": "single_value_russian_spbstu",
+      "goal": "Open https://www.spbstu.ru and extract one primary page value as a single scalar field.",
+      "start_url": "https://www.spbstu.ru",
+      "category": "single_value_extraction",
+      "description": "Russian-language public site extraction.",
+      "expected_output_type": "scalar",
+      "required_top_level_fields": ["value"],
+      "task_family": "single_value_extraction",
+      "should_succeed": true,
+      "notes": "Russian-language scenario on a public university website."
+    },
+    {
+      "scenario_id": "negative_ambiguous_on_wikipedia",
+      "goal": "Open https://www.wikipedia.org and determine whether an ungrounded or ambiguous target value can be extracted; if evidence is insufficient, return an explicit uncertain/negative outcome.",
+      "start_url": "https://www.wikipedia.org/",
+      "category": "negative_or_ambiguous_case",
+      "description": "Negative ambiguous benchmark case requiring explicit reject behavior.",
+      "expected_output_type": "none",
+      "required_top_level_fields": [],
+      "task_family": "negative_or_ambiguous_case",
+      "should_succeed": false,
+      "notes": "Checks reject behavior under ambiguity without answer hints."
+    },
+    {
+      "scenario_id": "section_comparison_ietf_rfc_index",
+      "goal": "Open https://www.ietf.org/standards/rfcs/ and compare two meaningful page sections, then produce a combined comparison result.",
+      "start_url": "https://www.ietf.org/standards/rfcs/",
+      "category": "multi_step_information_retrieval",
+      "description": "Section comparison scenario with multi-step extraction and structured compare output.",
+      "expected_output_type": "mixed",
+      "required_top_level_fields": ["combined_result"],
+      "task_family": "multi_step_information_retrieval",
+      "should_succeed": true,
+      "notes": "Validates generalized section comparison without fixed headings in scenario JSON."
+    }
+  ]
+}

@@ -3,6 +3,7 @@ import logging
 import re
 from urllib.parse import urlparse
 from datetime import datetime, timezone
+from time import perf_counter
 
 from app.config import RAW_LLM_DIR
 from app.executor.playwright_executor import PlaywrightExecutor
@@ -698,8 +699,13 @@ class WorkflowManager:
         initial_plan_valid: bool | None = None
         final_plan_valid: bool | None = None
         action_oov_detected = False
+        planning_time_sec = 0.0
+        execution_time_sec = 0.0
+        verification_time_sec = 0.0
+        correction_time_sec = 0.0
 
         if not self.two_stage_planning:
+            planning_started = perf_counter()
             try:
                 plan = self._planner_build_plan(user_goal=user_goal, benchmark_context=benchmark_context)
             except Exception as exc:  # noqa: BLE001
@@ -715,7 +721,18 @@ class WorkflowManager:
                 initial_plan_valid = False
                 final_plan_valid = False
                 raise WorkflowStageError("validation", str(exc)) from exc
-            execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count, corrective_plan_valid_count, corrective_plan_invalid_count = await self._execute_verify_with_correction_loop(
+            planning_time_sec += perf_counter() - planning_started
+            (
+                execution_result,
+                verdict,
+                final_plan,
+                replanner_artifact,
+                corrective_retry_used,
+                corrective_retry_count,
+                corrective_plan_valid_count,
+                corrective_plan_invalid_count,
+                loop_runtime_diagnostics,
+            ) = await self._execute_verify_with_correction_loop(
                 user_goal=user_goal,
                 initial_plan=plan,
                 session=None,
@@ -723,10 +740,14 @@ class WorkflowManager:
                 page_snapshot=None,
                 benchmark_context=benchmark_context,
             )
+            execution_time_sec += float(loop_runtime_diagnostics.get("execution_time_sec", 0.0))
+            verification_time_sec += float(loop_runtime_diagnostics.get("verification_time_sec", 0.0))
+            correction_time_sec += float(loop_runtime_diagnostics.get("correction_time_sec", 0.0))
         else:
             if self.replanner is None:
                 raise ValueError("two_stage_planning requires replanner")
 
+            planning_started = perf_counter()
             try:
                 initial_plan = self.planner.build_initial_plan(user_goal)
             except Exception as exc:  # noqa: BLE001
@@ -746,18 +767,22 @@ class WorkflowManager:
             session = await self.executor._start_session()
             shared_runtime_state = {}
             try:
+                initial_execution_started = perf_counter()
                 initial_execution = await self.executor.execute(
                     initial_plan,
                     session=session,
                     runtime_state=shared_runtime_state,
                 )
+                execution_time_sec += perf_counter() - initial_execution_started
                 initial_execution_result = initial_execution
                 if initial_execution.status != "success":
+                    initial_verification_started = perf_counter()
                     verdict = self.verifier.verify(
                         initial_plan,
                         initial_execution,
                         benchmark_context=benchmark_context,
                     )
+                    verification_time_sec += perf_counter() - initial_verification_started
                     return {
                         "plan": initial_plan,
                         "initial_plan": initial_plan,
@@ -773,6 +798,12 @@ class WorkflowManager:
                         "page_snapshot": shared_page_snapshot,
                         "corrective_retry_used": False,
                         "corrective_retry_count": 0,
+                        "runtime_diagnostics": {
+                            "planning_time_sec": round(perf_counter() - planning_started, 3),
+                            "execution_time_sec": round(execution_time_sec, 3),
+                            "verification_time_sec": round(verification_time_sec, 3),
+                            "correction_time_sec": 0.0,
+                        },
                     }
 
                 snapshot_payload = initial_execution.extracted_data.get("page_snapshot")
@@ -833,8 +864,19 @@ class WorkflowManager:
                             repaired_raw_response=replanner_artifact.raw_response if replanner_artifact else None,
                         )
                         raise WorkflowStageError("validation", str(second_error)) from second_error
+                planning_time_sec += perf_counter() - planning_started
 
-                execution_result, verdict, final_plan, replanner_artifact, corrective_retry_used, corrective_retry_count, corrective_plan_valid_count, corrective_plan_invalid_count = await self._execute_verify_with_correction_loop(
+                (
+                    execution_result,
+                    verdict,
+                    final_plan,
+                    replanner_artifact,
+                    corrective_retry_used,
+                    corrective_retry_count,
+                    corrective_plan_valid_count,
+                    corrective_plan_invalid_count,
+                    loop_runtime_diagnostics,
+                ) = await self._execute_verify_with_correction_loop(
                     user_goal=user_goal,
                     initial_plan=final_plan,
                     session=session,
@@ -842,6 +884,9 @@ class WorkflowManager:
                     page_snapshot=page_snapshot,
                     benchmark_context=benchmark_context,
                 )
+                execution_time_sec += float(loop_runtime_diagnostics.get("execution_time_sec", 0.0))
+                verification_time_sec += float(loop_runtime_diagnostics.get("verification_time_sec", 0.0))
+                correction_time_sec += float(loop_runtime_diagnostics.get("correction_time_sec", 0.0))
                 plan = final_plan
             finally:
                 await self.executor._close_session(session)
@@ -867,6 +912,12 @@ class WorkflowManager:
             "initial_plan_valid": initial_plan_valid,
             "final_plan_valid": final_plan_valid,
             "action_oov_detected": action_oov_detected,
+            "runtime_diagnostics": {
+                "planning_time_sec": round(planning_time_sec, 3),
+                "execution_time_sec": round(execution_time_sec, 3),
+                "verification_time_sec": round(verification_time_sec, 3),
+                "correction_time_sec": round(correction_time_sec, 3),
+            },
         }
 
     async def _execute_verify_with_correction_loop(
@@ -890,15 +941,22 @@ class WorkflowManager:
         replanner_artifact = self.replanner.last_artifact if self.replanner else None
         prior_corrective_attempts: list[dict] = []
         prior_signatures: set[str] = set()
+        execution_time_total = 0.0
+        verification_time_total = 0.0
+        correction_time_total = 0.0
 
         while True:
+            execution_started = perf_counter()
             execution_result = await self.executor.execute(current_plan, session=session, runtime_state=runtime_state)
+            execution_time_total += perf_counter() - execution_started
             self._augment_multi_step_comparison(execution_result)
+            verification_started = perf_counter()
             verdict = self._verifier_verify(
                 plan=current_plan,
                 execution_result=execution_result,
                 benchmark_context=benchmark_context,
             )
+            verification_time_total += perf_counter() - verification_started
             if verdict.verdict == "accept":
                 return (
                     execution_result,
@@ -909,6 +967,11 @@ class WorkflowManager:
                     corrective_attempt_count,
                     corrective_plan_valid_count,
                     corrective_plan_invalid_count,
+                    {
+                        "execution_time_sec": round(execution_time_total, 3),
+                        "verification_time_sec": round(verification_time_total, 3),
+                        "correction_time_sec": round(correction_time_total, 3),
+                    },
                 )
 
             if corrective_attempt_count >= max_retries or self.replanner is None:
@@ -921,6 +984,11 @@ class WorkflowManager:
                     corrective_attempt_count,
                     corrective_plan_valid_count,
                     corrective_plan_invalid_count,
+                    {
+                        "execution_time_sec": round(execution_time_total, 3),
+                        "verification_time_sec": round(verification_time_total, 3),
+                        "correction_time_sec": round(correction_time_total, 3),
+                    },
                 )
 
             failure_context = self._build_failure_context(execution_result=execution_result, verdict=verdict)
@@ -939,9 +1007,15 @@ class WorkflowManager:
                     corrective_attempt_count,
                     corrective_plan_valid_count,
                     corrective_plan_invalid_count,
+                    {
+                        "execution_time_sec": round(execution_time_total, 3),
+                        "verification_time_sec": round(verification_time_total, 3),
+                        "correction_time_sec": round(correction_time_total, 3),
+                    },
                 )
 
             corrective_attempt_count += 1
+            correction_started = perf_counter()
             effective_snapshot = page_snapshot or self._build_page_snapshot_from_execution(execution_result)
             try:
                 corrective_plan = self._replanner_build_corrective_plan(
@@ -982,6 +1056,7 @@ class WorkflowManager:
                         "failure_type": failure_context["failure_type"],
                     }
                 )
+                correction_time_total += perf_counter() - correction_started
                 continue
 
             corrective_plan = self._normalize_plan_for_validation(corrective_plan)
@@ -1025,6 +1100,7 @@ class WorkflowManager:
                         "failure_type": failure_context["failure_type"],
                     }
                 )
+                correction_time_total += perf_counter() - correction_started
                 continue
 
             signature = self._plan_signature(corrective_plan)
@@ -1047,6 +1123,7 @@ class WorkflowManager:
                         "failure_type": failure_context["failure_type"],
                     }
                 )
+                correction_time_total += perf_counter() - correction_started
                 continue
 
             try:
@@ -1078,6 +1155,7 @@ class WorkflowManager:
                         "failure_type": failure_context["failure_type"],
                     }
                 )
+                correction_time_total += perf_counter() - correction_started
                 continue
 
             corrective_plan_valid_count += 1
@@ -1092,6 +1170,7 @@ class WorkflowManager:
             )
             current_plan = corrective_plan
             replanner_artifact = self.replanner.last_artifact
+            correction_time_total += perf_counter() - correction_started
 
 
     @staticmethod

@@ -133,8 +133,8 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 - `multi_step_information_retrieval`
 - `negative_or_ambiguous_case`
 
-Сценарии v1 лежат в `benchmarks/scenarios/core_task_suite.json` и не привязаны к одному домену.
-Дополнительно есть расширенная версия v2: `benchmarks/scenarios/extended_generalized_task_suite.json`
+Сценарии v1 лежат в `benchmarks/scenarios/core_task_suite.json` (алиас: `benchmarks/scenarios/core_task_suite_v1.json`) и не привязаны к одному домену.
+Дополнительно есть расширенная версия v2: `benchmarks/scenarios/core_task_suite_v2.json` (совместимый алиас: `benchmarks/scenarios/extended_generalized_task_suite.json`)
 с теми же task families и дополнительными стабильными публичными сайтами.
 
 Дополнительно есть быстрый smoke-suite: `benchmarks/scenarios/smoke_generalized_suite.json`
@@ -143,16 +143,18 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 - `anchored_value_extraction`
 - `repeated_structured_items`
 
-Запустить все сценарии v1:
+### Baseline: запуск core suites
+
+Запустить все сценарии **core_task_suite_v1**:
 
 ```bash
-python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/core_task_suite.json --backend ollama
+python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/core_task_suite_v1.json --backend ollama
 ```
 
-Запустить расширенный suite v2:
+Запустить все сценарии **core_task_suite_v2**:
 
 ```bash
-python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/extended_generalized_task_suite.json --backend ollama
+python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/core_task_suite_v2.json --backend ollama
 ```
 
 Запустить smoke-suite отдельно:
@@ -179,6 +181,19 @@ python -m app.main --benchmark-category navigation_then_extraction --backend oll
 - `artifacts/benchmarks/benchmark_summary_<suite_id>_<timestamp>.csv`
 - `artifacts/benchmarks/benchmark_multi_run_summary_<suite_id>_<timestamp>.json` (для `--benchmark-runs > 1` или `--benchmark-summarize-report`)
 
+Также теперь можно запустить стабильностный анализ повторов:
+
+```bash
+python scripts/run_benchmark_repeats.py --suite benchmarks/scenarios/core_task_suite_v2.json --runs 5 --backend ollama
+```
+
+Скрипт не меняет benchmark-логику исполнения; он запускает тот же runner N раз и строит aggregate:
+- pass rate by scenario;
+- verifier accept rate by scenario;
+- mean/std runtime by scenario;
+- correction usage by scenario;
+- failure buckets by scenario.
+
 Сделать multi-run и автоматически получить summary по нескольким прогонам:
 
 ```bash
@@ -191,15 +206,30 @@ python -m app.main --benchmark-all --benchmark-suite benchmarks/scenarios/extend
 python -m app.main   --benchmark-summarize-report artifacts/benchmarks/benchmark_summary_core_generalized_task_suite_v2_20260424_100000.json   --benchmark-summarize-report artifacts/benchmarks/benchmark_summary_core_generalized_task_suite_v2_20260424_103000.json
 ```
 
-В summary считаются метрики:
+### Метрики benchmark summary
+
+В summary считаются:
 
 - total scenarios
-- execution success rate
-- verifier accept rate
+- positive execution success rate
+- positive verifier accept rate
+- negative expected reject rate
+- plan validation pass rate
 - correction retry usage rate
-- correction attempt count / recovery
+- correction recovery rate
 - export success rate
 - mean runtime
+- mean planning time
+- mean execution time
+- mean verification time
+- mean correction time
+
+Краткие определения:
+- `positive_execution_success_rate` — доля позитивных (`should_succeed=true`) сценариев, где `execution_status=success`.
+- `positive_verifier_accept_rate` / `verifier_accept_rate` — доля позитивных сценариев, где verifier дал `accept`.
+- `negative_expected_reject_rate` — доля семантических негативных (`should_succeed=false`, без technical failure), где verifier дал ожидаемый `reject`.
+- `correction_recovery_rate` — доля сценариев с corrective attempts, которые завершились ожидаемым исходом.
+- `export_success_rate` — доля сценариев, где экспорт отчетов прошел успешно.
 
 ## Smoke test
 
