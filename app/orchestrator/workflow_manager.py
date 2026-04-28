@@ -651,6 +651,7 @@ class WorkflowManager:
         "weak_click_target",
         "bad_locator_choice",
         "section_heading_not_grounded",
+        "insufficient_section_data",
         "broad_pattern_rejected_no_structured_fallback",
     }
 
@@ -703,6 +704,14 @@ class WorkflowManager:
         execution_time_sec = 0.0
         verification_time_sec = 0.0
         correction_time_sec = 0.0
+        planning_diagnostics: dict[str, object] = {
+            "scenario_id": str(((benchmark_context or {}).get("evaluator_metadata") or {}).get("scenario_id", "")),
+            "planning_prompt_chars": 0,
+            "planning_response_chars": 0,
+            "planner_model": "",
+            "correction_attempt_count": 0,
+            "planning_timeout_retry_count": 0,
+        }
 
         if not self.two_stage_planning:
             planning_started = perf_counter()
@@ -722,6 +731,7 @@ class WorkflowManager:
                 final_plan_valid = False
                 raise WorkflowStageError("validation", str(exc)) from exc
             planning_time_sec += perf_counter() - planning_started
+            planning_diagnostics.update(self._collect_planning_diagnostics())
             (
                 execution_result,
                 verdict,
@@ -865,6 +875,7 @@ class WorkflowManager:
                         )
                         raise WorkflowStageError("validation", str(second_error)) from second_error
                 planning_time_sec += perf_counter() - planning_started
+                planning_diagnostics.update(self._collect_planning_diagnostics())
 
                 (
                     execution_result,
@@ -917,6 +928,12 @@ class WorkflowManager:
                 "execution_time_sec": round(execution_time_sec, 3),
                 "verification_time_sec": round(verification_time_sec, 3),
                 "correction_time_sec": round(correction_time_sec, 3),
+                "planning_prompt_chars": int(planning_diagnostics.get("planning_prompt_chars", 0)),
+                "planning_response_chars": int(planning_diagnostics.get("planning_response_chars", 0)),
+                "planner_model": str(planning_diagnostics.get("planner_model", "")),
+                "correction_attempt_count": corrective_retry_count,
+                "planning_timeout_retry_count": int(planning_diagnostics.get("planning_timeout_retry_count", 0)),
+                "scenario_id": str(planning_diagnostics.get("scenario_id", "")),
             },
         }
 
@@ -1355,6 +1372,8 @@ class WorkflowManager:
                 failure_type = "broad_pattern_rejected_no_structured_fallback"
             elif "section_heading_not_grounded_in_current_snapshot" in error_message:
                 failure_type = "section_heading_not_grounded"
+            elif "section heading found but extracted zero lines" in error_message:
+                failure_type = "insufficient_section_data"
             elif execution_result.failure_type == "browser_operation_failed" and failed_action == "click":
                 failure_type = "bad_locator_choice"
         if verdict.verdict == "reject" and execution_result.status == "success":
@@ -1366,6 +1385,35 @@ class WorkflowManager:
             "error_message": str(execution_result.error_message or ""),
             "verifier_issues": list(verdict.issues or []),
         }
+
+    def _collect_planning_diagnostics(self) -> dict[str, object]:
+        artifact = self.planner.last_artifact or self.planner.last_initial_artifact
+        prompt_chars = 0
+        response_chars = 0
+        planner_model = ""
+        timeout_retry_count = 0
+
+        if artifact is not None:
+            response_chars = len(artifact.raw_response or "")
+            generation = getattr(artifact, "generation", None)
+            planner_model = str(getattr(generation, "model", "") or "")
+
+        llm_client = getattr(self.planner, "llm_client", None)
+        diagnostics = getattr(llm_client, "last_chat_diagnostics", {}) if llm_client is not None else {}
+        if isinstance(diagnostics, dict):
+            timeout_retry_count = 1 if diagnostics.get("transport_retry_reason") == "timeout" else 0
+            prompt_chars = int(diagnostics.get("prompt_chars", 0) or 0)
+        if prompt_chars == 0 and llm_client is not None:
+            prompt_chars = int(getattr(llm_client, "last_prompt_chars", 0) or 0)
+
+        payload = {
+            "planning_prompt_chars": prompt_chars,
+            "planning_response_chars": response_chars,
+            "planner_model": planner_model,
+            "planning_timeout_retry_count": timeout_retry_count,
+        }
+        logger.info("planning_diagnostics=%s", payload)
+        return payload
 
     @classmethod
     def _classify_verifier_failure(cls, issues: list[str]) -> str:

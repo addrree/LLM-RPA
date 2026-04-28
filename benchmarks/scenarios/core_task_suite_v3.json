@@ -53,7 +53,7 @@
     },
     {
       "scenario_id": "negative_ambiguous_on_wikipedia",
-      "goal": "Open https://www.wikipedia.org and determine whether an ungrounded or ambiguous target value can be extracted; if evidence is insufficient, return an explicit uncertain/negative outcome.",
+      "goal": "Open https://www.wikipedia.org/ and find the domain registration fee or billing contact email shown on this page.",
       "start_url": "https://www.wikipedia.org/",
       "category": "negative_or_ambiguous_case",
       "description": "Negative ambiguous benchmark case requiring explicit reject behavior.",

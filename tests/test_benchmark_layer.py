@@ -310,6 +310,17 @@ def test_extended_suite_has_no_example_dot_com_urls():
     assert "example.com" not in all_text.lower()
 
 
+def test_negative_scenario_does_not_accept_unrelated_numeric_match():
+    suite = load_scenario_suite(Path("benchmarks/scenarios/core_task_suite_v3.json"))
+    scenario = next(item for item in suite.scenarios if item.scenario_id == "negative_ambiguous_on_wikipedia")
+    assert scenario.should_succeed is False
+    assert scenario.required_top_level_fields == []
+    goal = scenario.goal.lower()
+    assert "domain registration fee" in goal
+    assert "billing contact email" in goal
+    assert "article" not in goal
+
+
 def test_grounded_goal_uses_auto_language_detection_when_language_unknown():
     scenario = BenchmarkScenario.model_validate(
         {
