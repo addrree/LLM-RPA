@@ -165,6 +165,50 @@ def test_normalize_final_plan_maps_structured_nested_required_fields_to_save_as(
     assert plan.expected_result.required_fields == ["language_blocks"]
 
 
+def test_corrective_replanner_avoids_empty_failed_heading():
+    snapshot = PageSnapshot(
+        url="https://example.org",
+        title="RFC Index",
+        screenshot_path="artifacts/screenshots/a.png",
+        page_text_excerpt="RFC Index",
+        timestamp=datetime.now(timezone.utc),
+        headings=[
+            {"text": "Introduction", "level": "h2", "index": 0, "visible": True, "line_count_after": 0},
+            {"text": "The RFC Series", "level": "h2", "index": 1, "visible": True, "line_count_after": 5},
+            {"text": "RFC Editor", "level": "h2", "index": 2, "visible": True, "line_count_after": 4},
+        ],
+    )
+    plan = {
+        "goal": "compare sections",
+        "start_url": "https://example.org",
+        "allowed_domains": ["example.org"],
+        "constraints": {"max_steps": 8, "max_replans": 1, "timeout_sec": 30},
+        "expected_result": {"description": "Compare", "required_fields": ["combined_result"]},
+        "steps": [
+            {"step_id": 1, "action": "open_url", "args": {"url": "https://example.org"}},
+            {"step_id": 2, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+            {"step_id": 3, "action": "extract_section_lines", "args": {"heading_text": "Introduction", "limit": 7}, "save_as": "source_a"},
+            {"step_id": 4, "action": "extract_section_lines", "args": {"heading_text": "Introduction", "limit": 7}, "save_as": "source_b"},
+            {"step_id": 5, "action": "compare_structured_values", "args": {"left_key": "source_a", "right_key": "source_b"}, "save_as": "combined_result"},
+            {"step_id": 6, "action": "finish", "args": {}},
+        ],
+    }
+    rewritten = Replanner._repair_empty_section_corrective_plan(
+        normalized_plan=plan,
+        page_snapshot=snapshot,
+        failed_args={"heading_text": "Introduction"},
+        failure_details={"reason": "empty_section", "failed_heading": "Introduction"},
+        error_message="section heading found but extracted zero lines",
+    )
+    headings = [
+        step["args"]["heading_text"]
+        for step in rewritten["steps"]
+        if step.get("action") == "extract_section_lines"
+    ]
+    assert "Introduction" not in headings
+    assert headings[0] in {"The RFC Series", "RFC Editor"}
+
+
 class _FakePlanner:
     def build_initial_plan(self, user_goal: str) -> TaskSpec:
         return TaskSpec.model_validate(

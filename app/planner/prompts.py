@@ -225,6 +225,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 12) Для click после неудачи сужай target с приоритетом href_contains -> role+name -> text(confirmed); не добавляй exact=true/scope_selector без явного подтверждения snapshot и не повторяй общий selector.
 13) Для anchored extraction в corrective retry учитывай язык страницы и anchor_candidates; не используй anchor на другом языке.
 14) Для multi_step compare corrective-план должен извлекать данные по шагам отдельно; не полагаться на regex group reference как на контракт сравнения.
+14.1) Если failed_action=extract_section_lines и reason=empty_section (или в error_message есть "extracted zero lines"), не повторяй failed_heading. Выбирай heading только из page_snapshot.headings/suggested_next_headings с line_count_after>0.
 15) Коррективный replanning используй для recoverable execution ошибок (anchor_not_found, value_not_found_near_anchor, ambiguous/weak click target, bad locator choice при browser_operation_failed), но не для чисто transient timeout без признака плохого locator.
 """
 
@@ -244,7 +245,8 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         "multi_step_information_retrieval": (
             "Используй стабильный compare pipeline: open_url -> observe_page -> extract_section_lines(save_as='source_a') "
             "-> extract_section_lines(save_as='source_b') -> compare_structured_values(save_as='combined_result') -> finish. "
-            "Не используй regex-based extract_structured_items как compare default."
+            "Не используй regex-based extract_structured_items как compare default. "
+            "Если prior failure указывает empty_section/zero lines, не используй failed heading повторно; выбирай headings с line_count_after>0."
         ),
         "anchored_value_extraction": (
             "Используй стабильный путь: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "

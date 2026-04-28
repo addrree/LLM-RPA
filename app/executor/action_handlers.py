@@ -442,6 +442,10 @@ class ActionHandlers:
             f"extract_section_lines heading={heading_text!r}; start_index={heading_index}; collected={len(collected)}"
         )
         if len(collected) == 0 and not bool(args.get("allow_empty", False)):
+            diagnostics = self._build_empty_section_diagnostics(
+                runtime_state=runtime_state,
+                failed_heading=heading_text,
+            )
             raise StructuredExtractionError(
                 code="insufficient_section_data",
                 message=(
@@ -449,6 +453,8 @@ class ActionHandlers:
                     "use page snapshot headings"
                 ),
                 details={
+                    "reason": "empty_section",
+                    "failed_heading": heading_text,
                     "heading_text": heading_text,
                     "collected": 0,
                     "allow_empty": False,
@@ -456,6 +462,8 @@ class ActionHandlers:
                         "section heading found but extracted zero lines; choose another visible heading "
                         "or use page snapshot headings"
                     ),
+                    "available_non_empty_headings": diagnostics["available_non_empty_headings"],
+                    "suggested_next_headings": diagnostics["suggested_next_headings"],
                 },
             )
         return collected
@@ -1415,6 +1423,35 @@ class ActionHandlers:
             ),
             details=diagnostic,
         )
+
+    @classmethod
+    def _build_empty_section_diagnostics(cls, *, runtime_state, failed_heading: str) -> dict[str, list[dict[str, Any]]]:
+        snapshot = runtime_state.get("last_page_snapshot") if isinstance(runtime_state, dict) else None
+        headings_payload = snapshot.get("headings") if isinstance(snapshot, dict) else []
+        available: list[dict[str, Any]] = []
+        failed_norm = cls._normalize_line(failed_heading).lower()
+        for item in headings_payload if isinstance(headings_payload, list) else []:
+            if not isinstance(item, dict):
+                continue
+            text = cls._normalize_line(item.get("text", ""))
+            if not text:
+                continue
+            line_count = int(item.get("line_count_after", 0) or 0)
+            if line_count <= 0:
+                continue
+            available.append(
+                {
+                    "text": text,
+                    "line_count_after": line_count,
+                    "visible": bool(item.get("visible", True)),
+                }
+            )
+        available = sorted(available, key=lambda x: int(x.get("line_count_after", 0)), reverse=True)
+        suggested = [item for item in available if cls._normalize_line(item.get("text", "")).lower() != failed_norm][:5]
+        return {
+            "available_non_empty_headings": [{"text": item["text"], "line_count_after": item["line_count_after"]} for item in available],
+            "suggested_next_headings": [{"text": item["text"], "line_count_after": item["line_count_after"]} for item in suggested],
+        }
 
     @staticmethod
     def _infer_href_slug_from_text(text: str) -> str:

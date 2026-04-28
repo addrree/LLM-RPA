@@ -162,6 +162,20 @@ def _extract_page_text_heading_candidates(page_text: str | None) -> list[str]:
 def _resolve_compare_headings(page_snapshot: PageSnapshot | None) -> tuple[str | None, str | None]:
     if page_snapshot is None:
         return (None, None)
+    ranked_non_empty: list[str] = []
+    for heading in page_snapshot.headings:
+        clean = str(getattr(heading, "text", "") or "").strip()
+        if (
+            not clean
+            or clean in ranked_non_empty
+            or _is_placeholder_heading(clean)
+            or int(getattr(heading, "line_count_after", 0) or 0) <= 0
+        ):
+            continue
+        ranked_non_empty.append(clean)
+    if len(ranked_non_empty) >= 2:
+        return (ranked_non_empty[0], ranked_non_empty[1])
+
     ordered_unique: list[str] = []
     for heading in page_snapshot.visible_headings:
         clean = str(heading or "").strip()
@@ -1045,6 +1059,7 @@ class WorkflowManager:
                     failure_type=failure_context["failure_type"],
                     failed_action=failure_context["failed_action"],
                     failed_args=failure_context["failed_args"],
+                    failure_details=failure_context.get("failure_details", {}),
                     error_message=failure_context["error_message"],
                     verifier_issues=failure_context["verifier_issues"],
                     previous_attempt_signatures=sorted(prior_signatures),
@@ -1357,6 +1372,7 @@ class WorkflowManager:
         error_message = str(execution_result.error_message or "").lower()
         failed_action = execution_result.failed_action
         failed_args = execution_result.failed_args or {}
+        failure_details = execution_result.failure_details or {}
         if execution_result.status != "success":
             if "anchor text not found" in error_message:
                 failure_type = "anchor_not_found"
@@ -1374,6 +1390,8 @@ class WorkflowManager:
                 failure_type = "section_heading_not_grounded"
             elif "section heading found but extracted zero lines" in error_message:
                 failure_type = "insufficient_section_data"
+            elif str(failure_details.get("reason", "")).strip().lower() == "empty_section":
+                failure_type = "insufficient_section_data"
             elif execution_result.failure_type == "browser_operation_failed" and failed_action == "click":
                 failure_type = "bad_locator_choice"
         if verdict.verdict == "reject" and execution_result.status == "success":
@@ -1383,6 +1401,7 @@ class WorkflowManager:
             "failed_action": failed_action,
             "failed_args": failed_args,
             "error_message": str(execution_result.error_message or ""),
+            "failure_details": failure_details,
             "verifier_issues": list(verdict.issues or []),
         }
 
