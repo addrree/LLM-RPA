@@ -27,4 +27,5 @@ class BrowserGymRunReport(BaseModel):
     runtime_sec: float = 0.0
     failure_stage: str | None = None
     error_message: str | None = None
+    final_answer: str | None = None
     output_path: str | None = None

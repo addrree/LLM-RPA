@@ -2,6 +2,9 @@ from __future__ import annotations
 
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
 
+# Single policy point for syntax evolution across BrowserGym benchmarks.
+BROWSERGYM_ACTION_SYNTAX_VERSION = "v1_text"
+
 
 def task_step_to_browsergym_action(step) -> str:
     payload = step.model_dump(mode="json") if hasattr(step, "model_dump") else dict(step)

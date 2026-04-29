@@ -30,7 +30,21 @@ class BrowserGymAgentAdapter:
     def act(self, goal: str, obs: dict, info: dict | None, history: list[dict]) -> BrowserGymAgentDecision:
         context = browsergym_obs_to_page_context(obs, info)
         snapshot_like = page_context_to_snapshot_like(context)
-        prompt_goal = f"{goal}\n\nCurrent page context:\n{snapshot_like}"
+        compact_snapshot = {
+            "url": snapshot_like.get("url", ""),
+            "title": snapshot_like.get("title", ""),
+            "visible_headings": snapshot_like.get("visible_headings", [])[:5],
+            "links": snapshot_like.get("links", [])[:10],
+            "buttons": snapshot_like.get("buttons", [])[:10],
+            "page_text_excerpt": str(snapshot_like.get("page_text", ""))[:900],
+            "source": "browsergym",
+        }
+        history_excerpt = history[-5:]
+        prompt_goal = (
+            f"{goal}\n\n"
+            f"Current page context:\n{compact_snapshot}\n\n"
+            f"Recent action history (latest last):\n{history_excerpt}"
+        )
 
         plan: TaskSpec = self.planner.build_plan(prompt_goal)
         self.validator.validate(plan)
@@ -38,7 +52,7 @@ class BrowserGymAgentAdapter:
         if step is None:
             return BrowserGymAgentDecision(action="noop()", internal_plan=plan.model_dump(mode="json"), rationale="no step")
         if step.action.startswith("extract_"):
-            answer = snapshot_like.get("page_text", "")[:500]
+            answer = compact_snapshot.get("page_text_excerpt", "")[:500]
             return BrowserGymAgentDecision(
                 action=browsergym_finish_action(answer),
                 internal_plan=plan.model_dump(mode="json"),
@@ -50,4 +64,4 @@ class BrowserGymAgentAdapter:
             mapped = task_step_to_browsergym_action(step)
         except UnsupportedBrowserGymActionError:
             return BrowserGymAgentDecision(action="noop()", internal_plan=plan.model_dump(mode="json"), selected_step=step.model_dump(mode="json"), rationale="action mapping failure")
-        return BrowserGymAgentDecision(action=mapped, internal_plan=plan.model_dump(mode="json"), selected_step=step.model_dump(mode="json"))
+        return BrowserGymAgentDecision(action=mapped, internal_plan=plan.model_dump(mode="json"), selected_step=step.model_dump(mode="json"), finish=step.action == "finish", answer=step.args.get("answer") if step.action == "finish" else None)
