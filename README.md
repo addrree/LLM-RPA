@@ -238,3 +238,11 @@ pytest -q
 ```
 
 > Тест не вызывает Ollama API и проверяет совместимость `planner -> validator -> verifier` на `DummyLLMClient`.
+
+## BrowserGym / WebArena external evaluation
+
+Для внешней оценки добавлен отдельный слой BrowserGym-интеграции (не заменяет внутренние suites v1/v2/v3).
+
+- Документация: `docs/browsergym_integration.md`
+- Openended smoke: `python scripts/run_browsergym_smoke.py ...`
+- Реальный BrowserGym WebArena: `python scripts/run_browsergym_webarena.py ...` (требует self-hosted WebArena и `WA_*` env vars).
