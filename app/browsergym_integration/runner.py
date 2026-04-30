@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib
 import json
 import time
+import traceback
 from datetime import datetime
 
 from app.browsergym_integration.config import BrowserGymRunConfig, validate_webarena_env_vars
@@ -68,7 +69,7 @@ class BrowserGymRunner:
                 if terminated or truncated:
                     break
         except Exception as exc:
-            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="failed", steps=steps, failure_stage="runtime", error_message=str(exc), runtime_sec=time.time() - started, final_answer=final_answer))
+            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="failed", steps=steps, failure_stage="runtime", error_message=str(exc), error_traceback=traceback.format_exc(), runtime_sec=time.time() - started, final_answer=final_answer))
         finally:
             env.close()
 
