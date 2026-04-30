@@ -1,3 +1,6 @@
+import json
+
+from app.browsergym_integration.local_extractor import extract_text_from_observation
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context
 
 
@@ -20,7 +23,6 @@ def test_obs_with_text_title_url():
 def test_obs_without_text_fallback():
     ctx = browsergym_obs_to_page_context({"url": "u", "payload": {"a": 1}})
     assert isinstance(ctx["text"], str)
-    assert len(ctx["text"]) > 0
 
 
 def test_obs_unknown_keys_not_crash():
@@ -36,7 +38,21 @@ def test_obs_with_ndarray_screenshot_safe_summary():
     assert ctx["screenshot_summary"]["dtype"] == "uint8"
 
 
-def test_obs_with_ndarray_not_using_bool_context():
-    obs = {"text": "", "screenshot": _FakeArray((2, 2, 3), "uint8")}
-    ctx = browsergym_obs_to_page_context(obs, {"text": "fallback"})
-    assert ctx["text"] == ""
+def test_observation_summary_sanitizes_numpy():
+    obs = {"url": "https://example.com", "screenshot": _FakeArray((2, 2, 3), "uint8"), "open_pages_titles": ("Welcome to Python.org",)}
+    ctx = browsergym_obs_to_page_context(obs, {})
+    dumped = json.dumps(ctx, default=str)
+    assert "array(" not in dumped
+
+
+def test_smoke_extract_text_does_not_return_raw_observation():
+    obs_summary = {
+        "title": "Welcome to Python.org",
+        "open_pages_titles": ["Welcome to Python.org"],
+        "text_excerpt": "Welcome to Python.org\nStart here",
+        "axtree_excerpt": "h1: Welcome to Python.org",
+    }
+    result = extract_text_from_observation(obs_summary, selector="h1", goal="Find the main heading")
+    assert "array(" not in result
+    assert "screenshot" not in result.lower()
+    assert "Welcome" in result

@@ -15,6 +15,13 @@ class BrowserGymRunner:
         self.agent_factory = agent_factory
         self.config = config
 
+    @staticmethod
+    def _is_rawish_answer(value: str | None) -> bool:
+        if not value:
+            return True
+        low = value.lower()
+        return any(token in low for token in ["screenshot", "array(", "open_pages_urls", "chat_messages", "ndarray", "{'url':"])
+
     def _persist_report(self, report: BrowserGymRunReport) -> BrowserGymRunReport:
         if not self.config.save_artifacts:
             return report
@@ -38,9 +45,7 @@ class BrowserGymRunner:
                 importlib.import_module("browsergym.webarena")
         except Exception as exc:
             failure_stage = "webarena_import" if "webarena" in self.config.env_id.lower() else "imports"
-            message = (
-                f"browsergym.webarena import failed: {exc}" if failure_stage == "webarena_import" else f"Install browsergym dependencies first: {exc}"
-            )
+            message = f"browsergym.webarena import failed: {exc}" if failure_stage == "webarena_import" else f"Install browsergym dependencies first: {exc}"
             return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage=failure_stage, error_message=message, runtime_sec=time.time() - started))
 
         env = gym.make(self.config.env_id, task_kwargs=self.config.task_kwargs or {})
@@ -58,14 +63,17 @@ class BrowserGymRunner:
                 decision = agent.act(self.config.goal or "", obs, info, history)
                 action = decision.action
                 if decision.finish and self.config.stop_on_agent_finish:
-                    final_answer = decision.answer
-                    steps.append(BrowserGymStepRecord(step_idx=idx, url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "", action=action, reward=float(reward) if reward is not None else None, terminated=False, truncated=False, info_summary={"keys": sorted(list((info or {}).keys())) if isinstance(info, dict) else []}, internal_plan=decision.internal_plan, selected_step=decision.selected_step))
-                    status = "success_by_agent_finish"
+                    final_answer = (decision.answer or "").strip() or None
+                    finish_status = "success_by_agent_finish"
+                    if self._is_rawish_answer(final_answer):
+                        finish_status = "invalid_agent_finish"
+                    steps.append(BrowserGymStepRecord(step_idx=idx, url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "", action=action, reward=float(reward) if reward is not None else None, terminated=False, truncated=False, info_summary={"keys": sorted(list((info or {}).keys())) if isinstance(info, dict) else []}, internal_plan=decision.internal_plan, selected_step=decision.selected_step, extracted_value=getattr(decision, "extracted_value", None)))
+                    status = finish_status
                     break
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 history.append({"action": action, "reward": reward})
-                steps.append(BrowserGymStepRecord(step_idx=idx, url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "", action=action, reward=float(reward) if reward is not None else None, terminated=terminated, truncated=truncated, info_summary={"keys": sorted(list((info or {}).keys())) if isinstance(info, dict) else []}, internal_plan=decision.internal_plan, selected_step=decision.selected_step))
+                steps.append(BrowserGymStepRecord(step_idx=idx, url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "", action=action, reward=float(reward) if reward is not None else None, terminated=terminated, truncated=truncated, info_summary={"keys": sorted(list((info or {}).keys())) if isinstance(info, dict) else []}, internal_plan=decision.internal_plan, selected_step=decision.selected_step, extracted_value=getattr(decision, "extracted_value", None)))
                 if terminated or truncated:
                     break
         except Exception as exc:
@@ -73,7 +81,9 @@ class BrowserGymRunner:
         finally:
             env.close()
 
-        if status != "success_by_agent_finish":
+        if status not in {"success_by_agent_finish", "invalid_agent_finish"}:
             status = "success" if terminated else "partial"
+        if status == "invalid_agent_finish":
+            status = "failed"
         report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=float(reward) if reward is not None else None, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer)
         return self._persist_report(report)

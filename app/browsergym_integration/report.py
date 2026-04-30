@@ -13,6 +13,7 @@ class BrowserGymStepRecord(BaseModel):
     info_summary: dict = Field(default_factory=dict)
     internal_plan: dict | None = None
     selected_step: dict | None = None
+    extracted_value: str | None = None
     error: str | None = None
 
 
