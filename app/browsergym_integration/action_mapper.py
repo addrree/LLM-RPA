@@ -37,9 +37,10 @@ def task_step_to_browsergym_action(step) -> str:
 
 
 def browsergym_finish_action(answer: str | None = None) -> str:
-    if answer:
-        return f"finish(answer={answer!r})"
-    return "finish()"
+    safe_answer = (answer or "").strip()
+    if safe_answer:
+        return f"finish(answer={safe_answer!r})"
+    return "finish(answer='No final answer produced')"
 
 
 def normalize_browsergym_action(action: str) -> str:

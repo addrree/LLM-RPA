@@ -38,7 +38,7 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     if text is None:
         text = get_first_not_none(info, "text")
     if text is None:
-        text = str(obs)[:2000]
+        text = ""
 
     raw_screenshot = get_first_not_none(obs, "screenshot")
     if raw_screenshot is None:
@@ -54,13 +54,14 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     context = {
         "url": get_first_not_none(obs, "url") if get_first_not_none(obs, "url") is not None else (get_first_not_none(info, "url") or ""),
         "title": get_first_not_none(obs, "title") if get_first_not_none(obs, "title") is not None else (get_first_not_none(info, "title") or ""),
+        "open_pages_titles": get_first_not_none(obs, "open_pages_titles") or get_first_not_none(info, "open_pages_titles") or [],
         "text": text,
-        "axtree": axtree,
+        "text_excerpt": str(text)[:1200],
+        "axtree_excerpt": str(axtree)[:1200] if axtree is not None else "",
         "screenshot": None,
         "image": None,
         "screenshot_summary": _serialize_field_summary(raw_screenshot),
         "image_summary": _serialize_field_summary(raw_image),
-        "visible_text_excerpt": str(text)[:1000],
         "links": get_first_not_none(obs, "links") if get_first_not_none(obs, "links") is not None else (get_first_not_none(info, "links") or []),
         "buttons": get_first_not_none(obs, "buttons") if get_first_not_none(obs, "buttons") is not None else (get_first_not_none(info, "buttons") or []),
         "clickable_elements": get_first_not_none(obs, "clickable_elements") if get_first_not_none(obs, "clickable_elements") is not None else (get_first_not_none(info, "clickable_elements") or []),
@@ -72,6 +73,7 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
             "axtree": _serialize_field_summary(axtree),
         },
     }
+
     return context
 
 

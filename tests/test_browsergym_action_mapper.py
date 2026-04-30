@@ -23,5 +23,5 @@ def test_unsupported_action():
         task_step_to_browsergym_action({"action": "open_url", "args": {"url": "https://x"}})
 
 
-def test_finish_mapping():
-    assert browsergym_finish_action("ok") == "finish(answer='ok')"
+def test_finish_action_uses_final_answer_only():
+    assert browsergym_finish_action("Welcome to Python.org") == "finish(answer='Welcome to Python.org')"
