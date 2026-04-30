@@ -27,8 +27,8 @@ def main():
     try:
         import gymnasium  # noqa: F401
         import browsergym.core  # noqa: F401
-    except Exception:
-        print("Missing BrowserGym dependencies. Install:\n  pip install browsergym gymnasium\n  playwright install")
+    except Exception as exc:
+        print(f"Missing BrowserGym dependencies: {exc}\nInstall:\n  pip install browsergym gymnasium\n  playwright install")
         return
 
     llm = build_llm_client(backend=args.backend)
