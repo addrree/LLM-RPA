@@ -246,3 +246,15 @@ pytest -q
 - Документация: `docs/browsergym_integration.md`
 - Openended smoke: `python scripts/run_browsergym_smoke.py ...`
 - Реальный BrowserGym WebArena: `python scripts/run_browsergym_webarena.py ...` (требует self-hosted WebArena и `WA_*` env vars).
+
+## Deterministic WebArena subset (without OpenAI API)
+
+Для запуска только deterministic subset (без fuzzy/LLM judge задач):
+
+```bash
+python scripts/check_webarena_env.py
+python scripts/list_webarena_tasks.py
+python scripts/run_webarena_deterministic_subset.py --backend ollama_cloud --max-steps 20 --limit 10
+```
+
+Результаты сохраняются в `artifacts/browsergym/` (JSON/CSV отчёты и inventory задач).
