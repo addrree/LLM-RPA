@@ -47,3 +47,22 @@ Reports are saved to `artifacts/browsergym/browsergym_run_<env>_<timestamp>.json
 - Full WebArena score depends on external services and environment setup.
 - This does not claim universal any-site agent capability.
 - AgentLab can be added later as a larger experiment orchestration layer.
+
+## WebArena deterministic subset without OpenAI API
+
+Этот режим запускает только детерминированное подмножество WebArena задач и **не является полным официальным WebArena score**.
+
+Исключаются задачи, где в конфиге есть `llm_fuzzy_match`, `fuzzy_match`, `llm_judge`, `openai` или `gpt`-зависимые evaluator-ы.
+
+Команды:
+
+```bash
+python scripts/check_webarena_env.py
+python scripts/list_webarena_tasks.py
+python scripts/run_webarena_deterministic_subset.py --backend ollama_cloud --max-steps 20 --limit 10
+```
+
+Артефакты сохраняются в `artifacts/browsergym/`:
+- `webarena_task_inventory.json`
+- `webarena_deterministic_subset_report.json`
+- `webarena_deterministic_subset_report.csv`
