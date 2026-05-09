@@ -299,3 +299,32 @@ python scripts/run_webarena_deterministic_subset.py --backend ollama_cloud --max
 ```
 
 Результаты сохраняются в `artifacts/browsergym/` (JSON/CSV отчёты и inventory задач).
+
+## BrowserGym MiniWoB++ external benchmark
+
+The BrowserGym sidecar can run the official MiniWoB++ benchmark subset without touching the internal benchmark suites or the main Playwright workflow. MiniWoB++ does **not** require WebArena `WA_*` variables or Docker-hosted WebArena services.
+
+Setup:
+
+```bash
+pip install browsergym-miniwob
+git clone https://github.com/Farama-Foundation/miniwob-plusplus.git external/miniwob-plusplus
+git -C external/miniwob-plusplus reset --hard 7fd85d71a4b60325c6585396ec4f48377d049838
+python -m http.server 8765 --directory .\external\miniwob-plusplus\miniwob\html\miniwob
+```
+
+PowerShell:
+
+```powershell
+$env:MINIWOB_URL="http://127.0.0.1:8765"
+```
+
+Commands:
+
+```bash
+python scripts/list_minwob_tasks.py
+python scripts/run_minwob_subset.py --backend ollama_cloud --max-steps 10 --limit 3
+python scripts/run_minwob_subset.py --backend ollama_cloud --max-steps 10 --limit 3 --use-vision
+```
+
+Results are saved as JSON and CSV under `artifacts/browsergym/` with success rate, mean reward, mean steps, mean runtime, and failure buckets.

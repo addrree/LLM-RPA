@@ -1,0 +1,17 @@
+from scripts.run_minwob_subset import parse_args
+
+
+def test_parse_minwob_cli_args():
+    args = parse_args([
+        "--use-vision",
+        "--limit",
+        "3",
+        "--task-ids",
+        "click-button,enter-text",
+        "--backend",
+        "ollama_cloud",
+    ])
+    assert args.use_vision is True
+    assert args.limit == 3
+    assert args.task_ids == "click-button,enter-text"
+    assert args.backend == "ollama_cloud"

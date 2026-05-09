@@ -30,6 +30,40 @@ def _serialize_field_summary(value: Any) -> Any:
     return {"kind": type(value).__name__}
 
 
+def _stringify_instruction(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value.strip()
+    if isinstance(value, dict):
+        for key in ("goal", "instruction", "intent", "task", "utterance"):
+            if value.get(key):
+                return _stringify_instruction(value.get(key))
+        return " ".join(f"{k}: {_stringify_instruction(v)}" for k, v in list(value.items())[:5] if _stringify_instruction(v)).strip()
+    if isinstance(value, (list, tuple)):
+        parts: list[str] = []
+        for item in value[:5]:
+            if isinstance(item, dict):
+                text = get_first_not_none(item, "content", "text", "message", "utterance")
+                if text is not None:
+                    parts.append(_stringify_instruction(text))
+            else:
+                parts.append(_stringify_instruction(item))
+        return " ".join(part for part in parts if part).strip()
+    if getattr(value, "shape", None) is not None:
+        return ""
+    return str(value).strip()
+
+
+def extract_goal_instruction(obs: dict[str, Any], info: dict[str, Any]) -> str:
+    for source in (obs, info):
+        for key in ("goal", "instruction", "intent", "task_goal", "utterance", "task_info", "chat_messages"):
+            text = _stringify_instruction(source.get(key))
+            if text:
+                return text[:1200]
+    return ""
+
+
 def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     obs = obs if isinstance(obs, dict) else {"raw": obs}
     info = info if isinstance(info, dict) else {}
@@ -51,10 +85,14 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     if axtree is None:
         axtree = get_first_not_none(info, "axtree")
 
+    goal_instruction = extract_goal_instruction(obs, info)
+
     context = {
         "url": get_first_not_none(obs, "url") if get_first_not_none(obs, "url") is not None else (get_first_not_none(info, "url") or ""),
         "title": get_first_not_none(obs, "title") if get_first_not_none(obs, "title") is not None else (get_first_not_none(info, "title") or ""),
         "open_pages_titles": get_first_not_none(obs, "open_pages_titles") or get_first_not_none(info, "open_pages_titles") or [],
+        "goal_instruction": goal_instruction,
+        "instruction": goal_instruction,
         "text": text,
         "text_excerpt": str(text)[:1200],
         "axtree_excerpt": str(axtree)[:1200] if axtree is not None else "",

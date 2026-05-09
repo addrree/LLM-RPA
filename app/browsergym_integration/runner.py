@@ -46,6 +46,7 @@ class BrowserGymRunner:
             internal_plan=decision.internal_plan,
             selected_step=decision.selected_step,
             extracted_value=getattr(decision, "extracted_value", None),
+            rationale=getattr(decision, "rationale", None),
             vision_used=bool(getattr(decision, "vision_used", False)),
             vision_image_present=bool(getattr(decision, "vision_image_present", False)),
         )
@@ -54,18 +55,27 @@ class BrowserGymRunner:
         started = time.time()
         check = validate_webarena_env_vars(self.config.env_id)
         if not check["ok"]:
-            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage="env_validation", error_message=check["message"], runtime_sec=time.time() - started))
+            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage="env_validation", error_message=check["message"], runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
         try:
             import gymnasium as gym
             import browsergym.core  # noqa: F401
-            if "webarena" in self.config.env_id.lower():
+            normalized_env_id = self.config.env_id.lower()
+            if "webarena" in normalized_env_id:
                 importlib.import_module("browsergym.webarena")
+            if "miniwob" in normalized_env_id:
+                importlib.import_module("browsergym.miniwob")
         except Exception as exc:
-            failure_stage = "webarena_import" if "webarena" in self.config.env_id.lower() else "imports"
-            message = f"browsergym.webarena import failed: {exc}" if failure_stage == "webarena_import" else f"Install browsergym dependencies first: {exc}"
-            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage=failure_stage, error_message=message, runtime_sec=time.time() - started))
+            normalized_env_id = self.config.env_id.lower()
+            failure_stage = "webarena_import" if "webarena" in normalized_env_id else ("miniwob_import" if "miniwob" in normalized_env_id else "imports")
+            message = f"browsergym.webarena import failed: {exc}" if failure_stage == "webarena_import" else (f"browsergym.miniwob import failed: {exc}" if failure_stage == "miniwob_import" else f"Install browsergym dependencies first: {exc}")
+            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage=failure_stage, error_message=message, runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
 
-        env = gym.make(self.config.env_id, task_kwargs=self.config.task_kwargs or {})
+        try:
+            env = gym.make(self.config.env_id, task_kwargs=self.config.task_kwargs or {})
+        except TypeError:
+            env = gym.make(self.config.env_id)
+        except Exception as exc:
+            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage="env_creation", error_message=str(exc), error_traceback=traceback.format_exc(), runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
         agent = self.agent_factory()
         steps = []
         reward = None
@@ -94,7 +104,7 @@ class BrowserGymRunner:
                 if terminated or truncated:
                     break
         except Exception as exc:
-            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="failed", steps=steps, failure_stage="runtime", error_message=str(exc), error_traceback=traceback.format_exc(), runtime_sec=time.time() - started, final_answer=final_answer))
+            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="failed", steps=steps, failure_stage="runtime", error_message=str(exc), error_traceback=traceback.format_exc(), runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=False, benchmark=self.config.benchmark, task_name=self.config.task_name))
         finally:
             env.close()
 
@@ -102,5 +112,6 @@ class BrowserGymRunner:
             status = "success" if terminated else "partial"
         if status == "invalid_agent_finish":
             status = "failed"
-        report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=float(reward) if reward is not None else None, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer)
+        reward_value = float(reward) if reward is not None else None
+        report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=reward_value, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=(reward_value is not None and reward_value > 0) if "miniwob" in self.config.env_id.lower() else (status in {"success", "success_by_agent_finish"}), benchmark=self.config.benchmark, task_name=self.config.task_name)
         return self._persist_report(report)

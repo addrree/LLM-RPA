@@ -72,6 +72,7 @@ class BrowserGymAgentAdapter:
             "visible_headings": snapshot_like.get("visible_headings", [])[:5],
             "links": snapshot_like.get("links", [])[:10],
             "buttons": snapshot_like.get("buttons", [])[:10],
+            "goal_instruction": context.get("goal_instruction", ""),
             "text_excerpt": str(snapshot_like.get("page_text", ""))[:900],
             "axtree_excerpt": context.get("axtree_excerpt", "")[:900],
             "source": "browsergym",
