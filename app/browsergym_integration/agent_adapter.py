@@ -11,6 +11,7 @@ from app.browsergym_integration.local_extractor import (
     extract_value_near_anchor_from_observation,
 )
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context, page_context_to_snapshot_like
+from app.browsergym_integration.plan_normalizer import normalize_plan_for_browsergym
 from app.browsergym_integration.vision import extract_browsergym_image_base64
 from app.schemas.task_spec import TaskSpec
 
@@ -38,6 +39,8 @@ class BrowserGymAgentAdapter:
         max_steps: int = 15,
         two_stage_planning: bool = True,
         use_vision: bool = False,
+        env_id: str | None = None,
+        benchmark: str | None = None,
     ):
         self.planner = planner
         self.replanner = replanner
@@ -46,6 +49,12 @@ class BrowserGymAgentAdapter:
         self.max_steps = max_steps
         self.two_stage_planning = two_stage_planning
         self.use_vision = use_vision
+        self.env_id = env_id
+        self.benchmark = benchmark
+
+    def set_browsergym_context(self, *, env_id: str | None = None, benchmark: str | None = None) -> None:
+        self.env_id = env_id
+        self.benchmark = benchmark
 
     def _extract_local(self, action: str, args: dict, compact_snapshot: dict, goal: str) -> str:
         if action == "extract_text":
@@ -98,6 +107,12 @@ class BrowserGymAgentAdapter:
             plan: TaskSpec = self.planner.build_plan(prompt_goal, images_base64=images)
         else:
             plan = self.planner.build_plan(prompt_goal)
+        normalize_plan_for_browsergym(
+            plan,
+            env_id=self.env_id,
+            benchmark=self.benchmark,
+            current_url=str(snapshot_like.get("url", "")),
+        )
         self.validator.validate(plan)
         step = next((s for s in plan.steps if s.action in {"click", "type", "wait_for", "finish", "press", "fill", "scroll", "noop"} or s.action.startswith("extract_")), None)
         if step is None:
