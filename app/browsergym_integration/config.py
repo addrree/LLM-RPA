@@ -28,6 +28,7 @@ class BrowserGymRunConfig:
     output_dir: Path = field(default_factory=lambda: Path("artifacts/browsergym"))
     use_llm_verifier: bool = True
     stop_on_agent_finish: bool = True
+    use_vision: bool = False
     action_mode: Literal["browsergym_text", "taskspec_step"] = "browsergym_text"
     task_kwargs: dict | None = None
 

@@ -63,8 +63,20 @@ class LLMClient:
     def generate_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
         return self.generate_planner_json(system_prompt, user_prompt)
 
-    def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
-        return self.generate_planner_artifact(system_prompt, user_prompt).parsed_response
+    def generate_planner_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.generate_planner_artifact(
+            system_prompt,
+            user_prompt,
+            images_base64=images_base64,
+            image_base64=image_base64,
+        ).parsed_response
 
     def generate_planner_artifact(
         self,
@@ -72,6 +84,8 @@ class LLMClient:
         user_prompt: str,
         *,
         stage: str = "planner",
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
     ) -> LLMArtifact:
         try:
             raw_text = self._ollama_chat(
@@ -79,6 +93,7 @@ class LLMClient:
                 system_prompt=system_prompt,
                 user_prompt=user_prompt,
                 image_path=None,
+                images_base64=self._normalize_images_base64(images_base64, image_base64),
             )
             parsed = self._safe_parse_json(raw_text, stage=stage)
         except LLMClientError:
@@ -107,8 +122,17 @@ class LLMClient:
         system_prompt: str,
         user_prompt: str,
         image_path: Optional[str] = None,
+        *,
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
     ) -> Dict[str, Any]:
-        return self.generate_verifier_artifact(system_prompt, user_prompt, image_path=image_path).parsed_response
+        return self.generate_verifier_artifact(
+            system_prompt,
+            user_prompt,
+            image_path=image_path,
+            images_base64=images_base64,
+            image_base64=image_base64,
+        ).parsed_response
 
     def generate_verifier_artifact(
         self,
@@ -117,12 +141,15 @@ class LLMClient:
         image_path: Optional[str] = None,
         *,
         stage: str = "verifier",
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
     ) -> LLMArtifact:
         raw_text = self._ollama_chat(
             model=self.verifier_model,
             system_prompt=system_prompt,
             user_prompt=user_prompt,
             image_path=image_path,
+            images_base64=self._normalize_images_base64(images_base64, image_base64),
         )
         parsed = self._safe_parse_json(raw_text, stage=stage)
         fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
@@ -137,7 +164,14 @@ class LLMClient:
             ),
         )
 
-    def _ollama_chat(self, model: str, system_prompt: str, user_prompt: str, image_path: Optional[str]) -> str:
+    def _ollama_chat(
+        self,
+        model: str,
+        system_prompt: str,
+        user_prompt: str,
+        image_path: Optional[str] = None,
+        images_base64: Optional[list[str]] = None,
+    ) -> str:
         url = f"{self.ollama_base_url}/api/chat"
         headers: Dict[str, str] = {}
         if self.backend == "ollama_cloud":
@@ -149,8 +183,13 @@ class LLMClient:
             headers["Authorization"] = f"Bearer {self.ollama_api_key}"
 
         user_message: Dict[str, Any] = {"role": "user", "content": user_prompt}
+        message_images: list[str] = []
         if image_path:
-            user_message["images"] = [self._encode_image_base64(image_path)]
+            message_images.append(self._encode_image_base64(image_path))
+        if images_base64:
+            message_images.extend(str(image) for image in images_base64 if image is not None)
+        if message_images:
+            user_message["images"] = message_images
 
         payload = {
             "model": model,
@@ -191,9 +230,14 @@ class LLMClient:
             if not response.ok:
                 details = response.text[:800]
                 if response.status_code in {401, 403}:
+                    if response.status_code == 403 and "requires a subscription" in details.lower():
+                        raise LLMClientError(
+                            "Ollama Cloud model access denied: model requires subscription/access. "
+                            f"Check model name or subscription. (status_code=403, url={url}, model={model})"
+                        )
                     raise LLMClientError(
-                        f"Ollama Cloud authentication failed (status_code={response.status_code}, url={url}). "
-                        "Check OLLAMA_API_KEY."
+                        f"Ollama Cloud authentication failed (status_code={response.status_code}, url={url}, model={model}). "
+                        "Check OLLAMA_API_KEY or model access."
                     )
                 if response.status_code == 404:
                     raise LLMClientError(
@@ -262,6 +306,16 @@ class LLMClient:
             raise last_error
 
         raise last_error or LLMClientError("Ollama request failed without diagnostics.")
+
+
+    @staticmethod
+    def _normalize_images_base64(images_base64: Optional[list[str]] = None, image_base64: Optional[str] = None) -> list[str] | None:
+        images: list[str] = []
+        if image_base64 is not None:
+            images.append(image_base64)
+        if images_base64 is not None:
+            images.extend(str(image) for image in images_base64 if image is not None)
+        return images or None
 
     @staticmethod
     def _encode_image_base64(image_path: str) -> str:
@@ -350,7 +404,6 @@ class DummyLLMClient(LLMClient):
         if "context-aware replanner" in lower_prompt or "replanner" in lower_prompt:
             return self._build_dummy_replan(user_prompt)
         return self._build_dummy_plan(user_prompt)
-
 
     def _build_dummy_initial_plan(self, user_goal: str) -> Dict[str, Any]:
         target_url = self._extract_first_url(user_goal) or "https://www.wikipedia.org"
@@ -499,7 +552,14 @@ class DummyLLMClient(LLMClient):
             return None
         return match.group(0).rstrip(".,)")
 
-    def generate_planner_json(self, system_prompt: str, user_prompt: str) -> Dict[str, Any]:
+    def generate_planner_json(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
+    ) -> Dict[str, Any]:
         return self.generate_json(system_prompt, user_prompt)
 
     def generate_verifier_json(
@@ -507,6 +567,9 @@ class DummyLLMClient(LLMClient):
         system_prompt: str,
         user_prompt: str,
         image_path: Optional[str] = None,
+        *,
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
     ) -> Dict[str, Any]:
         return self.generate_json(system_prompt, user_prompt)
 
@@ -516,6 +579,8 @@ class DummyLLMClient(LLMClient):
         user_prompt: str,
         *,
         stage: str = "planner",
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
     ) -> LLMArtifact:
         parsed = self.generate_json(system_prompt, user_prompt)
         return LLMArtifact(
@@ -536,6 +601,8 @@ class DummyLLMClient(LLMClient):
         image_path: Optional[str] = None,
         *,
         stage: str = "verifier",
+        images_base64: Optional[list[str]] = None,
+        image_base64: Optional[str] = None,
     ) -> LLMArtifact:
         parsed = self.generate_json(system_prompt, user_prompt)
         return LLMArtifact(

@@ -43,7 +43,7 @@ Reports are saved to `artifacts/browsergym/browsergym_run_<env>_<timestamp>.json
 
 ## MVP limitations
 
-- Minimal action mapping (`click/type/noop/finish`).
+- Minimal action mapping (`click/type/fill/press/scroll/noop/finish`).
 - Full WebArena score depends on external services and environment setup.
 - This does not claim universal any-site agent capability.
 - AgentLab can be added later as a larger experiment orchestration layer.
@@ -66,3 +66,48 @@ python scripts/run_webarena_deterministic_subset.py --backend ollama_cloud --max
 - `webarena_task_inventory.json`
 - `webarena_deterministic_subset_report.json`
 - `webarena_deterministic_subset_report.csv`
+
+## BrowserGym vision mode (opt-in)
+
+BrowserGym sidecar can run the planner as a vision-aware agent when a screenshot/image is available in the BrowserGym observation. This is **opt-in** and does not replace the main `WorkflowManager` / internal benchmark suites / `PlaywrightExecutor` pipeline.
+
+In vision mode the agent sends:
+
+```text
+goal + compact text/AX snapshot + screenshot image
+→ qwen3-vl planner
+→ next BrowserGym action or local extraction
+→ BrowserGym report
+```
+
+Safety/serialization guarantees:
+
+- enable it only with `--use-vision`;
+- raw BrowserGym `numpy` arrays are converted to PNG base64 only for the LLM API payload;
+- base64 screenshots are not added to prompts, `internal_plan`, `selected_step`, JSON reports, or artifacts;
+- reports only record safe diagnostics: `vision_used` and `vision_image_present`;
+- when no image is present, the sidecar falls back to the existing text/AX snapshot path without dummy/local model fallback.
+
+Vision smoke:
+
+```bash
+python scripts/run_browsergym_smoke.py \
+  --env-id browsergym/openended \
+  --start-url https://www.python.org/ \
+  --goal "Using the screenshot, find the main heading of the page" \
+  --backend ollama_cloud \
+  --max-steps 5 \
+  --use-vision
+```
+
+Deterministic WebArena subset with vision enabled:
+
+```bash
+python scripts/run_webarena_deterministic_subset.py \
+  --backend ollama_cloud \
+  --max-steps 20 \
+  --limit 5 \
+  --use-vision
+```
+
+WebArena still requires self-hosted services and the `WA_*` environment variables; `--use-vision` only changes how BrowserGym observations are passed to the planner.

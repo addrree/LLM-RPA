@@ -20,7 +20,12 @@ class Planner:
         self.last_initial_artifact: LLMArtifact | None = None
         self.last_action_oov_detected = False
 
-    def build_plan(self, user_goal: str, benchmark_context: dict | None = None) -> TaskSpec:
+    def build_plan(
+        self,
+        user_goal: str,
+        benchmark_context: dict | None = None,
+        images_base64: list[str] | None = None,
+    ) -> TaskSpec:
         system_prompt = PLANNER_SYSTEM_PROMPT
         if benchmark_context:
             system_prompt = build_benchmark_planner_prompt(
@@ -31,6 +36,7 @@ class Planner:
             system_prompt=system_prompt,
             user_prompt=user_goal,
             stage="planner",
+            images_base64=images_base64,
         )
         self.last_artifact = artifact
         normalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)

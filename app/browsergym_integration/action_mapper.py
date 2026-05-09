@@ -2,8 +2,10 @@ from __future__ import annotations
 
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
 
-# Single policy point for syntax evolution across BrowserGym benchmarks.
-BROWSERGYM_ACTION_SYNTAX_VERSION = "v1_text"
+# Single policy point for syntax evolution across BrowserGym benchmarks.  The
+# installed BrowserGym package is optional in CI; this sidecar keeps the same
+# high-level text DSL shape already used by click/type/finish smoke tests.
+BROWSERGYM_ACTION_SYNTAX_VERSION = "v1_text_sidecar"
 
 
 def task_step_to_browsergym_action(step) -> str:
@@ -21,12 +23,27 @@ def task_step_to_browsergym_action(step) -> str:
         if args.get("selector"):
             return f"click(selector={args['selector']!r})"
         raise UnsupportedBrowserGymActionError("click step missing supported targeting args")
-    if action == "type":
+    if action in {"type", "fill"}:
         selector = args.get("selector")
         text = args.get("text")
+        if text is None and "value" in args:
+            text = args.get("value")
         if not selector or text is None:
-            raise UnsupportedBrowserGymActionError("type requires selector and text")
+            raise UnsupportedBrowserGymActionError(f"{action} requires selector and text/value")
         return f"type(selector={selector!r}, text={text!r})"
+    if action == "press":
+        key = args.get("key") if args.get("key") is not None else args.get("text")
+        if key is None:
+            raise UnsupportedBrowserGymActionError("press requires key or text")
+        selector = args.get("selector")
+        if selector:
+            return f"press(selector={selector!r}, key={key!r})"
+        return f"press(key={key!r})"
+    if action == "scroll":
+        direction = str(args.get("direction") or args.get("scroll_direction") or "down").lower()
+        if direction not in {"down", "up", "left", "right"}:
+            raise UnsupportedBrowserGymActionError("scroll direction must be one of down/up/left/right")
+        return f"scroll(direction={direction!r})"
     if action in {"wait_for", "noop"}:
         return "noop()"
     if action == "finish":
