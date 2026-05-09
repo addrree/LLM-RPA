@@ -77,6 +77,8 @@ class BrowserGymRunner:
         except Exception as exc:
             return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage="env_creation", error_message=str(exc), error_traceback=traceback.format_exc(), runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
         agent = self.agent_factory()
+        if hasattr(agent, "set_browsergym_context"):
+            agent.set_browsergym_context(env_id=self.config.env_id, benchmark=self.config.benchmark)
         steps = []
         reward = None
         terminated = False
