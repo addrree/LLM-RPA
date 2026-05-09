@@ -31,6 +31,8 @@ class BrowserGymRunConfig:
     use_vision: bool = False
     action_mode: Literal["browsergym_text", "taskspec_step"] = "browsergym_text"
     task_kwargs: dict | None = None
+    benchmark: str | None = None
+    task_name: str | None = None
 
 
 def validate_webarena_env_vars(env_id: str) -> dict:
