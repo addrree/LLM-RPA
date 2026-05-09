@@ -2,12 +2,14 @@
 from __future__ import annotations
 
 import argparse
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import csv
 import json
 import time
 from collections import Counter
-from pathlib import Path
-
 from app.browsergym_integration import BrowserGymAgentAdapter, BrowserGymRunConfig, BrowserGymRunner
 from app.browsergym_integration.config import WEBARENA_REQUIRED_ENV_VARS
 from app.browsergym_integration.webarena_tasks import discover_webarena_tasks
@@ -37,7 +39,7 @@ def compute_summary(rows: list[dict]) -> dict:
     }
 
 
-def parse_args():
+def parse_args(argv=None):
     p = argparse.ArgumentParser()
     p.add_argument("--backend", default="ollama_cloud")
     p.add_argument("--max-steps", type=int, default=20)
@@ -46,7 +48,8 @@ def parse_args():
     p.add_argument("--site", default=None)
     p.add_argument("--output", default="artifacts/browsergym/webarena_deterministic_subset_report.json")
     p.add_argument("--skip-llm-fuzzy-match", action=argparse.BooleanOptionalAction, default=True)
-    return p.parse_args()
+    p.add_argument("--use-vision", action="store_true", help="Send BrowserGym screenshot to the planner LLM payload")
+    return p.parse_args(argv)
 
 
 def main() -> int:
@@ -72,7 +75,7 @@ def main() -> int:
     llm = build_llm_client(backend=args.backend)
 
     def agent_factory():
-        return BrowserGymAgentAdapter(Planner(llm), Replanner(llm), PlanValidator(), LLMVerifier(llm), max_steps=args.max_steps)
+        return BrowserGymAgentAdapter(Planner(llm), Replanner(llm), PlanValidator(), LLMVerifier(llm), max_steps=args.max_steps, use_vision=args.use_vision)
 
     rows = []
     for task in selected:
@@ -85,7 +88,7 @@ def main() -> int:
         started = time.time()
         report = BrowserGymRunner(
             agent_factory=agent_factory,
-            config=BrowserGymRunConfig(env_id=task["env_id"], goal=task.get("intent") or task["task_id"], backend=args.backend, max_steps=args.max_steps),
+            config=BrowserGymRunConfig(env_id=task["env_id"], goal=task.get("intent") or task["task_id"], backend=args.backend, max_steps=args.max_steps, use_vision=args.use_vision),
         ).run_one()
         rows.append({
             **task,

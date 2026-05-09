@@ -33,6 +33,23 @@ class BrowserGymRunner:
         report.output_path = str(out)
         return report
 
+    @staticmethod
+    def _make_step_record(idx: int, obs, info, action: str, reward, terminated: bool, truncated: bool, decision) -> BrowserGymStepRecord:
+        return BrowserGymStepRecord(
+            step_idx=idx,
+            url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "",
+            action=action,
+            reward=float(reward) if reward is not None else None,
+            terminated=terminated,
+            truncated=truncated,
+            info_summary={"keys": sorted(list((info or {}).keys()))} if isinstance(info, dict) else {},
+            internal_plan=decision.internal_plan,
+            selected_step=decision.selected_step,
+            extracted_value=getattr(decision, "extracted_value", None),
+            vision_used=bool(getattr(decision, "vision_used", False)),
+            vision_image_present=bool(getattr(decision, "vision_image_present", False)),
+        )
+
     def run_one(self) -> BrowserGymRunReport:
         started = time.time()
         check = validate_webarena_env_vars(self.config.env_id)
@@ -67,13 +84,13 @@ class BrowserGymRunner:
                     finish_status = "success_by_agent_finish"
                     if self._is_rawish_answer(final_answer):
                         finish_status = "invalid_agent_finish"
-                    steps.append(BrowserGymStepRecord(step_idx=idx, url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "", action=action, reward=float(reward) if reward is not None else None, terminated=False, truncated=False, info_summary={"keys": sorted(list((info or {}).keys())) if isinstance(info, dict) else []}, internal_plan=decision.internal_plan, selected_step=decision.selected_step, extracted_value=getattr(decision, "extracted_value", None)))
+                    steps.append(self._make_step_record(idx, obs, info, action, reward, False, False, decision))
                     status = finish_status
                     break
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 history.append({"action": action, "reward": reward})
-                steps.append(BrowserGymStepRecord(step_idx=idx, url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "", action=action, reward=float(reward) if reward is not None else None, terminated=terminated, truncated=truncated, info_summary={"keys": sorted(list((info or {}).keys())) if isinstance(info, dict) else []}, internal_plan=decision.internal_plan, selected_step=decision.selected_step, extracted_value=getattr(decision, "extracted_value", None)))
+                steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
                 if terminated or truncated:
                     break
         except Exception as exc:

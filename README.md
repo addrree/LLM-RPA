@@ -122,6 +122,47 @@ python -m app.main --backend ollama_cloud --goal "Open https://www.wikipedia.org
 Если выполнение упало раньше (например, `open_url` с DNS/сеть ошибкой), скриншота не будет.
 
 
+## BrowserGym sidecar vision mode
+
+The BrowserGym integration remains a separate sidecar evaluation layer; it does not replace the main `WorkflowManager` → `Planner` → `Validator` → `PlaywrightExecutor` pipeline or the internal benchmark suites.
+
+Vision mode is opt-in via `--use-vision`. When enabled, BrowserGym screenshots/images are converted to PNG base64 and sent only in the Ollama chat API payload for the planner (for example `qwen3-vl:235b-cloud` through Ollama Cloud). Raw arrays and base64 screenshots are not saved in prompts, JSON reports, `internal_plan`, `selected_step`, or artifacts. Reports only contain safe diagnostics such as `vision_used` and `vision_image_present`.
+
+Non-vision BrowserGym smoke:
+
+```bash
+python scripts/run_browsergym_smoke.py \
+  --env-id browsergym/openended \
+  --start-url https://www.python.org/ \
+  --goal "Find the main heading of the page" \
+  --backend ollama_cloud \
+  --max-steps 5
+```
+
+Vision BrowserGym smoke:
+
+```bash
+python scripts/run_browsergym_smoke.py \
+  --env-id browsergym/openended \
+  --start-url https://www.python.org/ \
+  --goal "Using the screenshot, find the main heading of the page" \
+  --backend ollama_cloud \
+  --max-steps 5 \
+  --use-vision
+```
+
+Vision WebArena deterministic subset:
+
+```bash
+python scripts/run_webarena_deterministic_subset.py \
+  --backend ollama_cloud \
+  --max-steps 20 \
+  --limit 5 \
+  --use-vision
+```
+
+BrowserGym WebArena still requires self-hosted WebArena services and `WA_*` URLs.
+
 ## Benchmark / evaluation layer
 
 Добавлен компактный воспроизводимый benchmark-suite с обобщёнными типами задач:
