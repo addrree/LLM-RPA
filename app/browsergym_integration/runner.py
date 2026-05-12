@@ -22,6 +22,46 @@ class BrowserGymRunner:
         low = value.lower()
         return any(token in low for token in ["screenshot", "array(", "open_pages_urls", "chat_messages", "ndarray", "{'url':"])
 
+    @staticmethod
+    def _is_miniwob_config(config: BrowserGymRunConfig) -> bool:
+        return (config.benchmark or "").lower() == "miniwob" or config.env_id.lower().startswith("browsergym/miniwob.")
+
+    @staticmethod
+    def _extract_action_syntax(env) -> list[str]:
+        examples: list[str] = []
+        candidates = [
+            getattr(env, "action_space", None),
+            getattr(getattr(env, "unwrapped", None), "action_space", None),
+            getattr(getattr(env, "unwrapped", None), "action_mapping", None),
+            getattr(getattr(env, "unwrapped", None), "action_set", None),
+        ]
+        for candidate in candidates:
+            if candidate is None:
+                continue
+            for attr in ("get_action_description", "describe", "action_description"):
+                method = getattr(candidate, attr, None)
+                if callable(method):
+                    try:
+                        desc = method()
+                    except TypeError:
+                        continue
+                    if desc:
+                        examples.extend(str(desc).splitlines())
+            if isinstance(candidate, dict):
+                examples.extend(str(key) for key in candidate.keys())
+            elif isinstance(candidate, (list, tuple, set)):
+                examples.extend(str(item) for item in candidate)
+            else:
+                text = str(candidate)
+                if text and not text.startswith("<"):
+                    examples.extend(text.splitlines())
+        cleaned: list[str] = []
+        for item in examples:
+            value = " ".join(str(item).strip().split())
+            if value and value not in cleaned:
+                cleaned.append(value)
+        return cleaned[:25]
+
     def _persist_report(self, report: BrowserGymRunReport) -> BrowserGymRunReport:
         if not self.config.save_artifacts:
             return report
@@ -47,6 +87,11 @@ class BrowserGymRunner:
             selected_step=decision.selected_step,
             extracted_value=getattr(decision, "extracted_value", None),
             rationale=getattr(decision, "rationale", None),
+            action_rationale=getattr(decision, "rationale", None),
+            action_string=getattr(decision, "action_string", None) or action,
+            miniwob_instruction=getattr(decision, "miniwob_instruction", None),
+            mapping_error=getattr(decision, "mapping_error", None),
+            error=getattr(decision, "mapping_error", None),
             vision_used=bool(getattr(decision, "vision_used", False)),
             vision_image_present=bool(getattr(decision, "vision_image_present", False)),
         )
@@ -79,6 +124,8 @@ class BrowserGymRunner:
         agent = self.agent_factory()
         if hasattr(agent, "set_browsergym_context"):
             agent.set_browsergym_context(env_id=self.config.env_id, benchmark=self.config.benchmark)
+        if hasattr(agent, "set_browsergym_action_syntax"):
+            agent.set_browsergym_action_syntax(self._extract_action_syntax(env))
         steps = []
         reward = None
         terminated = False
@@ -88,10 +135,24 @@ class BrowserGymRunner:
         try:
             obs, info = env.reset()
             history = []
+            if self._is_miniwob_config(self.config):
+                print(f"[MiniWoB] task {self.config.env_id} env reset", flush=True)
             for idx in range(self.config.max_steps):
                 decision = agent.act(self.config.goal or "", obs, info, history)
                 action = decision.action
-                if decision.finish and self.config.stop_on_agent_finish:
+                if self._is_miniwob_config(self.config) and (getattr(decision, "finish", False) or str(action).strip().lower().startswith(("finish(", "agent_finish("))):
+                    action = "noop()"
+                    try:
+                        decision.action = action
+                        decision.action_string = action
+                        decision.finish = False
+                        decision.mapping_error = getattr(decision, "mapping_error", None) or "action_mapping_failure: finish is disabled for MiniWoB; success requires reward > 0"
+                        decision.rationale = getattr(decision, "rationale", None) or decision.mapping_error
+                    except Exception:
+                        pass
+                if self._is_miniwob_config(self.config):
+                    print(f"[MiniWoB] step {idx + 1}/{self.config.max_steps} action={action}", flush=True)
+                if decision.finish and self.config.stop_on_agent_finish and not self._is_miniwob_config(self.config):
                     final_answer = (decision.answer or "").strip() or None
                     finish_status = "success_by_agent_finish"
                     if self._is_rawish_answer(final_answer):
@@ -101,7 +162,9 @@ class BrowserGymRunner:
                     break
 
                 obs, reward, terminated, truncated, info = env.step(action)
-                history.append({"action": action, "reward": reward})
+                if self._is_miniwob_config(self.config):
+                    print(f"[MiniWoB] step {idx + 1} reward={reward} terminated={terminated} truncated={truncated}", flush=True)
+                history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None)})
                 steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
                 if terminated or truncated:
                     break
@@ -111,9 +174,16 @@ class BrowserGymRunner:
             env.close()
 
         if status not in {"success_by_agent_finish", "invalid_agent_finish"}:
-            status = "success" if terminated else "partial"
+            reward_value_for_status = float(reward) if reward is not None else None
+            if self._is_miniwob_config(self.config):
+                status = "success" if reward_value_for_status is not None and reward_value_for_status > 0 else "partial"
+            else:
+                status = "success" if terminated else "partial"
         if status == "invalid_agent_finish":
             status = "failed"
         reward_value = float(reward) if reward is not None else None
-        report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=reward_value, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=(reward_value is not None and reward_value > 0) if "miniwob" in self.config.env_id.lower() else (status in {"success", "success_by_agent_finish"}), benchmark=self.config.benchmark, task_name=self.config.task_name)
+        success_value = (reward_value is not None and reward_value > 0) if self._is_miniwob_config(self.config) else (status in {"success", "success_by_agent_finish"})
+        if self._is_miniwob_config(self.config):
+            print(f"[MiniWoB] task done success={success_value} reward={reward_value}", flush=True)
+        report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=reward_value, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=success_value, benchmark=self.config.benchmark, task_name=self.config.task_name)
         return self._persist_report(report)
