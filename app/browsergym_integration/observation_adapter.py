@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from typing import Any
 
 
@@ -55,6 +56,16 @@ def _stringify_instruction(value: Any) -> str:
     return str(value).strip()
 
 
+def _safe_text(value: Any, limit: int = 4000) -> str:
+    if value is None or getattr(value, "shape", None) is not None:
+        return ""
+    if isinstance(value, str):
+        return value[:limit]
+    if isinstance(value, (dict, list, tuple)):
+        return str(value)[:limit]
+    return str(value)[:limit]
+
+
 def extract_goal_instruction(obs: dict[str, Any], info: dict[str, Any]) -> str:
     for source in (obs, info):
         for key in ("goal", "instruction", "intent", "task_goal", "utterance", "task_info", "chat_messages"):
@@ -62,6 +73,79 @@ def extract_goal_instruction(obs: dict[str, Any], info: dict[str, Any]) -> str:
             if text:
                 return text[:1200]
     return ""
+
+
+def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
+    out: dict[str, Any] = {}
+    for key in ("bid", "element_id", "backend_node_id", "node_id", "id"):
+        value = item.get(key)
+        if value is not None and str(value).strip():
+            out[key] = str(value).strip()
+            break
+    for key in ("role", "name", "text", "label", "tag", "enabled", "visible", "clickable"):
+        value = item.get(key)
+        if value not in (None, ""):
+            out[key] = value
+    if not any(k in out for k in ("name", "text", "label")):
+        text = get_first_not_none(item, "content", "inner_text", "aria_label", "title", "value")
+        if text not in (None, ""):
+            out["text"] = str(text).strip()
+    return out if out else None
+
+
+def _parse_axtree_clickables(text: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    for line in str(text or "").splitlines():
+        raw = line.strip()
+        if not raw:
+            continue
+        # Common BrowserGym axtree formats include bid/id, role and quoted accessible name.
+        bid_match = re.search(r"\b(?:bid|id|node_id|backend_node_id)\s*[=:]\s*['\"]?([A-Za-z0-9_.:-]+)", raw, flags=re.IGNORECASE)
+        if not bid_match:
+            bid_match = re.search(r"^\s*\[?([A-Za-z0-9_.:-]+)\]?\s+(?:button|link|input|textbox|checkbox|radio)\b", raw, flags=re.IGNORECASE)
+        role_match = re.search(r"\b(button|link|input|textbox|checkbox|radio|menuitem|option)\b", raw, flags=re.IGNORECASE)
+        name_match = re.search(r"['\"]([^'\"]{1,120})['\"]", raw)
+        if not (bid_match or role_match or name_match):
+            continue
+        candidate: dict[str, Any] = {"raw": raw[:240]}
+        if bid_match:
+            candidate["bid"] = bid_match.group(1)
+        if role_match:
+            candidate["role"] = role_match.group(1).lower()
+        if name_match:
+            candidate["name"] = name_match.group(1).strip()
+        elif role_match:
+            tail = raw[role_match.end():].strip(" :-\t")
+            if tail:
+                candidate["text"] = tail[:120]
+        if candidate.get("bid") or candidate.get("name") or candidate.get("text"):
+            candidates.append(candidate)
+    return candidates
+
+
+def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
+    pools: list[Any] = []
+    for source in (obs, info):
+        for key in ("clickable_candidates", "clickable_elements", "buttons", "links", "elements", "interactive_elements"):
+            value = source.get(key)
+            if value:
+                pools.append(value)
+    candidates: list[dict[str, Any]] = []
+    for pool in pools:
+        values = pool if isinstance(pool, list) else [pool]
+        for item in values:
+            candidate = None
+            if isinstance(item, dict):
+                candidate = _candidate_from_dict(item)
+            elif isinstance(item, str) and item.strip():
+                candidate = {"text": item.strip()[:120]}
+            if candidate and candidate not in candidates:
+                candidates.append(candidate)
+    axtree_text = _safe_text(get_first_not_none(obs, "axtree_txt", "axtree", "accessibility_tree", "text_tree") or get_first_not_none(info, "axtree_txt", "axtree", "accessibility_tree"), 12000)
+    for candidate in _parse_axtree_clickables(axtree_text):
+        if candidate not in candidates:
+            candidates.append(candidate)
+    return candidates[:limit]
 
 
 def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
@@ -74,6 +158,10 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     if text is None:
         text = ""
 
+    pruned_html = get_first_not_none(obs, "pruned_html", "dom", "html")
+    if pruned_html is None:
+        pruned_html = get_first_not_none(info, "pruned_html", "dom", "html")
+
     raw_screenshot = get_first_not_none(obs, "screenshot")
     if raw_screenshot is None:
         raw_screenshot = get_first_not_none(info, "screenshot")
@@ -81,11 +169,12 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     if raw_image is None:
         raw_image = get_first_not_none(info, "image")
 
-    axtree = get_first_not_none(obs, "axtree", "accessibility_tree")
+    axtree = get_first_not_none(obs, "axtree_txt", "axtree", "accessibility_tree", "text_tree")
     if axtree is None:
-        axtree = get_first_not_none(info, "axtree")
+        axtree = get_first_not_none(info, "axtree_txt", "axtree", "accessibility_tree", "text_tree")
 
     goal_instruction = extract_goal_instruction(obs, info)
+    clickable_candidates = extract_clickable_candidates(obs, info, limit=30)
 
     context = {
         "url": get_first_not_none(obs, "url") if get_first_not_none(obs, "url") is not None else (get_first_not_none(info, "url") or ""),
@@ -95,20 +184,25 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
         "instruction": goal_instruction,
         "text": text,
         "text_excerpt": str(text)[:1200],
-        "axtree_excerpt": str(axtree)[:1200] if axtree is not None else "",
+        "visible_text_excerpt": str(text)[:1200],
+        "axtree_excerpt": _safe_text(axtree, 1200),
+        "pruned_html_excerpt": _safe_text(pruned_html, 1200),
+        "dom_excerpt": _safe_text(pruned_html, 1200),
+        "clickable_candidates": clickable_candidates,
+        "clickable_candidates_count": len(clickable_candidates),
         "screenshot": None,
         "image": None,
         "screenshot_summary": _serialize_field_summary(raw_screenshot),
         "image_summary": _serialize_field_summary(raw_image),
         "links": get_first_not_none(obs, "links") if get_first_not_none(obs, "links") is not None else (get_first_not_none(info, "links") or []),
         "buttons": get_first_not_none(obs, "buttons") if get_first_not_none(obs, "buttons") is not None else (get_first_not_none(info, "buttons") or []),
-        "clickable_elements": get_first_not_none(obs, "clickable_elements") if get_first_not_none(obs, "clickable_elements") is not None else (get_first_not_none(info, "clickable_elements") or []),
         "obs_keys": sorted(list(obs.keys())),
         "info_keys": sorted(list(info.keys())),
         "observation_summary": {
             "screenshot": _serialize_field_summary(raw_screenshot),
             "image": _serialize_field_summary(raw_image),
             "axtree": _serialize_field_summary(axtree),
+            "pruned_html": _serialize_field_summary(pruned_html),
         },
     }
 
@@ -130,6 +224,7 @@ def page_context_to_snapshot_like(context: dict) -> dict:
         "visible_headings": headings[:10],
         "links": _normalize_clickables(context.get("links", [])),
         "buttons": _normalize_clickables(context.get("buttons", [])),
+        "clickable_candidates": context.get("clickable_candidates", [])[:30],
         "source": "browsergym",
     }
 

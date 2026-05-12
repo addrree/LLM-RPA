@@ -53,6 +53,12 @@ PLANNER_SYSTEM_PROMPT = """
     - используй extract_pattern_from_page_text с полной группой, например [0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
+13.1) Если observe_page.page_text или page_text_excerpt уже содержит искомый label/anchor и значение рядом с ним, предпочитай extract_pattern_from_page_text с regex по page_text. Для label-value-unit patterns не выбирай extract_value_near_anchor с same_block_only=true, если значение явно видно в page_text, но DOM может быть split across blocks.
+Пример Wikipedia English article count:
+Observed text:
+English\n7,180,000+ articles
+Correct action:
+{"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}
 14. Используй ТОЛЬКО канонические action names из схемы.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
 16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
@@ -151,16 +157,18 @@ REPLANNER_SYSTEM_PROMPT = """
 Ключевые правила:
 1) Если final execution может запускаться в отдельной сессии, добавляй open_url(start_url) первым шагом.
 2) Не выдумывай CSS-селекторы, если можно извлечь значение из page_text через regex/pattern.
-3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor:
+3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor только когда page_text не дает надежный label-value-unit regex:
    - задавай anchor_candidates (anchor_text только если он явно подтвержден на странице)
    - search_direction="after"
    - same_block_only=true
    - required_right_context, если очевиден контекст ("articles", "₽", "reviews" и т.п.)
    - не бери "первое число рядом" без контекстной проверки.
    - если этот action невозможен, тогда используй extract_text_near_text или extract_pattern_from_page_text.
-2.1) Для чисел с возможными разделителями тысяч и "+" захватывай ПОЛНУЮ числовую строку, а не только первую группу цифр.
-2.2) Для таких шагов указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
-2.3) Избегай шаблонов уровня "(\\d+)" если рядом ожидается формат 2 087 000+, 2,087,000+ или 2.087.000+.
+2.1) Если observe_page.page_text/page_text_excerpt уже содержит label/anchor и значение рядом (например English\n7,180,000+ articles), предпочитай extract_pattern_from_page_text regex по page_text; не выбирай extract_value_near_anchor same_block_only=true для DOM-split случаев.
+Пример: Goal=find English article count on wikipedia.org homepage; Observed text: English\\n7,180,000+ articles; Correct extraction step: {"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}.
+2.2) Для чисел с возможными разделителями тысяч и "+" захватывай ПОЛНУЮ числовую строку, а не только первую группу цифр.
+2.3) Для таких шагов указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
+2.4) Избегай шаблонов уровня "(\\d+)" если рядом ожидается формат 2 087 000+, 2,087,000+ или 2.087.000+.
 4) Можно использовать observe_page как первый шаг final-плана только если нужен новый snapshot после переходов.
 4.1) Для извлечения повторяющихся структур (например top 10 языков Wikipedia) предпочитай один шаг extract_items с полями-объектами:
    - language_name: селектор названия языка внутри блока
@@ -205,15 +213,16 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 Верни только JSON TaskSpec.
 
 Правила:
+0) Never invent action names. Use only TaskSpec allowed actions exactly. Invalid examples: Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
 2) Если требовался список, возвращай массив объектов:
    - используй extract_items ТОЛЬКО когда можешь надежно задать args.container_selector + args.fields + args.limit + save_as,
    - если container_selector неочевиден/нестабилен, используй extract_structured_items (pattern + fields + limit + save_as).
 3) Не возвращай одиночную строку, когда ожидается list[dict].
 4) Для open_url всегда задавай args.url.
-5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения.
+5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения. Если page_snapshot.page_text/page_text_excerpt содержит label-value-unit рядом, предпочитай extract_pattern_from_page_text regex по page_text.
 6) Никаких комментариев/markdown — только JSON.
-7) Используй только канонические action names из схемы.
+7) Используй только канонические action names из схемы. Never invent action names. Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 8) Учитывай prior corrective attempts и НЕ повторяй уже проваленные решения (тот же action+args, тот же regex/group mismatch, тот же широкий click locator).
 9) Запрещено генерировать шаги с пустыми обязательными аргументами.
 10) Для single_value_title_or_header не применяй extract_value_near_anchor, если нет явного anchor.

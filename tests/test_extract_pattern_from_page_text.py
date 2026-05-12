@@ -321,3 +321,41 @@ def test_extract_value_near_anchor_auto_language_skips_cross_language_anchor():
     value = asyncio.run(handler.extract_value_near_anchor(page, args, runtime_state={}))
     assert value == "support@example.org"
     assert args["anchor_text"] == "Contact"
+
+
+def test_wikipedia_extract_pattern_from_page_text_regression():
+    page = _FakePage("Wikipedia\nEnglish\n7,180,000+ articles\nDeutsch\n...")
+    handler = ActionHandlers()
+    value = asyncio.run(
+        handler.extract_pattern_from_page_text(
+            page,
+            {
+                "pattern": r"English\s+([0-9][0-9,\.\s\u00A0\u202F]*\+?)\s+articles",
+                "group_index": 1,
+                "normalize_number": True,
+                "number_type": "int",
+                "strip_plus": True,
+            },
+            runtime_state={},
+        )
+    )
+    assert value == 7180000
+
+
+def test_extract_value_near_anchor_page_text_anchor_fallback_regression():
+    page = _FakePage("Wikipedia\nEnglish\n7,180,000+ articles\nDeutsch\n...", evaluate_payload=[])
+    handler = ActionHandlers()
+    args = {
+        "anchor_candidates": ["English"],
+        "value_pattern": r"([0-9][0-9,\.\s\u00A0\u202F]*\+?)",
+        "search_direction": "after",
+        "same_block_only": True,
+        "required_right_context": "articles",
+        "group_index": 1,
+        "normalize_number": True,
+        "number_type": "int",
+        "strip_plus": True,
+    }
+    value = asyncio.run(handler.extract_value_near_anchor(page, args, runtime_state={}))
+    assert value == 7180000
+    assert "page_text_anchor_fallback" in args["_executor_note"]

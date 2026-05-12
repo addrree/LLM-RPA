@@ -753,7 +753,23 @@ class ActionHandlers:
                 )
 
             if not resolved_anchor_text:
-                raise ValueError(f"Anchor text not found for candidates={resolved_candidates}")
+                plain_match = self._plain_text_anchor_fallback(
+                    source_text=source_text,
+                    anchor_candidates=resolved_candidates,
+                    value_pattern=str(value_pattern) if value_pattern else "",
+                    search_direction=str(args.get("search_direction", "after")).lower(),
+                    required_right_context=args.get("required_right_context"),
+                    required_left_context=args.get("required_left_context"),
+                    group_index=args.get("group_index"),
+                    flags_value=re.IGNORECASE if bool(args.get("ignore_case", True)) else 0,
+                )
+                if plain_match is None:
+                    raise ValueError(f"Anchor text not found for candidates={resolved_candidates}")
+                anchor_text = plain_match["anchor_text"]
+                args["_page_text_anchor_fallback_match"] = plain_match
+                args["anchor_text"] = anchor_text
+                args["_executor_note"] = "extract_value_near_anchor resolved via page_text_anchor_fallback"
+                return self._finalize_anchor_fallback_value(plain_match, args)
             anchor_text = resolved_anchor_text
             args["anchor_text"] = anchor_text
         if not value_pattern:
@@ -858,6 +874,20 @@ class ActionHandlers:
                 )
 
         if best_match is None:
+            plain_match = self._plain_text_anchor_fallback(
+                source_text=source_text,
+                anchor_candidates=[anchor_text],
+                value_pattern=value_pattern,
+                search_direction=search_direction,
+                required_right_context=required_right_context,
+                required_left_context=required_left_context,
+                group_index=group_index,
+                flags_value=flags_value,
+            )
+            if plain_match is not None:
+                args["_page_text_anchor_fallback_match"] = plain_match
+                args["_executor_note"] = "extract_value_near_anchor matched via page_text_anchor_fallback"
+                return self._finalize_anchor_fallback_value(plain_match, args)
             raise ValueError(
                 f"Value not found near anchor_text={anchor_text!r}; pattern={value_pattern!r}; "
                 f"required_left_context={required_left_context!r}; required_right_context={required_right_context!r}"
@@ -906,6 +936,79 @@ class ActionHandlers:
             f"source={best_match['source']}; fallback_used={fallback_used}; "
             f"scope={best_match.get('match_scope')}; confidence={best_match.get('confidence')}; "
             f"strict_context_disabled={strict_context_disabled}"
+        )
+        return result
+
+    @classmethod
+    def _normalize_anchor_fallback_text(cls, value: str) -> str:
+        return re.sub(r"[ \t\r\n\u00A0\u202F]+", " ", str(value or "")).strip()
+
+    @classmethod
+    def _plain_text_anchor_fallback(
+        cls,
+        *,
+        source_text: str,
+        anchor_candidates: list[str],
+        value_pattern: str,
+        search_direction: str,
+        required_right_context: str | None,
+        required_left_context: str | None,
+        group_index: int | None,
+        flags_value: int,
+    ) -> dict[str, Any] | None:
+        if not source_text or not value_pattern:
+            return None
+        normalized = cls._normalize_anchor_fallback_text(source_text)
+        window_chars = 800
+        for anchor in anchor_candidates or []:
+            anchor_text = cls._normalize_anchor_fallback_text(str(anchor))
+            if not anchor_text:
+                continue
+            match_anchor = re.search(re.escape(anchor_text), normalized, flags=flags_value | re.IGNORECASE)
+            if not match_anchor:
+                continue
+            if search_direction == "before":
+                start = max(0, match_anchor.start() - window_chars)
+                end = match_anchor.end()
+            elif search_direction == "around":
+                start = max(0, match_anchor.start() - window_chars)
+                end = min(len(normalized), match_anchor.end() + window_chars)
+            else:
+                start = match_anchor.start()
+                end = min(len(normalized), match_anchor.end() + window_chars)
+            window = normalized[start:end]
+            for value_match in re.finditer(value_pattern, window, flags=flags_value):
+                raw_value = cls._extract_match_value(value_match, group_index=group_index)
+                value_start = value_match.start()
+                value_end = value_match.end()
+                left = window[max(0, value_start - 80):value_start]
+                right = window[value_end:min(len(window), value_end + 80)]
+                if required_left_context and cls._normalize_anchor_fallback_text(str(required_left_context)).casefold() not in left.casefold():
+                    continue
+                if required_right_context and cls._normalize_anchor_fallback_text(str(required_right_context)).casefold() not in right.casefold():
+                    continue
+                return {
+                    "source": "page_text_anchor_fallback",
+                    "fallback_used": True,
+                    "anchor_text": anchor_text,
+                    "value": raw_value,
+                    "window_text": window[:500],
+                }
+        return None
+
+    def _finalize_anchor_fallback_value(self, match: dict[str, Any], args: dict) -> Any:
+        raw_value = match["value"]
+        if bool(args.get("normalize_number", False)):
+            result = self._normalize_number_token(
+                raw_value,
+                number_type=str(args.get("number_type") or "int").lower(),
+                strip_plus=bool(args.get("strip_plus", False)),
+            )
+        else:
+            result = raw_value
+        args["_executor_note"] = (
+            f"extract_value_near_anchor matched near anchor={match.get('anchor_text')!r}; "
+            f"raw_match={raw_value!r}; source=page_text_anchor_fallback; fallback_used=True"
         )
         return result
 
@@ -2171,7 +2274,7 @@ class ActionHandlers:
 
         return [
             {
-                "source": "text_fallback",
+                "source": "page_text_anchor_fallback",
                 "source_rank": 3,
                 "scope_text": source_text,
                 "anchor_idx_in_scope": anchor_match.start(),
