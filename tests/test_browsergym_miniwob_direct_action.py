@@ -274,3 +274,45 @@ def test_click_submit_goes_through_grounding_before_env_step(monkeypatch):
 def test_non_miniwob_action_syntax_defaults_do_not_change_mode():
     adapter = BrowserGymAgentAdapter(_PlanPlanner(), None, _Validator(), env_id="browsergym/openended")
     assert adapter.uses_direct_action_mode is False
+
+
+def test_page_candidate_augmentation_adds_browsergym_scaled_coordinates():
+    candidates = BrowserGymRunner._augment_page_candidate_coordinates(
+        [{"center_x": 20, "center_y": 100, "bbox": {"x": 2, "y": 10, "width": 30, "height": 40, "left": 2, "top": 10, "right": 32, "bottom": 50}}],
+        2.0,
+    )
+
+    candidate = candidates[0]
+    assert candidate["page_center_x"] == 20.0
+    assert candidate["page_center_y"] == 100.0
+    assert candidate["browsergym_scale_factor"] == 2.0
+    assert candidate["browsergym_center_x"] == 40.0
+    assert candidate["browsergym_center_y"] == 200.0
+    assert candidate["coordinate_space"] == "page_css"
+    assert candidate["action_coordinate_space"] == "browsergym_scaled"
+    assert candidate["browsergym_bbox"] == {"x": 4.0, "y": 20.0, "width": 60.0, "height": 80.0, "left": 4.0, "top": 20.0, "right": 64.0, "bottom": 100.0}
+
+
+def test_candidate_center_prefers_browsergym_center_over_raw_center():
+    from app.browsergym_integration.miniwob_grounding import candidate_center
+
+    candidate = {"center_x": 20, "center_y": 100, "browsergym_center_x": 40, "browsergym_center_y": 200}
+
+    assert candidate_center(candidate) == (40.0, 200.0)
+
+
+def test_candidate_center_prefers_browsergym_bbox_over_raw_bbox():
+    from app.browsergym_integration.miniwob_grounding import candidate_center
+
+    candidate = {
+        "bbox": {"x": 0, "y": 0, "width": 10, "height": 10},
+        "browsergym_bbox": {"x": 20, "y": 40, "width": 100, "height": 80},
+    }
+
+    assert candidate_center(candidate) == (70.0, 80.0)
+
+
+def test_candidate_center_falls_back_to_legacy_center_coordinates():
+    from app.browsergym_integration.miniwob_grounding import candidate_center
+
+    assert candidate_center({"center_x": 20, "center_y": 100}) == (20.0, 100.0)
