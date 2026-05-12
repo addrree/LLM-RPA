@@ -80,10 +80,57 @@ class BrowserGymRunner:
         return None
 
     @staticmethod
-    def _extract_page_clickable_candidates(env) -> tuple[list[dict], bool]:
-        page = BrowserGymRunner._find_page(env)
+    def _browsergym_scaled_bbox(bbox: dict, scale_factor: float) -> dict:
+        scaled = {}
+        for key in ("x", "y", "width", "height", "left", "top", "right", "bottom"):
+            value = bbox.get(key)
+            if isinstance(value, (int, float)):
+                scaled[key] = value * scale_factor
+            else:
+                try:
+                    scaled[key] = float(value) * scale_factor
+                except (TypeError, ValueError):
+                    pass
+        return scaled
+
+    @classmethod
+    def _augment_page_candidate_coordinates(cls, candidates: list[dict], scale_factor: float) -> list[dict]:
+        augmented: list[dict] = []
+        for candidate in candidates:
+            if not isinstance(candidate, dict):
+                continue
+            item = dict(candidate)
+            center_x = item.get("center_x")
+            center_y = item.get("center_y")
+            try:
+                page_center_x = float(center_x)
+                page_center_y = float(center_y)
+            except (TypeError, ValueError):
+                page_center_x = None
+                page_center_y = None
+            if page_center_x is not None and page_center_y is not None:
+                item["page_center_x"] = page_center_x
+                item["page_center_y"] = page_center_y
+                item["browsergym_center_x"] = page_center_x * scale_factor
+                item["browsergym_center_y"] = page_center_y * scale_factor
+            item["browsergym_scale_factor"] = scale_factor
+            item["coordinate_space"] = "page_css"
+            item["action_coordinate_space"] = "browsergym_scaled"
+            bbox = item.get("bbox")
+            if isinstance(bbox, dict):
+                item["browsergym_bbox"] = cls._browsergym_scaled_bbox(bbox, scale_factor)
+            augmented.append(item)
+        return augmented
+
+    @classmethod
+    def _extract_page_clickable_candidates(cls, env) -> tuple[list[dict], bool]:
+        page = cls._find_page(env)
         if page is None:
             return [], True
+        try:
+            scale_factor = float(getattr(page, "_bgym_scale_factor", 1.0) or 1.0)
+        except (TypeError, ValueError):
+            scale_factor = 1.0
         script = """
         () => {
           const selectors = [
@@ -122,7 +169,9 @@ class BrowserGymRunner:
             candidates = page.evaluate(script)
         except Exception:
             return [], True
-        return (candidates if isinstance(candidates, list) else []), False
+        if not isinstance(candidates, list):
+            return [], False
+        return cls._augment_page_candidate_coordinates(candidates, scale_factor), False
 
     @classmethod
     def _augment_miniwob_observation_with_page_candidates(cls, env, obs, info):

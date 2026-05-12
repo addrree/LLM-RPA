@@ -117,12 +117,21 @@ def _numeric(value: Any) -> float | None:
         return None
 
 
+def _candidate_bbox(candidate: dict[str, Any]) -> Any:
+    for key in ("browsergym_bbox", "bbox", "bounding_box"):
+        value = candidate.get(key)
+        if value is not None:
+            return value
+    return None
+
+
 def candidate_center(candidate: dict[str, Any]) -> tuple[float, float] | None:
-    cx = _numeric(candidate.get("center_x"))
-    cy = _numeric(candidate.get("center_y"))
-    if cx is not None and cy is not None:
-        return cx, cy
-    bbox = candidate.get("bbox") if candidate.get("bbox") is not None else candidate.get("bounding_box")
+    for x_key, y_key in (("browsergym_center_x", "browsergym_center_y"), ("action_center_x", "action_center_y"), ("center_x", "center_y")):
+        cx = _numeric(candidate.get(x_key))
+        cy = _numeric(candidate.get(y_key))
+        if cx is not None and cy is not None:
+            return cx, cy
+    bbox = _candidate_bbox(candidate)
     if isinstance(bbox, dict):
         x = _numeric(bbox.get("x")) or 0.0
         y = _numeric(bbox.get("y")) or 0.0

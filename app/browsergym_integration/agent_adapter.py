@@ -215,13 +215,14 @@ class BrowserGymAgentAdapter:
             "Do NOT invent click(submit) when BrowserGym requires an element id. "
             "Do not output Unicode(). Unicode is only the type of the action space, not an action. "
             "Prefer one of the provided clickable candidate ids (bid/element_id/node_id), or use mouse coordinates if no id is available. "
+            "Coordinates in clickable_candidates include browsergym_center_x/browsergym_center_y; use those for BrowserGym mouse_click and do not use page_center_x/page_center_y directly. "
             "If candidates include a button with name/text matching the instruction, choose that candidate. "
             "Return STRICT JSON only with keys rationale, target_text, target_bid, and action."
         )
         user_prompt = (
             "Select the single next MiniWoB action. Use one of the available action syntaxes exactly as supported by this BrowserGym version.\n"
             "Do not output Unicode(). Unicode is only the type of the action space, not an action.\n"
-            "For click actions, prefer click(\"<real candidate bid/id>\") over text-only click labels. If there is no bid/id but a candidate has center_x/center_y, use mouse_click(x, y, \"left\"). Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
+            "For click actions, prefer click(\"<real candidate bid/id>\") over text-only click labels. If there is no bid/id but a candidate has browsergym_center_x/browsergym_center_y, use mouse_click(browsergym_center_x, browsergym_center_y, \"left\"). Do NOT use page_center_x/page_center_y directly for BrowserGym mouse_click. If no scaled coordinates are present, fall back to action-space center_x/center_y. Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
             "If clickable_candidates contains a button whose name/text/label matches target_text, set target_bid to that candidate id and use it in action.\n"
             "Do not repeat exactly the same previous action after reward=0 unless new evidence changed.\n"
             "If unsure, choose the safest grounded interaction; use noop() only when no valid grounded action is possible.\n\n"
