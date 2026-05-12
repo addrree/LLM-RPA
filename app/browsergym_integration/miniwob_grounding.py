@@ -19,8 +19,11 @@ def _norm(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
 
+REAL_BID_KEYS = ("bid", "browsergym_id", "data-bid", "data_bid", "data-testid", "data_testid", "ref")
+
+
 def _candidate_id(candidate: dict[str, Any]) -> str:
-    for key in ("bid", "element_id", "node_id", "backend_node_id", "id"):
+    for key in REAL_BID_KEYS:
         value = candidate.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
@@ -117,21 +120,7 @@ def _numeric(value: Any) -> float | None:
         return None
 
 
-def _candidate_bbox(candidate: dict[str, Any]) -> Any:
-    for key in ("browsergym_bbox", "bbox", "bounding_box"):
-        value = candidate.get(key)
-        if value is not None:
-            return value
-    return None
-
-
-def candidate_center(candidate: dict[str, Any]) -> tuple[float, float] | None:
-    for x_key, y_key in (("browsergym_center_x", "browsergym_center_y"), ("action_center_x", "action_center_y"), ("center_x", "center_y")):
-        cx = _numeric(candidate.get(x_key))
-        cy = _numeric(candidate.get(y_key))
-        if cx is not None and cy is not None:
-            return cx, cy
-    bbox = _candidate_bbox(candidate)
+def _bbox_center(bbox: Any) -> tuple[float, float] | None:
     if isinstance(bbox, dict):
         x = _numeric(bbox.get("x")) or 0.0
         y = _numeric(bbox.get("y")) or 0.0
@@ -151,6 +140,38 @@ def candidate_center(candidate: dict[str, Any]) -> tuple[float, float] | None:
             x, y, w, h = nums  # type: ignore[misc]
             return float(x) + float(w) / 2.0, float(y) + float(h) / 2.0
     return None
+
+
+def candidate_center_with_strategy(candidate: dict[str, Any]) -> tuple[float, float, str] | None:
+    coordinate_pairs = (
+        ("action_x", "action_y", "coordinate_scaled"),
+        ("action_center_x", "action_center_y", "coordinate_scaled"),
+        ("browsergym_center_x", "browsergym_center_y", "coordinate_scaled"),
+        ("click_x", "click_y", "coordinate_scaled" if str(candidate.get("action_coordinate_space") or "").lower() == "browsergym_scaled" else "coordinate"),
+        ("center_x", "center_y", "coordinate_raw"),
+    )
+    for x_key, y_key, strategy in coordinate_pairs:
+        cx = _numeric(candidate.get(x_key))
+        cy = _numeric(candidate.get(y_key))
+        if cx is not None and cy is not None:
+            return cx, cy, strategy
+    for bbox_key, strategy in (
+        ("action_bbox", "coordinate_scaled"),
+        ("browsergym_bbox", "coordinate_scaled"),
+        ("bbox", "coordinate_raw"),
+        ("bounding_box", "coordinate_raw"),
+    ):
+        center = _bbox_center(candidate.get(bbox_key))
+        if center is not None:
+            return center[0], center[1], strategy
+    return None
+
+
+def candidate_center(candidate: dict[str, Any]) -> tuple[float, float] | None:
+    center = candidate_center_with_strategy(candidate)
+    if center is None:
+        return None
+    return center[0], center[1]
 
 
 def browsergym_mouse_click_action(x: float, y: float) -> str:
@@ -188,7 +209,7 @@ def ground_miniwob_action(
             mapping_strategy="none",
         )
 
-    if before.lower().startswith("click"):
+    if before.lower().startswith("click") or (before.lower().startswith("mouse_click") and (target or target_bid)):
         selected = None
         if target_bid:
             selected = next((c for c in candidates if _candidate_id(c) == target_bid), None)
@@ -198,9 +219,9 @@ def ground_miniwob_action(
             candidate_id = _candidate_id(selected)
             if candidate_id:
                 return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid")
-            center = candidate_center(selected)
+            center = candidate_center_with_strategy(selected)
             if center is not None:
-                return MiniWoBGroundingResult(action=browsergym_mouse_click_action(center[0], center[1]), selected_candidate=selected, mapping_strategy="coordinate")
+                return MiniWoBGroundingResult(action=browsergym_mouse_click_action(center[0], center[1]), selected_candidate=selected, mapping_strategy=center[2])
             return MiniWoBGroundingResult(
                 action="noop()",
                 mapping_error=f"action_mapping_failure: no grounded bid or bbox for target_text={target!r}",
