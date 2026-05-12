@@ -163,3 +163,53 @@ def test_invalid_model_action_noops_and_batch_report_contains_step(monkeypatch):
     assert result["steps"][0]["action_rationale"] == "bad action"
     assert result["steps"][0]["reward"] == 0.0
     assert result["steps"][0]["mapping_error"] == "action_mapping_failure: unsupported MiniWoB action syntax"
+
+from app.browsergym_integration.miniwob_grounding import ground_miniwob_action
+
+
+def test_miniwob_grounding_click_bare_text_to_bid():
+    result = ground_miniwob_action(
+        action="click(submit)",
+        parsed_response={"target_text": "submit"},
+        candidates=[{"bid": "7", "role": "button", "name": "submit"}],
+    )
+    assert result.action == 'click("7")'
+    assert result.selected_candidate["bid"] == "7"
+
+
+def test_miniwob_grounding_click_quoted_text_to_bid():
+    result = ground_miniwob_action(
+        action='click("submit")',
+        parsed_response={},
+        candidates=[{"bid": "7", "role": "button", "name": "submit"}],
+    )
+    assert result.action == 'click("7")'
+
+
+def test_miniwob_grounding_exact_match_precedes_fuzzy():
+    result = ground_miniwob_action(
+        action="click(submit)",
+        parsed_response={"target_text": "submit"},
+        candidates=[
+            {"bid": "8", "role": "button", "name": "submit form"},
+            {"bid": "7", "role": "button", "name": "submit"},
+        ],
+    )
+    assert result.action == 'click("7")'
+
+
+def test_miniwob_grounding_no_candidate_noops_with_mapping_error():
+    result = ground_miniwob_action(action='click("submit")', parsed_response={}, candidates=[])
+    assert result.action == "noop()"
+    assert "no clickable candidate matched" in result.mapping_error
+
+
+def test_miniwob_grounding_blocks_repeated_ineffective_action():
+    result = ground_miniwob_action(
+        action='click("submit")',
+        parsed_response={},
+        candidates=[{"bid": "7", "role": "button", "name": "submit"}],
+        history=[{"action": 'click("submit")', "reward": 0.0}, {"action": 'click("submit")', "reward": 0.0}],
+    )
+    assert result.action == "noop()"
+    assert "repeated ineffective action" in result.mapping_error

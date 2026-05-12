@@ -141,6 +141,7 @@ class Replanner:
             previous_plan=previous_plan,
             page_snapshot=page_snapshot,
         )
+        normalized = self._repair_unsupported_extract_value_action(normalized)
         normalized = self._repair_empty_section_corrective_plan(
             normalized_plan=normalized,
             page_snapshot=page_snapshot,
@@ -149,6 +150,34 @@ class Replanner:
             error_message=error_message or execution_result.get("error_message"),
         )
         return TaskSpec.model_validate(normalized)
+
+    @staticmethod
+    def _repair_unsupported_extract_value_action(normalized_plan: dict) -> dict:
+        steps = normalized_plan.get("steps")
+        if not isinstance(steps, list):
+            return normalized_plan
+        repairs: list[dict] = []
+        for idx, step in enumerate(steps):
+            if not isinstance(step, dict) or step.get("action") != "extract_value":
+                continue
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            if any(key in args for key in ("pattern", "regex", "page_text", "source_text")):
+                if "pattern" not in args and "regex" in args:
+                    args["pattern"] = args.pop("regex")
+                step["action"] = "extract_pattern_from_page_text"
+                step["args"] = args
+                repairs.append({"step_index": idx, "from": "extract_value", "to": "extract_pattern_from_page_text"})
+            elif any(key in args for key in ("anchor", "anchor_text", "anchor_candidates")):
+                if "anchor_text" not in args and "anchor" in args:
+                    args["anchor_text"] = args.pop("anchor")
+                step["action"] = "extract_value_near_anchor"
+                step["args"] = args
+                repairs.append({"step_index": idx, "from": "extract_value", "to": "extract_value_near_anchor"})
+            else:
+                step["args"] = {**args, "_repair_error": "unsupported action extract_value could not be mapped safely"}
+        if repairs:
+            normalized_plan.setdefault("_repair_diagnostics", {})["unsupported_action_repairs"] = repairs
+        return normalized_plan
 
     @staticmethod
     def _repair_empty_section_corrective_plan(

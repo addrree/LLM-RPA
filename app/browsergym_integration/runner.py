@@ -91,6 +91,10 @@ class BrowserGymRunner:
             action_string=getattr(decision, "action_string", None) or action,
             miniwob_instruction=getattr(decision, "miniwob_instruction", None),
             mapping_error=getattr(decision, "mapping_error", None),
+            action_string_before_mapping=getattr(decision, "action_string_before_mapping", None),
+            action_string_after_mapping=getattr(decision, "action_string_after_mapping", None),
+            selected_candidate=getattr(decision, "selected_candidate", None),
+            clickable_candidates_count=getattr(decision, "clickable_candidates_count", None),
             error=getattr(decision, "mapping_error", None),
             vision_used=bool(getattr(decision, "vision_used", False)),
             vision_image_present=bool(getattr(decision, "vision_image_present", False)),
@@ -151,7 +155,9 @@ class BrowserGymRunner:
                     except Exception:
                         pass
                 if self._is_miniwob_config(self.config):
-                    print(f"[MiniWoB] step {idx + 1}/{self.config.max_steps} action={action}", flush=True)
+                    before = getattr(decision, "action_string_before_mapping", None)
+                    after = getattr(decision, "action_string_after_mapping", None) or action
+                    print(f"[MiniWoB] step {idx + 1}/{self.config.max_steps} action={action} before_grounding={before} after_grounding={after}", flush=True)
                 if decision.finish and self.config.stop_on_agent_finish and not self._is_miniwob_config(self.config):
                     final_answer = (decision.answer or "").strip() or None
                     finish_status = "success_by_agent_finish"
@@ -164,7 +170,7 @@ class BrowserGymRunner:
                 obs, reward, terminated, truncated, info = env.step(action)
                 if self._is_miniwob_config(self.config):
                     print(f"[MiniWoB] step {idx + 1} reward={reward} terminated={terminated} truncated={truncated}", flush=True)
-                history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None)})
+                history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None), "url": (obs or {}).get("url", "") if isinstance(obs, dict) else "", "instruction": getattr(decision, "miniwob_instruction", None)})
                 steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
                 if terminated or truncated:
                     break

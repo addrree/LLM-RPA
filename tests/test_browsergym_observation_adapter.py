@@ -56,3 +56,13 @@ def test_smoke_extract_text_does_not_return_raw_observation():
     assert "array(" not in result
     assert "screenshot" not in result.lower()
     assert "Welcome" in result
+
+
+def test_observation_adapter_extracts_miniwob_clickable_candidates_from_axtree():
+    ctx = browsergym_obs_to_page_context(
+        {"axtree_txt": '[7] button "submit"\n[8] link "cancel"', "goal": 'Click on the "submit" button.'},
+        {},
+    )
+    assert ctx["clickable_candidates_count"] >= 2
+    assert ctx["clickable_candidates"][0]["bid"] == "7"
+    assert ctx["clickable_candidates"][0]["name"] == "submit"
