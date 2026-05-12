@@ -44,6 +44,7 @@ def parse_args(argv=None):
     parser.add_argument("--output-json", default=f"artifacts/browsergym/miniwob_results_{ts}.json")
     parser.add_argument("--output-csv", default=f"artifacts/browsergym/miniwob_results_{ts}.csv")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True, help="Print per-task and per-step MiniWoB progress")
     return parser.parse_args(argv)
 
 
@@ -58,7 +59,7 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
     failure_stage = getattr(report, "failure_stage", None)
     status = getattr(report, "status", "unknown")
     if not success and not failure_stage:
-        if any(getattr(step, "rationale", None) == "action mapping failure" for step in steps):
+        if any(getattr(step, "mapping_error", None) or getattr(step, "rationale", None) == "action mapping failure" for step in steps):
             failure_stage = "action_mapping_failure"
         else:
             failure_stage = status or "unsuccessful"
@@ -78,6 +79,22 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
         "vision_used": bool(use_vision or any(bool(getattr(step, "vision_used", False)) for step in steps)),
         "vision_image_present": bool(any(bool(getattr(step, "vision_image_present", False)) for step in steps)),
         "output_path": getattr(report, "output_path", None),
+        "steps": [
+            {
+                "step_idx": getattr(step, "step_idx", None),
+                "action": getattr(step, "action", None),
+                "action_string": getattr(step, "action_string", None),
+                "rationale": getattr(step, "action_rationale", None) or getattr(step, "rationale", None),
+                "action_rationale": getattr(step, "action_rationale", None) or getattr(step, "rationale", None),
+                "reward": getattr(step, "reward", None),
+                "terminated": getattr(step, "terminated", None),
+                "truncated": getattr(step, "truncated", None),
+                "current_url": getattr(step, "url", None),
+                "mapping_error": getattr(step, "mapping_error", None),
+                "miniwob_instruction": getattr(step, "miniwob_instruction", None),
+            }
+            for step in steps
+        ],
     }
 
 
@@ -201,7 +218,10 @@ def main(argv=None) -> int:
         )
 
     results = []
-    for env_id in selected:
+    total_selected = len(selected)
+    for task_idx, env_id in enumerate(selected, start=1):
+        if args.verbose:
+            print(f"[MiniWoB] task {task_idx}/{total_selected} {env_id} started", flush=True)
         started = time.time()
         try:
             report = BrowserGymRunner(
@@ -217,14 +237,24 @@ def main(argv=None) -> int:
                     task_name=task_name_from_env_id(env_id),
                 ),
             ).run_one()
-            results.append(result_from_report(report, env_id=env_id, use_vision=args.use_vision))
+            result = result_from_report(report, env_id=env_id, use_vision=args.use_vision)
+            if args.verbose:
+                for step in result.get("steps", []):
+                    step_no = (step.get("step_idx") if step.get("step_idx") is not None else 0) + 1
+                    print(f"[MiniWoB] step {step_no}/{args.max_steps} action={step.get('action_string') or step.get('action')}", flush=True)
+                    print(f"[MiniWoB] step {step_no} reward={step.get('reward')} terminated={step.get('terminated')} truncated={step.get('truncated')}", flush=True)
+                print(f"[MiniWoB] task done success={result.get('success')} reward={result.get('reward')}", flush=True)
+            results.append(result)
         except Exception as exc:
-            results.append({
+            result = {
                 **skipped_result(env_id, str(exc), use_vision=args.use_vision),
                 "status": "failed",
                 "runtime_sec": time.time() - started,
                 "failure_stage": "runtime",
-            })
+            }
+            if args.verbose:
+                print(f"[MiniWoB] task done success=False reward=None", flush=True)
+            results.append(result)
 
     aggregate = build_aggregate(results, use_vision=args.use_vision)
     json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)

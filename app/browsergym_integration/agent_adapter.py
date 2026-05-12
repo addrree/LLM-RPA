@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+import re
+from typing import Any
 
 from app.browsergym_integration.action_mapper import browsergym_finish_action, task_step_to_browsergym_action
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
@@ -27,6 +30,9 @@ class BrowserGymAgentDecision:
     extracted_value: str | None = None
     vision_used: bool = False
     vision_image_present: bool = False
+    miniwob_instruction: str | None = None
+    action_string: str | None = None
+    mapping_error: str | None = None
 
 
 class BrowserGymAgentAdapter:
@@ -51,10 +57,161 @@ class BrowserGymAgentAdapter:
         self.use_vision = use_vision
         self.env_id = env_id
         self.benchmark = benchmark
+        self.browsergym_action_syntax: list[str] = []
 
     def set_browsergym_context(self, *, env_id: str | None = None, benchmark: str | None = None) -> None:
         self.env_id = env_id
         self.benchmark = benchmark
+
+    def set_browsergym_action_syntax(self, action_syntax: list[str] | None = None) -> None:
+        self.browsergym_action_syntax = list(action_syntax or [])
+
+    @property
+    def uses_direct_action_mode(self) -> bool:
+        return self._is_miniwob_context()
+
+    def _is_miniwob_context(self) -> bool:
+        env_id = (self.env_id or "").lower()
+        benchmark = (self.benchmark or "").lower()
+        return benchmark == "miniwob" or env_id.startswith("browsergym/miniwob.")
+
+    def _default_action_syntax_examples(self) -> list[str]:
+        if self.browsergym_action_syntax:
+            return self.browsergym_action_syntax[:20]
+        return [
+            "click(element_id)",
+            "click(x, y)",
+            "fill(element_id, 'text')",
+            "press('Enter')",
+            "scroll(0, 200)",
+            "noop()",
+        ]
+
+    @staticmethod
+    def _json_safe(value: Any, *, max_chars: int = 1200) -> Any:
+        if value is None or isinstance(value, (bool, int, float)):
+            return value
+        if isinstance(value, str):
+            return value[:max_chars]
+        if getattr(value, "shape", None) is not None:
+            return {"kind": type(value).__name__, "shape": tuple(value.shape), "dtype": str(getattr(value, "dtype", ""))}
+        if isinstance(value, dict):
+            out: dict[str, Any] = {}
+            for key, item in list(value.items())[:20]:
+                out[str(key)] = BrowserGymAgentAdapter._json_safe(item, max_chars=max_chars)
+            return out
+        if isinstance(value, (list, tuple)):
+            return [BrowserGymAgentAdapter._json_safe(item, max_chars=max_chars) for item in list(value)[:20]]
+        return str(value)[:max_chars]
+
+    @staticmethod
+    def _extract_json_object(text: str) -> dict[str, Any]:
+        raw = (text or "").strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except json.JSONDecodeError:
+            pass
+        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+        if not match:
+            return {}
+        try:
+            parsed = json.loads(match.group(0))
+        except json.JSONDecodeError:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+
+    def _call_direct_action_model(self, system_prompt: str, user_prompt: str, images: list[str] | None) -> dict[str, Any]:
+        llm_client = getattr(self.planner, "llm_client", None)
+        if llm_client is not None:
+            if hasattr(llm_client, "generate_planner_json"):
+                return llm_client.generate_planner_json(system_prompt, user_prompt, images_base64=images)
+            if hasattr(llm_client, "generate_json"):
+                return llm_client.generate_json(system_prompt, user_prompt)
+        if hasattr(self.planner, "generate_planner_json"):
+            return self.planner.generate_planner_json(system_prompt, user_prompt, images_base64=images)
+        raise RuntimeError("MiniWoB direct action mode requires a planner with an llm_client capable of JSON generation")
+
+    @staticmethod
+    def _validate_direct_action(action: str) -> tuple[str, str | None]:
+        normalized = " ".join(str(action or "").strip().split())
+        if not normalized:
+            return "noop()", "action_mapping_failure: empty action"
+        if normalized.lower().startswith(("finish(", "agent_finish(")):
+            return "noop()", "action_mapping_failure: finish is disabled for MiniWoB; success requires reward > 0"
+        if not re.match(r"^(click|fill|type|press|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
+            return "noop()", f"action_mapping_failure: unsupported MiniWoB action syntax: {normalized[:120]}"
+        return normalized, None
+
+    def _act_miniwob_direct(self, goal: str, obs: dict, info: dict | None, history: list[dict]) -> BrowserGymAgentDecision:
+        context = browsergym_obs_to_page_context(obs, info)
+        snapshot_like = page_context_to_snapshot_like(context)
+        image_base64 = extract_browsergym_image_base64(obs, info) if self.use_vision else None
+        vision_image_present = image_base64 is not None
+        miniwob_instruction = context.get("goal_instruction") or goal or "Complete the MiniWoB task according to the page instruction"
+        action_examples = self._default_action_syntax_examples()
+        current_state = {
+            "benchmark": "MiniWoB++",
+            "env_id": self.env_id or "",
+            "task_instruction": miniwob_instruction,
+            "current_url": snapshot_like.get("url", ""),
+            "visible_text_excerpt": str(snapshot_like.get("page_text", "") or context.get("axtree_excerpt", ""))[:1200],
+            "axtree_excerpt": str(context.get("axtree_excerpt", ""))[:1200],
+            "buttons": snapshot_like.get("buttons", [])[:10],
+            "links": snapshot_like.get("links", [])[:10],
+            "obs_keys": context.get("obs_keys", []),
+            "info_keys": context.get("info_keys", []),
+            "vision_enabled": self.use_vision,
+            "vision_image_present": vision_image_present,
+            "screenshot_summary": context.get("screenshot_summary"),
+            "image_summary": context.get("image_summary"),
+            "recent_actions": self._json_safe(history[-5:]),
+            "available_action_syntax_examples": action_examples,
+        }
+        system_prompt = (
+            "You are controlling a BrowserGym MiniWoB++ environment. "
+            "Choose exactly one next browser action for the current observation. "
+            "Do not produce a plan and do not call finish; MiniWoB success is determined only by environment reward. "
+            "Return STRICT JSON only with keys rationale and action."
+        )
+        user_prompt = (
+            "Select the single next MiniWoB action. Use one of the available action syntaxes exactly as supported by this BrowserGym version.\n"
+            "If unsure, choose the safest concrete interaction; use noop() only when no valid action is possible.\n\n"
+            f"Current state JSON:\n{json.dumps(current_state, ensure_ascii=False, indent=2)}\n\n"
+            "Return exactly: {\"rationale\": \"...\", \"action\": \"click(...)\"}"
+        )
+        images = [image_base64] if image_base64 is not None else None
+        mapping_error = None
+        try:
+            parsed = self._call_direct_action_model(system_prompt, user_prompt, images)
+        except Exception as exc:
+            parsed = {}
+            mapping_error = f"action_mapping_failure: model error: {exc}"
+        if isinstance(parsed, str):
+            parsed = self._extract_json_object(parsed)
+        elif not isinstance(parsed, dict):
+            parsed = {}
+        rationale = str(parsed.get("rationale") or parsed.get("reason") or "").strip()
+        raw_action = str(parsed.get("action") or "").strip()
+        action, validation_error = self._validate_direct_action(raw_action)
+        mapping_error = mapping_error or validation_error
+        if mapping_error and not rationale:
+            rationale = mapping_error
+        return BrowserGymAgentDecision(
+            action=action,
+            internal_plan=None,
+            selected_step=None,
+            rationale=rationale,
+            finish=False,
+            answer=None,
+            vision_used=self.use_vision,
+            vision_image_present=vision_image_present,
+            miniwob_instruction=miniwob_instruction,
+            action_string=action,
+            mapping_error=mapping_error,
+        )
 
     def _extract_local(self, action: str, args: dict, compact_snapshot: dict, goal: str) -> str:
         if action == "extract_text":
@@ -70,6 +227,8 @@ class BrowserGymAgentAdapter:
         return ""
 
     def act(self, goal: str, obs: dict, info: dict | None, history: list[dict]) -> BrowserGymAgentDecision:
+        if self._is_miniwob_context():
+            return self._act_miniwob_direct(goal, obs, info, history)
         context = browsergym_obs_to_page_context(obs, info)
         snapshot_like = page_context_to_snapshot_like(context)
         image_base64 = extract_browsergym_image_base64(obs, info) if self.use_vision else None

@@ -15,6 +15,10 @@ class BrowserGymStepRecord(BaseModel):
     selected_step: dict | None = None
     extracted_value: str | None = None
     rationale: str | None = None
+    action_rationale: str | None = None
+    action_string: str | None = None
+    miniwob_instruction: str | None = None
+    mapping_error: str | None = None
     vision_used: bool = False
     vision_image_present: bool = False
     error: str | None = None
