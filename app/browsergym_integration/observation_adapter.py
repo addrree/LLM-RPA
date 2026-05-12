@@ -1,7 +1,13 @@
 from __future__ import annotations
 
+import html
 import re
 from typing import Any
+
+CLICKABLE_ROLES = {"button", "link", "checkbox", "radio", "textbox", "combobox", "option", "menuitem"}
+CLICKABLE_TAGS = {"button", "a", "input", "select", "textarea", "label"}
+ID_KEYS = ("bid", "element_id", "node_id", "backend_node_id", "id")
+TEXT_KEYS = ("name", "text", "label", "ariaLabel", "aria_label", "title", "value", "content", "inner_text", "innerText")
 
 
 def get_first_not_none(mapping: dict[str, Any], *keys: str) -> Any:
@@ -17,11 +23,7 @@ def _serialize_field_summary(value: Any) -> Any:
     shape = getattr(value, "shape", None)
     dtype = getattr(value, "dtype", None)
     if shape is not None:
-        return {
-            "kind": type(value).__name__,
-            "shape": tuple(shape),
-            "dtype": str(dtype) if dtype is not None else None,
-        }
+        return {"kind": type(value).__name__, "shape": tuple(shape), "dtype": str(dtype) if dtype is not None else None}
     if isinstance(value, str):
         return {"kind": "str", "length": len(value)}
     if isinstance(value, dict):
@@ -68,42 +70,108 @@ def _safe_text(value: Any, limit: int = 4000) -> str:
 
 def extract_goal_instruction(obs: dict[str, Any], info: dict[str, Any]) -> str:
     for source in (obs, info):
-        for key in ("goal", "instruction", "intent", "task_goal", "utterance", "task_info", "chat_messages"):
+        for key in ("goal", "instruction", "intent", "task_goal", "utterance", "task_info", "chat_messages", "goal_object"):
             text = _stringify_instruction(source.get(key))
             if text:
                 return text[:1200]
     return ""
 
 
+def _as_bool(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, str):
+        low = value.strip().lower()
+        if low in {"true", "1", "yes"}:
+            return True
+        if low in {"false", "0", "no", "disabled"}:
+            return False
+    return None
+
+
 def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
     out: dict[str, Any] = {}
-    for key in ("bid", "element_id", "backend_node_id", "node_id", "id"):
+    for key in ID_KEYS:
         value = item.get(key)
         if value is not None and str(value).strip():
             out[key] = str(value).strip()
+            if key != "bid" and "bid" not in out and key in {"element_id", "id"}:
+                out.setdefault("bid", str(value).strip())
             break
-    for key in ("role", "name", "text", "label", "tag", "enabled", "visible", "clickable"):
+    for key in ("role", "name", "text", "label", "tag", "type", "value", "ariaLabel", "aria_label", "title"):
+        value = item.get(key)
+        if value not in (None, ""):
+            out[key] = str(value).strip() if isinstance(value, str) else value
+    for key in ("enabled", "visible", "clickable", "disabled"):
+        if key in item:
+            bool_value = _as_bool(item.get(key))
+            out[key] = bool_value if bool_value is not None else item.get(key)
+    for key in ("bbox", "bounding_box"):
         value = item.get(key)
         if value not in (None, ""):
             out[key] = value
-    if not any(k in out for k in ("name", "text", "label")):
-        text = get_first_not_none(item, "content", "inner_text", "aria_label", "title", "value")
+    for key in ("center_x", "center_y"):
+        if item.get(key) is not None:
+            out[key] = item.get(key)
+    if not any(k in out and str(out[k]).strip() for k in ("name", "text", "label", "value", "ariaLabel", "aria_label")):
+        text = get_first_not_none(item, "content", "inner_text", "innerText", "aria-label")
         if text not in (None, ""):
             out["text"] = str(text).strip()
     return out if out else None
 
 
+def _candidate_is_clickable(candidate: dict[str, Any]) -> bool:
+    role = str(candidate.get("role") or "").strip().lower()
+    tag = str(candidate.get("tag") or "").strip().lower()
+    if role in CLICKABLE_ROLES or tag in CLICKABLE_TAGS:
+        return True
+    if candidate.get("clickable") is True or candidate.get("enabled") is True:
+        return True
+    has_id = any(candidate.get(key) for key in ID_KEYS)
+    has_text = any(str(candidate.get(key) or "").strip() for key in ("name", "text", "label", "value", "ariaLabel", "aria_label"))
+    return has_id and has_text
+
+
+def _dedupe_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
+    return tuple(str(candidate.get(k) or "").strip().lower() for k in ("bid", "element_id", "node_id", "backend_node_id", "id", "role", "tag", "name", "text", "label", "value"))
+
+
+def _append_candidate(candidates: list[dict[str, Any]], candidate: dict[str, Any] | None, seen: set[tuple[Any, ...]]) -> None:
+    if not candidate or not _candidate_is_clickable(candidate):
+        return
+    key = _dedupe_key(candidate)
+    if key not in seen:
+        seen.add(key)
+        candidates.append(candidate)
+
+
+def _walk_candidates(value: Any, candidates: list[dict[str, Any]], seen: set[tuple[Any, ...]]) -> None:
+    if isinstance(value, dict):
+        _append_candidate(candidates, _candidate_from_dict(value), seen)
+        for child_key in ("children", "childNodes", "nodes", "items", "elements"):
+            child = value.get(child_key)
+            if child is not None:
+                _walk_candidates(child, candidates, seen)
+        # Some BrowserGym objects use arbitrary nested fields.
+        for key, child in value.items():
+            if key not in {"children", "childNodes", "nodes", "items", "elements"} and isinstance(child, (dict, list, tuple)):
+                _walk_candidates(child, candidates, seen)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _walk_candidates(item, candidates, seen)
+
+
 def _parse_axtree_clickables(text: str) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
     for line in str(text or "").splitlines():
         raw = line.strip()
         if not raw:
             continue
-        # Common BrowserGym axtree formats include bid/id, role and quoted accessible name.
         bid_match = re.search(r"\b(?:bid|id|node_id|backend_node_id)\s*[=:]\s*['\"]?([A-Za-z0-9_.:-]+)", raw, flags=re.IGNORECASE)
         if not bid_match:
-            bid_match = re.search(r"^\s*\[?([A-Za-z0-9_.:-]+)\]?\s+(?:button|link|input|textbox|checkbox|radio)\b", raw, flags=re.IGNORECASE)
-        role_match = re.search(r"\b(button|link|input|textbox|checkbox|radio|menuitem|option)\b", raw, flags=re.IGNORECASE)
+            bid_match = re.search(r"^\s*\[?([A-Za-z0-9_.:-]+)\]?\s+(?:button|link|input|textbox|checkbox|radio|combobox|option|menuitem)\b", raw, flags=re.IGNORECASE)
+        role_match = re.search(r"\b(button|link|input|textbox|checkbox|radio|combobox|menuitem|option)\b", raw, flags=re.IGNORECASE)
         name_match = re.search(r"['\"]([^'\"]{1,120})['\"]", raw)
         if not (bid_match or role_match or name_match):
             continue
@@ -111,40 +179,71 @@ def _parse_axtree_clickables(text: str) -> list[dict[str, Any]]:
         if bid_match:
             candidate["bid"] = bid_match.group(1)
         if role_match:
-            candidate["role"] = role_match.group(1).lower()
+            role = role_match.group(1).lower()
+            candidate["role"] = "textbox" if role == "input" else role
         if name_match:
             candidate["name"] = name_match.group(1).strip()
         elif role_match:
             tail = raw[role_match.end():].strip(" :-\t")
             if tail:
                 candidate["text"] = tail[:120]
-        if candidate.get("bid") or candidate.get("name") or candidate.get("text"):
-            candidates.append(candidate)
+        _append_candidate(candidates, candidate, seen)
+    return candidates
+
+
+def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
+    pattern = re.compile(r"<(?P<tag>button|a|input|select|textarea|label)\b(?P<attrs>[^>]*)>(?P<body>.*?)</(?P=tag)>|<(?P<selftag>input)\b(?P<selfattrs>[^>]*)/?>", re.IGNORECASE | re.DOTALL)
+    attr_re = re.compile(r"([:\w-]+)(?:\s*=\s*(?:\"([^\"]*)\"|'([^']*)'|([^\s>]+)))?", re.IGNORECASE)
+    for match in pattern.finditer(str(markup or "")[:60000]):
+        tag = (match.group("tag") or match.group("selftag") or "").lower()
+        attrs_raw = match.group("attrs") or match.group("selfattrs") or ""
+        attrs = {m.group(1).lower(): html.unescape(m.group(2) or m.group(3) or m.group(4) or "") for m in attr_re.finditer(attrs_raw)}
+        body = re.sub(r"<[^>]+>", " ", match.group("body") or "")
+        text = html.unescape(re.sub(r"\s+", " ", body).strip()) or attrs.get("value") or attrs.get("aria-label") or attrs.get("title") or attrs.get("name") or attrs.get("id")
+        candidate = {
+            "tag": tag,
+            "role": attrs.get("role") or ("button" if tag == "button" or attrs.get("type") in {"button", "submit"} else "link" if tag == "a" else "textbox" if tag in {"input", "textarea"} else ""),
+            "text": text,
+            "value": attrs.get("value"),
+            "label": attrs.get("aria-label"),
+            "id": attrs.get("id"),
+            "name": attrs.get("name") or text,
+            "visible": True,
+            "enabled": "disabled" not in attrs,
+        }
+        if attrs.get("data-bid"):
+            candidate["bid"] = attrs["data-bid"]
+        elif attrs.get("id"):
+            candidate["element_id"] = attrs["id"]
+        _append_candidate(candidates, _candidate_from_dict(candidate), seen)
     return candidates
 
 
 def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
-    pools: list[Any] = []
+    candidates: list[dict[str, Any]] = []
+    seen: set[tuple[Any, ...]] = set()
     for source in (obs, info):
-        for key in ("clickable_candidates", "clickable_elements", "buttons", "links", "elements", "interactive_elements"):
+        for key in ("clickable_candidates", "page_clickable_candidates", "clickable_elements", "buttons", "links", "elements", "interactive_elements"):
             value = source.get(key)
             if value:
-                pools.append(value)
-    candidates: list[dict[str, Any]] = []
-    for pool in pools:
-        values = pool if isinstance(pool, list) else [pool]
-        for item in values:
-            candidate = None
-            if isinstance(item, dict):
-                candidate = _candidate_from_dict(item)
-            elif isinstance(item, str) and item.strip():
-                candidate = {"text": item.strip()[:120]}
-            if candidate and candidate not in candidates:
-                candidates.append(candidate)
+                _walk_candidates(value, candidates, seen)
+                if isinstance(value, list):
+                    for item in value:
+                        if isinstance(item, str) and item.strip():
+                            _append_candidate(candidates, {"text": item.strip()[:120], "clickable": True}, seen)
+    for source in (obs, info):
+        for key in ("axtree_object", "dom_object"):
+            value = source.get(key)
+            if value:
+                _walk_candidates(value, candidates, seen)
     axtree_text = _safe_text(get_first_not_none(obs, "axtree_txt", "axtree", "accessibility_tree", "text_tree") or get_first_not_none(info, "axtree_txt", "axtree", "accessibility_tree"), 12000)
     for candidate in _parse_axtree_clickables(axtree_text):
-        if candidate not in candidates:
-            candidates.append(candidate)
+        _append_candidate(candidates, candidate, seen)
+    html_text = _safe_text(get_first_not_none(obs, "pruned_html", "html") or get_first_not_none(info, "pruned_html", "html"), 60000)
+    for candidate in _parse_html_clickables(html_text):
+        _append_candidate(candidates, candidate, seen)
     return candidates[:limit]
 
 
@@ -205,7 +304,6 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
             "pruned_html": _serialize_field_summary(pruned_html),
         },
     }
-
     return context
 
 
@@ -217,28 +315,16 @@ def page_context_to_snapshot_like(context: dict) -> dict:
         raw = line.strip()
         if raw and len(raw) <= 100 and raw[0].isupper():
             headings.append(raw)
+    buttons = context.get("buttons") or []
+    links = context.get("links") or []
     return {
         "url": context.get("url", ""),
         "title": context.get("title", ""),
-        "page_text": text,
+        "page_text": text or context.get("text_excerpt", ""),
         "visible_headings": headings[:10],
-        "links": _normalize_clickables(context.get("links", [])),
-        "buttons": _normalize_clickables(context.get("buttons", [])),
-        "clickable_candidates": context.get("clickable_candidates", [])[:30],
+        "buttons": buttons if isinstance(buttons, list) else [],
+        "links": links if isinstance(links, list) else [],
+        "goal_instruction": context.get("goal_instruction", ""),
         "source": "browsergym",
+        "clickable_candidates": context.get("clickable_candidates", []),
     }
-
-
-def _normalize_clickables(values: Any) -> list[str]:
-    if not isinstance(values, list):
-        return []
-    result: list[str] = []
-    for item in values:
-        if isinstance(item, str) and item.strip():
-            result.append(item.strip())
-        elif isinstance(item, dict):
-            label_value = get_first_not_none(item, "text", "name", "label")
-            label = str(label_value).strip() if label_value is not None else ""
-            if label:
-                result.append(label)
-    return result[:20]

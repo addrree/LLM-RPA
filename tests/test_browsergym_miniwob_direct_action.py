@@ -213,3 +213,64 @@ def test_miniwob_grounding_blocks_repeated_ineffective_action():
     )
     assert result.action == "noop()"
     assert "repeated ineffective action" in result.mapping_error
+
+
+def test_action_space_unicode_repr_not_in_action_syntax_examples():
+    class _UnicodeSpace:
+        def __repr__(self):
+            return "Unicode()"
+
+        __str__ = __repr__
+
+    env = types.SimpleNamespace(action_space=_UnicodeSpace(), unwrapped=types.SimpleNamespace(action_space=_UnicodeSpace()))
+    examples = BrowserGymRunner._extract_action_syntax(env)
+    assert "Unicode()" not in examples
+    assert 'click("bid")' in examples
+
+
+def test_dom_candidate_with_bbox_maps_to_mouse_click():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"role": "button", "text": "Submit", "visible": True, "enabled": True, "center_x": 11, "center_y": 22}],
+    )
+    assert result.action == 'mouse_click(11, 22, "left")'
+    assert result.mapping_strategy == "coordinate"
+
+
+def test_candidate_with_bid_maps_to_click_bid():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"bid": "a12", "role": "button", "name": "Submit", "center_x": 11, "center_y": 22}],
+    )
+    assert result.action == 'click("a12")'
+    assert result.mapping_strategy == "bid"
+
+
+def test_click_submit_goes_through_grounding_before_env_step(monkeypatch):
+    class _LLMAgentFactory:
+        def __call__(self):
+            planner = _Planner({"rationale": "click submit", "target_text": "Submit", "action": 'click("Submit")'})
+            return BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.click-button", benchmark="miniwob")
+
+    class _SubmitEnv(_MiniWoBEnv):
+        action_space = "Unicode()"
+
+        def reset(self):
+            return {"goal": "Click Submit", "axtree_object": {"role": "button", "name": "Submit", "bid": "real_bid"}}, {}
+
+    env = _SubmitEnv()
+    _patch_miniwob_env(monkeypatch, env)
+    report = BrowserGymRunner(
+        agent_factory=_LLMAgentFactory(),
+        config=BrowserGymRunConfig(env_id="browsergym/miniwob.click-button", goal="g", benchmark="miniwob", max_steps=1),
+    ).run_one()
+    assert env.actions == ['click("real_bid")']
+    assert report.steps[0].action_string_before_mapping == 'click("Submit")'
+    assert report.steps[0].action_string_after_mapping == 'click("real_bid")'
+
+
+def test_non_miniwob_action_syntax_defaults_do_not_change_mode():
+    adapter = BrowserGymAgentAdapter(_PlanPlanner(), None, _Validator(), env_id="browsergym/openended")
+    assert adapter.uses_direct_action_mode is False

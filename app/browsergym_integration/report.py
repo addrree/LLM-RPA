@@ -23,6 +23,8 @@ class BrowserGymStepRecord(BaseModel):
     action_string_after_mapping: str | None = None
     selected_candidate: dict | None = None
     clickable_candidates_count: int | None = None
+    page_candidate_extraction_failed: bool | None = None
+    mapping_strategy: str | None = None
     vision_used: bool = False
     vision_image_present: bool = False
     error: str | None = None
