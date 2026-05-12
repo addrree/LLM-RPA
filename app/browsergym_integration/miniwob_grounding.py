@@ -12,6 +12,7 @@ class MiniWoBGroundingResult:
     mapping_error: str | None = None
     selected_candidate: dict[str, Any] | None = None
     repeated_warning: str | None = None
+    mapping_strategy: str | None = None
 
 
 def _norm(value: Any) -> str:
@@ -19,19 +20,25 @@ def _norm(value: Any) -> str:
 
 
 def _candidate_id(candidate: dict[str, Any]) -> str:
-    for key in ("bid", "element_id", "backend_node_id", "node_id", "id"):
+    for key in ("bid", "element_id", "node_id", "backend_node_id", "id"):
         value = candidate.get(key)
         if value is not None and str(value).strip():
             return str(value).strip()
     return ""
+
+
+def _candidate_text_values(candidate: dict[str, Any]) -> list[str]:
+    values: list[str] = []
+    for key in ("name", "text", "value", "label", "ariaLabel", "aria_label", "title"):
+        value = candidate.get(key)
+        if value is not None and str(value).strip():
+            values.append(str(value).strip())
+    return values
 
 
 def _candidate_text(candidate: dict[str, Any]) -> str:
-    for key in ("name", "text", "label", "aria_label", "title", "value"):
-        value = candidate.get(key)
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return ""
+    values = _candidate_text_values(candidate)
+    return values[0] if values else ""
 
 
 def _extract_click_target(action: str) -> str:
@@ -44,33 +51,47 @@ def _extract_click_target(action: str) -> str:
     return raw.strip()
 
 
+def _visible_enabled_bonus(candidate: dict[str, Any]) -> int:
+    enabled_bonus = 12 if candidate.get("enabled", True) is not False and candidate.get("disabled") is not True else -30
+    visible_bonus = 12 if candidate.get("visible", True) is not False else -30
+    clickable_bonus = 4 if candidate.get("clickable", True) is not False else -8
+    return enabled_bonus + visible_bonus + clickable_bonus
+
+
 def _score_candidate(candidate: dict[str, Any], target: str) -> tuple[int, float, int]:
-    text = _norm(_candidate_text(candidate))
     target_n = _norm(target)
-    if not text or not target_n:
+    if not target_n:
         return (0, 0.0, 0)
     role = _norm(candidate.get("role"))
-    button_bonus = 20 if role == "button" else 0
-    enabled_bonus = 4 if candidate.get("enabled", True) is not False else -10
-    visible_bonus = 4 if candidate.get("visible", True) is not False else -10
-    clickable_bonus = 2 if candidate.get("clickable", True) is not False else -8
-    base = 0
-    ratio = SequenceMatcher(None, text, target_n).ratio()
-    if text == target_n:
-        base = 100
-    elif text.casefold() == target_n.casefold():
-        base = 95
-    elif target_n in text or text in target_n:
-        base = 70
-    elif ratio >= 0.72:
-        base = 45
-    return (base + button_bonus + enabled_bonus + visible_bonus + clickable_bonus, ratio, -len(text))
+    tag = _norm(candidate.get("tag"))
+    buttonish_bonus = 25 if role == "button" or tag in {"button", "input"} else 0
+    best_base = 0
+    best_ratio = 0.0
+    best_len = 9999
+    for text_value in _candidate_text_values(candidate):
+        text = _norm(text_value)
+        if not text:
+            continue
+        ratio = SequenceMatcher(None, text, target_n).ratio()
+        if text == target_n:
+            base = 120
+        elif target_n in text or text in target_n:
+            base = 80
+        elif ratio >= 0.72:
+            base = 45
+        else:
+            base = 0
+        if base > best_base or (base == best_base and ratio > best_ratio):
+            best_base = base
+            best_ratio = ratio
+            best_len = len(text)
+    return (best_base + buttonish_bonus + _visible_enabled_bonus(candidate), best_ratio, -best_len)
 
 
 def find_click_candidate(candidates: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
     scored: list[tuple[tuple[int, float, int], int, dict[str, Any]]] = []
     for idx, candidate in enumerate(candidates or []):
-        if not isinstance(candidate, dict) or not _candidate_id(candidate):
+        if not isinstance(candidate, dict):
             continue
         score = _score_candidate(candidate, target)
         if score[0] > 0:
@@ -78,14 +99,56 @@ def find_click_candidate(candidates: list[dict[str, Any]], target: str) -> dict[
     if not scored:
         return None
     scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
-    best = scored[0][2]
-    return best if scored[0][0][0] >= 45 else None
+    best_score, _, best = scored[0]
+    return best if best_score[0] >= 45 else None
 
 
 def browsergym_click_action(candidate_id: str, action_syntax: list[str] | None = None) -> str:
-    # BrowserGym high-level actions accept string browser ids as click("bid") in current releases.
-    escaped = str(candidate_id).replace("\\", "\\\\").replace("\"", "\\\"")
+    escaped = str(candidate_id).replace("\\", "\\\\").replace('"', '\\"')
     return f'click("{escaped}")'
+
+
+def _numeric(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def candidate_center(candidate: dict[str, Any]) -> tuple[float, float] | None:
+    cx = _numeric(candidate.get("center_x"))
+    cy = _numeric(candidate.get("center_y"))
+    if cx is not None and cy is not None:
+        return cx, cy
+    bbox = candidate.get("bbox") if candidate.get("bbox") is not None else candidate.get("bounding_box")
+    if isinstance(bbox, dict):
+        x = _numeric(bbox.get("x")) or 0.0
+        y = _numeric(bbox.get("y")) or 0.0
+        width = _numeric(bbox.get("width"))
+        height = _numeric(bbox.get("height"))
+        if width is not None and height is not None:
+            return x + width / 2.0, y + height / 2.0
+        left = _numeric(bbox.get("left"))
+        right = _numeric(bbox.get("right"))
+        top = _numeric(bbox.get("top"))
+        bottom = _numeric(bbox.get("bottom"))
+        if None not in (left, right, top, bottom):
+            return (left + right) / 2.0, (top + bottom) / 2.0
+    if isinstance(bbox, (list, tuple)) and len(bbox) >= 4:
+        nums = [_numeric(v) for v in bbox[:4]]
+        if all(v is not None for v in nums):
+            x, y, w, h = nums  # type: ignore[misc]
+            return float(x) + float(w) / 2.0, float(y) + float(h) / 2.0
+    return None
+
+
+def browsergym_mouse_click_action(x: float, y: float) -> str:
+    def fmt(v: float) -> str:
+        return str(int(v)) if float(v).is_integer() else f"{v:.2f}".rstrip("0").rstrip(".")
+
+    return f'mouse_click({fmt(x)}, {fmt(y)}, "left")'
 
 
 def ground_miniwob_action(
@@ -113,6 +176,7 @@ def ground_miniwob_action(
             action="noop()",
             mapping_error=f"action_mapping_failure: repeated ineffective action {before!r} without progress",
             repeated_warning="previous action had no effect; exact repeat blocked",
+            mapping_strategy="none",
         )
 
     if before.lower().startswith("click"):
@@ -122,11 +186,22 @@ def ground_miniwob_action(
         if selected is None and target:
             selected = find_click_candidate(candidates, target)
         if selected is not None:
-            grounded = browsergym_click_action(_candidate_id(selected), action_syntax=action_syntax)
-            return MiniWoBGroundingResult(action=grounded, selected_candidate=selected)
+            candidate_id = _candidate_id(selected)
+            if candidate_id:
+                return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid")
+            center = candidate_center(selected)
+            if center is not None:
+                return MiniWoBGroundingResult(action=browsergym_mouse_click_action(center[0], center[1]), selected_candidate=selected, mapping_strategy="coordinate")
+            return MiniWoBGroundingResult(
+                action="noop()",
+                mapping_error=f"action_mapping_failure: no grounded bid or bbox for target_text={target!r}",
+                selected_candidate=selected,
+                mapping_strategy="none",
+            )
         if target and not re.search(r"[\d_.:-]", target):
             return MiniWoBGroundingResult(
                 action="noop()",
                 mapping_error=f"action_mapping_failure: no clickable candidate matched target_text={target!r}",
+                mapping_strategy="none",
             )
     return MiniWoBGroundingResult(action=before or "noop()")

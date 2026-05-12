@@ -66,3 +66,13 @@ def test_observation_adapter_extracts_miniwob_clickable_candidates_from_axtree()
     assert ctx["clickable_candidates_count"] >= 2
     assert ctx["clickable_candidates"][0]["bid"] == "7"
     assert ctx["clickable_candidates"][0]["name"] == "submit"
+
+
+def test_parse_axtree_object_extracts_candidate():
+    ctx = browsergym_obs_to_page_context({"axtree_object": {"role": "button", "name": "Submit", "bid": "a12"}}, {})
+    assert {"bid": "a12", "role": "button", "name": "Submit"}.items() <= ctx["clickable_candidates"][0].items()
+
+
+def test_page_clickable_candidates_are_included():
+    ctx = browsergym_obs_to_page_context({"page_clickable_candidates": [{"tag": "button", "text": "Submit", "center_x": 10, "center_y": 20}]}, {})
+    assert ctx["clickable_candidates"][0]["text"] == "Submit"

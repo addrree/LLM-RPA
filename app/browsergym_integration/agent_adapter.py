@@ -38,6 +38,8 @@ class BrowserGymAgentDecision:
     action_string_after_mapping: str | None = None
     selected_candidate: dict | None = None
     clickable_candidates_count: int | None = None
+    page_candidate_extraction_failed: bool | None = None
+    mapping_strategy: str | None = None
 
 
 class BrowserGymAgentAdapter:
@@ -83,6 +85,14 @@ class BrowserGymAgentAdapter:
     def _default_action_syntax_examples(self) -> list[str]:
         if self.browsergym_action_syntax:
             return self.browsergym_action_syntax[:20]
+        if self._is_miniwob_context():
+            return [
+                'click("bid")',
+                'mouse_click(x, y, "left")',
+                'fill("bid", "text")',
+                'keyboard_press("Enter")',
+                'noop()',
+            ]
         return [
             "click(element_id)",
             "click(x, y)",
@@ -146,7 +156,7 @@ class BrowserGymAgentAdapter:
             return "noop()", "action_mapping_failure: empty action"
         if normalized.lower().startswith(("finish(", "agent_finish(")):
             return "noop()", "action_mapping_failure: finish is disabled for MiniWoB; success requires reward > 0"
-        if not re.match(r"^(click|fill|type|press|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
+        if not re.match(r"^(click|mouse_click|fill|type|press|keyboard_press|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
             return "noop()", f"action_mapping_failure: unsupported MiniWoB action syntax: {normalized[:120]}"
         return normalized, None
 
@@ -187,6 +197,7 @@ class BrowserGymAgentAdapter:
             "links": snapshot_like.get("links", [])[:10],
             "clickable_candidates": snapshot_like.get("clickable_candidates", [])[:30],
             "clickable_candidates_count": context.get("clickable_candidates_count", 0),
+            "page_candidate_extraction_failed": bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
             "obs_keys": context.get("obs_keys", []),
             "info_keys": context.get("info_keys", []),
             "vision_enabled": self.use_vision,
@@ -202,13 +213,15 @@ class BrowserGymAgentAdapter:
             "Choose exactly one next browser action for the current observation. "
             "Do not produce a plan and do not call finish; MiniWoB success is determined only by environment reward. "
             "Do NOT invent click(submit) when BrowserGym requires an element id. "
-            "Prefer one of the provided clickable candidate ids (bid/element_id/node_id). "
+            "Do not output Unicode(). Unicode is only the type of the action space, not an action. "
+            "Prefer one of the provided clickable candidate ids (bid/element_id/node_id), or use mouse coordinates if no id is available. "
             "If candidates include a button with name/text matching the instruction, choose that candidate. "
             "Return STRICT JSON only with keys rationale, target_text, target_bid, and action."
         )
         user_prompt = (
             "Select the single next MiniWoB action. Use one of the available action syntaxes exactly as supported by this BrowserGym version.\n"
-            "For click actions, prefer click(\"<real candidate bid/id>\") over text-only click labels. Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
+            "Do not output Unicode(). Unicode is only the type of the action space, not an action.\n"
+            "For click actions, prefer click(\"<real candidate bid/id>\") over text-only click labels. If there is no bid/id but a candidate has center_x/center_y, use mouse_click(x, y, \"left\"). Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
             "If clickable_candidates contains a button whose name/text/label matches target_text, set target_bid to that candidate id and use it in action.\n"
             "Do not repeat exactly the same previous action after reward=0 unless new evidence changed.\n"
             "If unsure, choose the safest grounded interaction; use noop() only when no valid grounded action is possible.\n\n"
@@ -232,6 +245,7 @@ class BrowserGymAgentAdapter:
         mapping_error = mapping_error or validation_error
         before_mapping = action
         selected_candidate = None
+        mapping_strategy = None
         if not validation_error:
             grounding = ground_miniwob_action(
                 action=action,
@@ -242,6 +256,7 @@ class BrowserGymAgentAdapter:
             )
             action = grounding.action
             selected_candidate = grounding.selected_candidate
+            mapping_strategy = grounding.mapping_strategy
             if grounding.mapping_error:
                 mapping_error = grounding.mapping_error
             if grounding.repeated_warning and rationale:
@@ -264,6 +279,8 @@ class BrowserGymAgentAdapter:
             action_string_after_mapping=action,
             selected_candidate=selected_candidate,
             clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0),
+            page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
+            mapping_strategy=mapping_strategy,
         )
 
     def _extract_local(self, action: str, args: dict, compact_snapshot: dict, goal: str) -> str:
