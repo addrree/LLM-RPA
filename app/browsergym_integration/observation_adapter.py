@@ -89,15 +89,45 @@ def _as_bool(value: Any) -> bool | None:
     return None
 
 
+PRESERVED_CANDIDATE_FIELDS = (
+    "page_center_x",
+    "page_center_y",
+    "browsergym_center_x",
+    "browsergym_center_y",
+    "browsergym_scale_factor",
+    "coordinate_space",
+    "action_coordinate_space",
+    "action_x",
+    "action_y",
+    "action_center_x",
+    "action_center_y",
+    "click_x",
+    "click_y",
+    "center_x",
+    "center_y",
+)
+
+PRESERVED_BBOX_FIELDS = ("browsergym_bbox", "action_bbox", "bbox", "bounding_box")
+DANGEROUS_CANDIDATE_FIELD_PATTERNS = ("screenshot", "image", "dom", "html", "axtree", "raw")
+
+
+def _is_safe_candidate_scalar(key: str, value: Any) -> bool:
+    if value is None or isinstance(value, (bool, int, float)):
+        return value is not None
+    if isinstance(value, str):
+        key_l = key.lower()
+        if any(pattern in key_l for pattern in DANGEROUS_CANDIDATE_FIELD_PATTERNS):
+            return False
+        return len(value) <= 500
+    return False
+
+
 def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
     out: dict[str, Any] = {}
-    for key in ID_KEYS:
+    for key in ID_KEYS + ("browsergym_id", "data-bid", "data_bid", "data-testid", "data_testid", "ref"):
         value = item.get(key)
         if value is not None and str(value).strip():
             out[key] = str(value).strip()
-            if key != "bid" and "bid" not in out and key in {"element_id", "id"}:
-                out.setdefault("bid", str(value).strip())
-            break
     for key in ("role", "name", "text", "label", "tag", "type", "value", "ariaLabel", "aria_label", "title"):
         value = item.get(key)
         if value not in (None, ""):
@@ -106,13 +136,18 @@ def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
         if key in item:
             bool_value = _as_bool(item.get(key))
             out[key] = bool_value if bool_value is not None else item.get(key)
-    for key in ("bbox", "bounding_box"):
+    for key in PRESERVED_BBOX_FIELDS:
         value = item.get(key)
         if value not in (None, ""):
             out[key] = value
-    for key in ("center_x", "center_y"):
+    for key in PRESERVED_CANDIDATE_FIELDS:
         if item.get(key) is not None:
             out[key] = item.get(key)
+    for key, value in item.items():
+        if key in out or key in PRESERVED_BBOX_FIELDS or key in PRESERVED_CANDIDATE_FIELDS:
+            continue
+        if _is_safe_candidate_scalar(str(key), value):
+            out[str(key)] = value
     if not any(k in out and str(out[k]).strip() for k in ("name", "text", "label", "value", "ariaLabel", "aria_label")):
         text = get_first_not_none(item, "content", "inner_text", "innerText", "aria-label")
         if text not in (None, ""):

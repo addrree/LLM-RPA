@@ -235,7 +235,7 @@ def test_dom_candidate_with_bbox_maps_to_mouse_click():
         candidates=[{"role": "button", "text": "Submit", "visible": True, "enabled": True, "center_x": 11, "center_y": 22}],
     )
     assert result.action == 'mouse_click(11, 22, "left")'
-    assert result.mapping_strategy == "coordinate"
+    assert result.mapping_strategy == "coordinate_raw"
 
 
 def test_candidate_with_bid_maps_to_click_bid():
@@ -316,3 +316,92 @@ def test_candidate_center_falls_back_to_legacy_center_coordinates():
     from app.browsergym_integration.miniwob_grounding import candidate_center
 
     assert candidate_center({"center_x": 20, "center_y": 100}) == (20.0, 100.0)
+
+
+def test_candidate_center_prefers_action_over_browsergym_over_raw_center():
+    from app.browsergym_integration.miniwob_grounding import candidate_center, candidate_center_with_strategy
+
+    candidate = {
+        "center_x": 20,
+        "center_y": 100,
+        "browsergym_center_x": 40,
+        "browsergym_center_y": 200,
+        "action_x": 50,
+        "action_y": 250,
+    }
+
+    assert candidate_center(candidate) == (50.0, 250.0)
+    assert candidate_center_with_strategy(candidate) == (50.0, 250.0, "coordinate_scaled")
+
+
+def test_grounding_scaled_mapping_strategy_and_selected_candidate_in_report(monkeypatch):
+    class _LLMAgentFactory:
+        def __call__(self):
+            planner = _Planner({"rationale": "click ok", "target_text": "OK", "action": 'click("OK")'})
+            return BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.click-button", benchmark="miniwob")
+
+    class _ScaledEnv(_MiniWoBEnv):
+        def reset(self):
+            return {
+                "url": "http://127.0.0.1:8765/miniwob/",
+                "goal": "Click OK",
+                "page_clickable_candidates": [
+                    {"role": "button", "text": "OK", "center_x": 10, "center_y": 20, "browsergym_center_x": 15, "browsergym_center_y": 30}
+                ],
+            }, {}
+
+    env = _ScaledEnv()
+    _patch_miniwob_env(monkeypatch, env)
+    report = BrowserGymRunner(
+        agent_factory=_LLMAgentFactory(),
+        config=BrowserGymRunConfig(env_id="browsergym/miniwob.click-button", goal="g", benchmark="miniwob", max_steps=1),
+    ).run_one()
+
+    assert env.actions == ['mouse_click(15, 30, "left")']
+    assert report.steps[0].selected_candidate["text"] == "OK"
+    assert report.steps[0].mapping_strategy == "coordinate_scaled"
+    assert report.steps[0].action_string_before_mapping == 'click("OK")'
+    assert report.steps[0].action_string_after_mapping == 'mouse_click(15, 30, "left")'
+    result = result_from_report(report, env_id="browsergym/miniwob.click-button", use_vision=False)
+    assert result["steps"][0]["selected_candidate"]["text"] == "OK"
+    assert result["steps"][0]["mapping_strategy"] == "coordinate_scaled"
+
+
+def test_manual_validator_reselects_candidate_after_each_reset_and_no_fake_bid():
+    from scripts import test_minwob_manual_action as manual
+
+    class _Env:
+        def __init__(self):
+            self.reset_count = 0
+            self.actions = []
+            self.unwrapped = self
+            self.page = None
+
+        def reset(self, seed=None):
+            self.reset_count += 1
+            text = "First" if self.reset_count == 1 else "Second"
+            return {"goal": f"Click {text}", "page_clickable_candidates": [{"tag": "button", "text": text, "center_x": self.reset_count, "center_y": 2}]}, {}
+
+        def step(self, action):
+            self.actions.append(action)
+            return {}, 0.0, False, False, {}
+
+    env = _Env()
+    first = manual._run_method(env, method="raw_mouse_click", seed=123, target_text=None)
+    second = manual._run_method(env, method="scaled_mouse_click", seed=123, target_text=None)
+
+    assert env.reset_count == 2
+    assert first["selected_candidate"]["text"] == "First"
+    assert second["selected_candidate"]["text"] == "Second"
+    assert manual._real_bid({"index": 3, "id": "dom-id"}) is None
+    assert manual._real_bid({"data-testid": "real"}) == "real"
+
+
+def test_grounding_remaps_mouse_click_when_target_text_selects_scaled_candidate():
+    result = ground_miniwob_action(
+        action='mouse_click(25.56, 147.5, "left")',
+        parsed_response={"target_text": "Okay"},
+        candidates=[{"role": "button", "text": "Okay", "center_x": 25.56, "center_y": 147.5, "browsergym_center_x": 38.34, "browsergym_center_y": 221.25}],
+    )
+    assert result.action == 'mouse_click(38.34, 221.25, "left")'
+    assert result.mapping_strategy == "coordinate_scaled"

@@ -76,3 +76,38 @@ def test_parse_axtree_object_extracts_candidate():
 def test_page_clickable_candidates_are_included():
     ctx = browsergym_obs_to_page_context({"page_clickable_candidates": [{"tag": "button", "text": "Submit", "center_x": 10, "center_y": 20}]}, {})
     assert ctx["clickable_candidates"][0]["text"] == "Submit"
+
+
+def test_observation_adapter_preserves_browsergym_scaled_candidate_fields_and_safe_scalars():
+    ctx = browsergym_obs_to_page_context(
+        {
+            "page_clickable_candidates": [
+                {
+                    "tag": "button",
+                    "text": "Okay",
+                    "center_x": 25.5,
+                    "center_y": 147.5,
+                    "page_center_x": 25.5,
+                    "page_center_y": 147.5,
+                    "browsergym_center_x": 38.25,
+                    "browsergym_center_y": 221.25,
+                    "browsergym_scale_factor": 1.5,
+                    "coordinate_space": "page_css",
+                    "action_coordinate_space": "browsergym_scaled",
+                    "browsergym_bbox": {"x": 30, "y": 210, "width": 20, "height": 20},
+                    "custom_score": 7,
+                    "raw_dom": "<html>" * 200,
+                }
+            ]
+        },
+        {},
+    )
+    candidate = ctx["clickable_candidates"][0]
+    assert candidate["page_center_x"] == 25.5
+    assert candidate["browsergym_center_x"] == 38.25
+    assert candidate["browsergym_center_y"] == 221.25
+    assert candidate["browsergym_scale_factor"] == 1.5
+    assert candidate["action_coordinate_space"] == "browsergym_scaled"
+    assert candidate["browsergym_bbox"] == {"x": 30, "y": 210, "width": 20, "height": 20}
+    assert candidate["custom_score"] == 7
+    assert "raw_dom" not in candidate

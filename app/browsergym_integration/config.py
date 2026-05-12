@@ -33,6 +33,7 @@ class BrowserGymRunConfig:
     task_kwargs: dict | None = None
     benchmark: str | None = None
     task_name: str | None = None
+    allow_playwright_fallback: bool = False
 
 
 def validate_webarena_env_vars(env_id: str) -> dict:

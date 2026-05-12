@@ -223,10 +223,53 @@ class BrowserGymRunner:
             clickable_candidates_count=getattr(decision, "clickable_candidates_count", None),
             page_candidate_extraction_failed=getattr(decision, "page_candidate_extraction_failed", None),
             mapping_strategy=getattr(decision, "mapping_strategy", None),
+            fallback_used=bool(getattr(decision, "fallback_used", False)),
+            fallback_type=getattr(decision, "fallback_type", None),
+            fallback_reward=getattr(decision, "fallback_reward", None),
+            fallback_terminated=getattr(decision, "fallback_terminated", None),
             error=getattr(decision, "mapping_error", None),
             vision_used=bool(getattr(decision, "vision_used", False)),
             vision_image_present=bool(getattr(decision, "vision_image_present", False)),
         )
+
+
+    def _try_miniwob_playwright_fallback(self, env, decision, obs, reward, terminated: bool, truncated: bool, info):
+        if not self.config.allow_playwright_fallback or not self._is_miniwob_config(self.config):
+            return obs, reward, terminated, truncated, info
+        if terminated or truncated or float(reward or 0) > 0:
+            return obs, reward, terminated, truncated, info
+        if getattr(decision, "mapping_strategy", None) != "coordinate_scaled":
+            return obs, reward, terminated, truncated, info
+        candidate = getattr(decision, "selected_candidate", None)
+        if not isinstance(candidate, dict):
+            return obs, reward, terminated, truncated, info
+        try:
+            page_x = float(candidate.get("page_center_x", candidate.get("center_x")))
+            page_y = float(candidate.get("page_center_y", candidate.get("center_y")))
+        except (TypeError, ValueError):
+            return obs, reward, terminated, truncated, info
+        page = self._find_page(env)
+        mouse = getattr(page, "mouse", None) if page is not None else None
+        click = getattr(mouse, "click", None)
+        if not callable(click):
+            return obs, reward, terminated, truncated, info
+        try:
+            click(page_x, page_y)
+            fallback_obs, fallback_reward, fallback_terminated, fallback_truncated, fallback_info = env.step("noop()")
+        except Exception as exc:
+            try:
+                decision.mapping_error = f"{getattr(decision, 'mapping_error', '') or ''} playwright_fallback_failed: {exc}".strip()
+            except Exception:
+                pass
+            return obs, reward, terminated, truncated, info
+        try:
+            decision.fallback_used = True
+            decision.fallback_type = "playwright_direct_click"
+            decision.fallback_reward = float(fallback_reward) if fallback_reward is not None else None
+            decision.fallback_terminated = bool(fallback_terminated)
+        except Exception:
+            pass
+        return fallback_obs, fallback_reward, bool(fallback_terminated), bool(fallback_truncated), fallback_info
 
     def run_one(self) -> BrowserGymRunReport:
         started = time.time()
@@ -289,7 +332,7 @@ class BrowserGymRunner:
                 if self._is_miniwob_config(self.config):
                     before = getattr(decision, "action_string_before_mapping", None)
                     after = getattr(decision, "action_string_after_mapping", None) or action
-                    print(f"[MiniWoB] step {idx + 1}/{self.config.max_steps} action={action} before_grounding={before} after_grounding={after}", flush=True)
+                    print(f"[MiniWoB] step {idx + 1}/{self.config.max_steps} action={action} before_grounding={before} after_grounding={after} mapping_strategy={getattr(decision, 'mapping_strategy', None)}", flush=True)
                 if decision.finish and self.config.stop_on_agent_finish and not self._is_miniwob_config(self.config):
                     final_answer = (decision.answer or "").strip() or None
                     finish_status = "success_by_agent_finish"
@@ -301,6 +344,9 @@ class BrowserGymRunner:
 
                 obs, reward, terminated, truncated, info = env.step(action)
                 if self._is_miniwob_config(self.config):
+                    obs, reward, terminated, truncated, info = self._try_miniwob_playwright_fallback(env, decision, obs, reward, terminated, truncated, info)
+                    selected = getattr(decision, "selected_candidate", None)
+                    print(f"[MiniWoB] step {idx + 1} selected_candidate={selected} mapping_strategy={getattr(decision, 'mapping_strategy', None)}", flush=True)
                     print(f"[MiniWoB] step {idx + 1} reward={reward} terminated={terminated} truncated={truncated}", flush=True)
                 history_note = None
                 if self._is_miniwob_config(self.config) and getattr(decision, "mapping_error", None):

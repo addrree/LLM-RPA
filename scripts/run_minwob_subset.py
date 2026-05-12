@@ -45,6 +45,7 @@ def parse_args(argv=None):
     parser.add_argument("--output-csv", default=f"artifacts/browsergym/miniwob_results_{ts}.csv")
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True, help="Print per-task and per-step MiniWoB progress")
+    parser.add_argument("--allow-playwright-fallback", action="store_true", help="MiniWoB-only fallback: try direct Playwright page.mouse.click(page_center) after failed scaled mouse_click")
     return parser.parse_args(argv)
 
 
@@ -92,6 +93,14 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
                 "current_url": getattr(step, "url", None),
                 "mapping_error": getattr(step, "mapping_error", None),
                 "miniwob_instruction": getattr(step, "miniwob_instruction", None),
+                "selected_candidate": getattr(step, "selected_candidate", None),
+                "mapping_strategy": getattr(step, "mapping_strategy", None),
+                "action_string_before_mapping": getattr(step, "action_string_before_mapping", None),
+                "action_string_after_mapping": getattr(step, "action_string_after_mapping", None),
+                "fallback_used": bool(getattr(step, "fallback_used", False)),
+                "fallback_type": getattr(step, "fallback_type", None),
+                "fallback_reward": getattr(step, "fallback_reward", None),
+                "fallback_terminated": getattr(step, "fallback_terminated", None),
             }
             for step in steps
         ],
@@ -235,13 +244,15 @@ def main(argv=None) -> int:
                     headless=args.headless,
                     benchmark="miniwob",
                     task_name=task_name_from_env_id(env_id),
+                    allow_playwright_fallback=args.allow_playwright_fallback,
                 ),
             ).run_one()
             result = result_from_report(report, env_id=env_id, use_vision=args.use_vision)
             if args.verbose:
                 for step in result.get("steps", []):
                     step_no = (step.get("step_idx") if step.get("step_idx") is not None else 0) + 1
-                    print(f"[MiniWoB] step {step_no}/{args.max_steps} action={step.get('action_string') or step.get('action')}", flush=True)
+                    print(f"[MiniWoB] step {step_no}/{args.max_steps} action={step.get('action_string') or step.get('action')} before_grounding={step.get('action_string_before_mapping')} after_grounding={step.get('action_string_after_mapping')} mapping_strategy={step.get('mapping_strategy')}", flush=True)
+                    print(f"[MiniWoB] step {step_no} selected_candidate={json.dumps(step.get('selected_candidate'), ensure_ascii=False, default=str)}", flush=True)
                     print(f"[MiniWoB] step {step_no} reward={step.get('reward')} terminated={step.get('terminated')} truncated={step.get('truncated')}", flush=True)
                 print(f"[MiniWoB] task done success={result.get('success')} reward={result.get('reward')}", flush=True)
             results.append(result)
