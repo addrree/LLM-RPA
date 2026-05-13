@@ -7,6 +7,18 @@ from typing import Any
 CLICKABLE_ROLES = {"button", "link", "checkbox", "radio", "textbox", "combobox", "option", "menuitem"}
 CLICKABLE_TAGS = {"button", "a", "input", "select", "textarea", "label"}
 ID_KEYS = ("bid", "element_id", "node_id", "backend_node_id", "id")
+REAL_BID_FIELD_SOURCES = (
+    ("bid", "bid"),
+    ("data-testid", "data-testid"),
+    ("data_testid", "data_testid"),
+    ("dataTestId", "data-testid"),
+    ("browsergym_id", "browsergym_id"),
+    ("browsergymId", "browsergym_id"),
+    ("data-bid", "data-bid"),
+    ("data_bid", "data_bid"),
+    ("dataBid", "data-bid"),
+    ("ref", "ref"),
+)
 TEXT_KEYS = ("name", "text", "label", "ariaLabel", "aria_label", "title", "value", "content", "inner_text", "innerText")
 
 
@@ -124,7 +136,15 @@ def _is_safe_candidate_scalar(key: str, value: Any) -> bool:
 
 def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
     out: dict[str, Any] = {}
-    for key in ID_KEYS + ("browsergym_id", "data-bid", "data_bid", "data-testid", "data_testid", "ref"):
+    existing_bid_source = str(item.get("bid_source") or "").strip()
+    for key, source in REAL_BID_FIELD_SOURCES:
+        value = item.get(key)
+        if value is not None and str(value).strip():
+            out["bid"] = str(value).strip()
+            out["bid_source"] = existing_bid_source or source
+            out[key] = str(value).strip()
+            break
+    for key in ("element_id", "node_id", "backend_node_id", "id"):
         value = item.get(key)
         if value is not None and str(value).strip():
             out[key] = str(value).strip()
@@ -203,7 +223,7 @@ def _parse_axtree_clickables(text: str) -> list[dict[str, Any]]:
         raw = line.strip()
         if not raw:
             continue
-        bid_match = re.search(r"\b(?:bid|id|node_id|backend_node_id)\s*[=:]\s*['\"]?([A-Za-z0-9_.:-]+)", raw, flags=re.IGNORECASE)
+        bid_match = re.search(r"\bbid\s*[=:]\s*['\"]?([A-Za-z0-9_.:-]+)", raw, flags=re.IGNORECASE)
         if not bid_match:
             bid_match = re.search(r"^\s*\[?([A-Za-z0-9_.:-]+)\]?\s+(?:button|link|input|textbox|checkbox|radio|combobox|option|menuitem)\b", raw, flags=re.IGNORECASE)
         role_match = re.search(r"\b(button|link|input|textbox|checkbox|radio|combobox|menuitem|option)\b", raw, flags=re.IGNORECASE)
@@ -213,6 +233,7 @@ def _parse_axtree_clickables(text: str) -> list[dict[str, Any]]:
         candidate: dict[str, Any] = {"raw": raw[:240]}
         if bid_match:
             candidate["bid"] = bid_match.group(1)
+            candidate["bid_source"] = "bid"
         if role_match:
             role = role_match.group(1).lower()
             candidate["role"] = "textbox" if role == "input" else role
@@ -248,9 +269,22 @@ def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
             "visible": True,
             "enabled": "disabled" not in attrs,
         }
-        if attrs.get("data-bid"):
+        if attrs.get("bid"):
+            candidate["bid"] = attrs["bid"]
+            candidate["bid_source"] = "bid"
+        elif attrs.get("data-testid"):
+            candidate["bid"] = attrs["data-testid"]
+            candidate["bid_source"] = "data-testid"
+        elif attrs.get("browsergym_id"):
+            candidate["bid"] = attrs["browsergym_id"]
+            candidate["bid_source"] = "browsergym_id"
+        elif attrs.get("data-bid"):
             candidate["bid"] = attrs["data-bid"]
-        elif attrs.get("id"):
+            candidate["bid_source"] = "data-bid"
+        elif attrs.get("ref"):
+            candidate["bid"] = attrs["ref"]
+            candidate["bid_source"] = "ref"
+        if attrs.get("id"):
             candidate["element_id"] = attrs["id"]
         _append_candidate(candidates, _candidate_from_dict(candidate), seen)
     return candidates
