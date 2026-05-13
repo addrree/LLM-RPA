@@ -527,3 +527,75 @@ def test_coordinate_fallback_only_when_no_real_bid():
     assert with_bid.mapping_strategy == "bid_click"
     assert without_bid.action == 'mouse_click(11, 22, "left")'
     assert without_bid.mapping_strategy == "coordinate_raw"
+
+
+def test_fill_action_with_bid_remains_fill_not_click():
+    result = ground_miniwob_action(
+        action='fill("16", "michel")',
+        parsed_response={},
+        candidates=[{"bid": "16", "bid_source": "bid", "role": "textbox"}],
+    )
+
+    assert result.action == 'fill("16", "michel")'
+    assert result.mapping_strategy == "bid_fill"
+
+
+def test_textbox_fill_intent_maps_to_bid_fill():
+    result = ground_miniwob_action(
+        action='type("16", "michel")',
+        parsed_response={"target_bid": "16", "target_text": "michel", "intent": "enter text"},
+        candidates=[{"bid": "16", "bid_source": "bid", "role": "textbox"}],
+    )
+
+    assert result.action == 'fill("16", "michel")'
+    assert result.mapping_strategy == "bid_fill"
+
+
+def test_button_click_intent_still_maps_to_bid_click():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"bid": "7", "bid_source": "bid", "role": "button", "name": "Submit"}],
+    )
+
+    assert result.action == 'click("7", "left")'
+    assert result.mapping_strategy == "bid_click"
+
+
+def test_username_password_instruction_parser_extracts_quoted_values():
+    from app.browsergym_integration.miniwob_grounding import parse_username_password_instruction
+
+    values = parse_username_password_instruction('Enter the username "michel" and the password "c3" into the text fields and press login.')
+
+    assert values == {"username": "michel", "password": "c3"}
+
+
+def test_two_textboxes_are_mapped_in_order_for_login_style_forms():
+    from app.browsergym_integration.miniwob_grounding import map_login_textboxes
+
+    first = {"bid": "16", "bid_source": "bid", "role": "textbox"}
+    second = {"bid": "17", "bid_source": "bid", "role": "textbox"}
+    mapped = map_login_textboxes('Enter the username "u" and the password "p".', [first, second])
+
+    assert mapped["username"] is first
+    assert mapped["password"] is second
+
+
+def test_submit_login_button_is_selected_by_role_and_name():
+    from app.browsergym_integration.miniwob_grounding import find_submit_button
+
+    login = {"bid": "20", "bid_source": "bid", "role": "button", "name": "Login"}
+
+    assert find_submit_button([{"role": "link", "name": "Login"}, login]) is login
+
+
+def test_repeated_textbox_click_no_progress_is_detected():
+    result = ground_miniwob_action(
+        action='click("16", "left")',
+        parsed_response={},
+        candidates=[{"bid": "16", "bid_source": "bid", "role": "textbox"}],
+        history=[{"action": 'click("16", "left")', "reward": 0.0}, {"action": 'click("16", "left")', "reward": 0.0}],
+    )
+
+    assert result.action == "noop()"
+    assert "no_progress repeated textbox click" in result.mapping_error

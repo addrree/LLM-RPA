@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 import re
 from difflib import SequenceMatcher
 from typing import Any
@@ -22,6 +23,8 @@ def _norm(value: Any) -> str:
 REAL_BID_KEYS = ("bid", "data-testid", "data_testid", "browsergym_id", "data-bid", "data_bid", "ref")
 REAL_BID_SOURCES = {"bid", "data-testid", "data_testid", "browsergym_id", "data-bid", "data_bid", "ref"}
 FAKE_BID_SOURCES = {"id", "dom_id", "element_id", "index", "candidate_index", "node_id", "backend_node_id"}
+SUBMIT_BUTTON_NAMES = {"submit", "login", "ok", "done"}
+TEXT_INPUT_INTENTS = {"fill", "type", "enter", "input", "text", "username", "password"}
 
 
 def real_candidate_bid(candidate: dict[str, Any] | None) -> str:
@@ -60,14 +63,58 @@ def _candidate_text(candidate: dict[str, Any]) -> str:
     return values[0] if values else ""
 
 
-def _extract_click_target(action: str) -> str:
-    match = re.match(r"^\s*click\s*\(\s*(.*?)\s*\)\s*$", str(action or ""), flags=re.IGNORECASE)
+def _is_textbox(candidate: dict[str, Any] | None) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    role = _norm(candidate.get("role"))
+    tag = _norm(candidate.get("tag"))
+    typ = _norm(candidate.get("type"))
+    return role == "textbox" or tag == "textarea" or (tag == "input" and typ not in {"button", "submit", "checkbox", "radio"})
+
+
+def _escape(value: Any) -> str:
+    return str(value).replace("\\", "\\\\").replace('"', '\\"')
+
+
+def browsergym_click_action(candidate_id: str, action_syntax: list[str] | None = None) -> str:
+    return f'click("{_escape(candidate_id)}", "left")'
+
+
+def browsergym_fill_action(candidate_id: str, text: str) -> str:
+    return f'fill("{_escape(candidate_id)}", "{_escape(text)}")'
+
+
+def _parse_call(action: str) -> tuple[str, list[Any]] | None:
+    text = str(action or "").strip()
+    match = re.match(r"^\s*([A-Za-z_][\w]*)\s*\((.*)\)\s*$", text, flags=re.DOTALL)
     if not match:
+        return None
+    name = match.group(1).lower()
+    args_raw = match.group(2).strip()
+    if not args_raw:
+        return name, []
+    try:
+        parsed = json.loads(f"[{args_raw}]")
+        if isinstance(parsed, list):
+            return name, parsed
+    except Exception:
+        pass
+    # Minimal fallback for bare click(submit)-style calls.
+    parts = [part.strip() for part in args_raw.split(",")]
+    cleaned: list[Any] = []
+    for part in parts:
+        if (part.startswith('"') and part.endswith('"')) or (part.startswith("'") and part.endswith("'")):
+            cleaned.append(part[1:-1])
+        else:
+            cleaned.append(part)
+    return name, cleaned
+
+
+def _extract_click_target(action: str) -> str:
+    parsed = _parse_call(action)
+    if not parsed or parsed[0] != "click" or not parsed[1]:
         return ""
-    raw = match.group(1).strip()
-    if (raw.startswith('"') and raw.endswith('"')) or (raw.startswith("'") and raw.endswith("'")):
-        raw = raw[1:-1]
-    return raw.strip()
+    return str(parsed[1][0]).strip()
 
 
 def _visible_enabled_bonus(candidate: dict[str, Any]) -> int:
@@ -122,9 +169,50 @@ def find_click_candidate(candidates: list[dict[str, Any]], target: str) -> dict[
     return best if best_score[0] >= 45 else None
 
 
-def browsergym_click_action(candidate_id: str, action_syntax: list[str] | None = None) -> str:
-    escaped = str(candidate_id).replace("\\", "\\\\").replace('"', '\\"')
-    return f'click("{escaped}", "left")'
+def textbox_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    return [c for c in candidates or [] if _is_textbox(c)]
+
+
+def parse_quoted_strings(instruction: str) -> list[str]:
+    return [m.group(1) or m.group(2) for m in re.finditer(r'"([^"]*)"|\'([^\']*)\'', str(instruction or ""))]
+
+
+def parse_username_password_instruction(instruction: str) -> dict[str, str]:
+    text = str(instruction or "")
+    result: dict[str, str] = {}
+    user_match = re.search(r"username\s+['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
+    pass_match = re.search(r"password\s+['\"]([^'\"]+)['\"]", text, flags=re.IGNORECASE)
+    if user_match:
+        result["username"] = user_match.group(1)
+    if pass_match:
+        result["password"] = pass_match.group(1)
+    return result
+
+
+def map_login_textboxes(instruction: str, candidates: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
+    values = parse_username_password_instruction(instruction)
+    boxes = textbox_candidates(candidates)
+    mapped: dict[str, dict[str, Any]] = {}
+    if "username" in values and len(boxes) >= 1:
+        mapped["username"] = boxes[0]
+    if "password" in values and len(boxes) >= 2:
+        mapped["password"] = boxes[1]
+    return mapped
+
+
+def find_submit_button(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        role = _norm(candidate.get("role"))
+        tag = _norm(candidate.get("tag"))
+        typ = _norm(candidate.get("type"))
+        if role != "button" and tag != "button" and typ not in {"button", "submit"}:
+            continue
+        names = {_norm(value) for value in _candidate_text_values(candidate)}
+        if names & SUBMIT_BUTTON_NAMES:
+            return candidate
+    return None
 
 
 def _numeric(value: Any) -> float | None:
@@ -171,12 +259,7 @@ def candidate_center_with_strategy(candidate: dict[str, Any]) -> tuple[float, fl
         cy = _numeric(candidate.get(y_key))
         if cx is not None and cy is not None:
             return cx, cy, strategy
-    for bbox_key, strategy in (
-        ("action_bbox", "coordinate_scaled"),
-        ("browsergym_bbox", "coordinate_scaled"),
-        ("bbox", "coordinate_raw"),
-        ("bounding_box", "coordinate_raw"),
-    ):
+    for bbox_key, strategy in (("action_bbox", "coordinate_scaled"), ("browsergym_bbox", "coordinate_scaled"), ("bbox", "coordinate_raw"), ("bounding_box", "coordinate_raw")):
         center = _bbox_center(candidate.get(bbox_key))
         if center is not None:
             return center[0], center[1], strategy
@@ -197,6 +280,68 @@ def browsergym_mouse_click_action(x: float, y: float) -> str:
     return f'mouse_click({fmt(x)}, {fmt(y)}, "left")'
 
 
+def _find_by_real_bid(candidates: list[dict[str, Any]], bid: str) -> dict[str, Any] | None:
+    return next((c for c in candidates or [] if real_candidate_bid(c) == bid), None)
+
+
+def _first_text_arg(parsed: tuple[str, list[Any]] | None) -> str:
+    if not parsed or len(parsed[1]) < 2:
+        return ""
+    return str(parsed[1][1])
+
+
+def _select_textbox_for_fill(parsed: tuple[str, list[Any]] | None, parsed_response: dict[str, Any], candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    args = parsed[1] if parsed else []
+    target_bid = str(parsed_response.get("target_bid") or "").strip()
+    first = str(args[0]).strip() if args else ""
+    for bid in (target_bid, first):
+        selected = _find_by_real_bid(candidates, bid)
+        if selected is not None:
+            return selected
+    boxes = textbox_candidates(candidates)
+    if len(boxes) == 1:
+        return boxes[0]
+    return None
+
+
+def _should_block_repeated_textbox_click(before: str, candidates: list[dict[str, Any]], history: list[dict]) -> str | None:
+    parsed = _parse_call(before)
+    if not parsed or parsed[0] != "click" or not parsed[1]:
+        return None
+    clicked_bid = str(parsed[1][0]).strip()
+    selected = _find_by_real_bid(candidates, clicked_bid)
+    if not _is_textbox(selected):
+        return None
+    repeats = 0
+    for item in reversed(history):
+        if str(item.get("action") or "").strip() == before and float(item.get("reward") or 0) <= 0:
+            repeats += 1
+        else:
+            break
+    if repeats >= 2:
+        return f"action_mapping_failure: no_progress repeated textbox click {before!r} without text input"
+    return None
+
+
+def _passthrough_call(parsed: tuple[str, list[Any]] | None, before: str) -> MiniWoBGroundingResult | None:
+    if not parsed:
+        return None
+    name, args = parsed
+    if name == "fill" and len(args) >= 2:
+        return MiniWoBGroundingResult(action=browsergym_fill_action(str(args[0]), str(args[1])), mapping_strategy="bid_fill")
+    if name == "clear" and len(args) >= 1:
+        return MiniWoBGroundingResult(action=f'clear("{_escape(args[0])}")', mapping_strategy="bid_clear")
+    if name == "focus" and len(args) >= 1:
+        return MiniWoBGroundingResult(action=f'focus("{_escape(args[0])}")', mapping_strategy="bid_focus")
+    if name == "press" and len(args) >= 2:
+        return MiniWoBGroundingResult(action=f'press("{_escape(args[0])}", "{_escape(args[1])}")', mapping_strategy="bid_press")
+    if name == "keyboard_type" and len(args) >= 1:
+        return MiniWoBGroundingResult(action=f'keyboard_type("{_escape(args[0])}")', mapping_strategy="keyboard_type")
+    if name == "keyboard_insert_text" and len(args) >= 1:
+        return MiniWoBGroundingResult(action=f'keyboard_insert_text("{_escape(args[0])}")', mapping_strategy="keyboard_insert_text")
+    return None
+
+
 def ground_miniwob_action(
     *,
     action: str,
@@ -207,9 +352,14 @@ def ground_miniwob_action(
 ) -> MiniWoBGroundingResult:
     parsed_response = parsed_response or {}
     before = " ".join(str(action or "").strip().split())
+    parsed = _parse_call(before)
     target = str(parsed_response.get("target_text") or "").strip() or _extract_click_target(before)
     target_bid = str(parsed_response.get("target_bid") or "").strip()
     history = history or []
+
+    textbox_repeat_error = _should_block_repeated_textbox_click(before, candidates, history)
+    if textbox_repeat_error:
+        return MiniWoBGroundingResult(action="noop()", mapping_error=textbox_repeat_error, repeated_warning="repeated textbox click blocked", mapping_strategy="none")
 
     repeats = 0
     for item in reversed(history):
@@ -225,10 +375,35 @@ def ground_miniwob_action(
             mapping_strategy="none",
         )
 
+    if parsed and parsed[0] in {"fill", "type"}:
+        selected = _select_textbox_for_fill(parsed, parsed_response, candidates)
+        text = _first_text_arg(parsed) or str(parsed_response.get("text") or parsed_response.get("value") or "")
+        if selected is not None:
+            bid = real_candidate_bid(selected)
+            if bid:
+                return MiniWoBGroundingResult(action=browsergym_fill_action(bid, text), selected_candidate=selected, mapping_strategy="bid_fill")
+        passthrough = _passthrough_call(parsed, before)
+        if passthrough is not None:
+            return passthrough
+
+    passthrough = _passthrough_call(parsed, before)
+    if passthrough is not None:
+        if parsed and parsed[0] == "fill":
+            selected = _select_textbox_for_fill(parsed, parsed_response, candidates)
+            passthrough.selected_candidate = selected
+        return passthrough
+
+    intent = _norm(parsed_response.get("intent") or parsed_response.get("action_intent") or parsed_response.get("rationale") or "")
+    if target_bid and any(word in intent for word in TEXT_INPUT_INTENTS):
+        selected = _find_by_real_bid(candidates, target_bid)
+        if _is_textbox(selected):
+            text = str(parsed_response.get("target_text") or parsed_response.get("text") or parsed_response.get("value") or "")
+            return MiniWoBGroundingResult(action=browsergym_fill_action(target_bid, text), selected_candidate=selected, mapping_strategy="bid_fill")
+
     if before.lower().startswith("click") or before.lower().startswith("mouse_click") or target or target_bid:
         selected = None
         if target_bid:
-            selected = next((c for c in candidates if _candidate_id(c) == target_bid), None)
+            selected = _find_by_real_bid(candidates, target_bid)
         if selected is None and target:
             selected = find_click_candidate(candidates, target)
         if selected is not None:
