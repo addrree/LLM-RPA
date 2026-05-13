@@ -7,7 +7,7 @@ from typing import Any
 
 from app.browsergym_integration.action_mapper import browsergym_finish_action, task_step_to_browsergym_action
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
-from app.browsergym_integration.miniwob_grounding import ground_miniwob_action
+from app.browsergym_integration.miniwob_grounding import find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
 from app.browsergym_integration.local_extractor import (
     extract_pattern_from_observation,
     extract_structured_items_from_observation,
@@ -37,6 +37,8 @@ class BrowserGymAgentDecision:
     action_string_before_mapping: str | None = None
     action_string_after_mapping: str | None = None
     selected_candidate: dict | None = None
+    selected_candidate_bid: str | None = None
+    bid_source: str | None = None
     clickable_candidates_count: int | None = None
     page_candidate_extraction_failed: bool | None = None
     mapping_strategy: str | None = None
@@ -95,7 +97,11 @@ class BrowserGymAgentAdapter:
                 'click("bid")',
                 'mouse_click(x, y, "left")',
                 'fill("bid", "text")',
-                'keyboard_press("Enter")',
+                'press("bid", "Enter")',
+                'focus("bid")',
+                'clear("bid")',
+                'keyboard_type("text")',
+                'keyboard_insert_text("text")',
                 'noop()',
             ]
         return [
@@ -161,7 +167,7 @@ class BrowserGymAgentAdapter:
             return "noop()", "action_mapping_failure: empty action"
         if normalized.lower().startswith(("finish(", "agent_finish(")):
             return "noop()", "action_mapping_failure: finish is disabled for MiniWoB; success requires reward > 0"
-        if not re.match(r"^(click|mouse_click|fill|type|press|keyboard_press|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
+        if not re.match(r"^(click|mouse_click|fill|type|press|focus|clear|keyboard_press|keyboard_type|keyboard_insert_text|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
             return "noop()", f"action_mapping_failure: unsupported MiniWoB action syntax: {normalized[:120]}"
         return normalized, None
 
@@ -191,6 +197,15 @@ class BrowserGymAgentAdapter:
         vision_image_present = image_base64 is not None
         miniwob_instruction = context.get("goal_instruction") or goal or "Complete the MiniWoB task according to the page instruction"
         action_examples = self._default_action_syntax_examples()
+        candidates_for_state = list(context.get("clickable_candidates") or [])
+        submit_candidate = find_submit_button(candidates_for_state)
+        login_textbox_map = map_login_textboxes(miniwob_instruction, candidates_for_state)
+        text_action_hints = {
+            "quoted_strings": parse_quoted_strings(miniwob_instruction),
+            "textbox_bids_in_order": [real_candidate_bid(c) for c in textbox_candidates(candidates_for_state) if real_candidate_bid(c)],
+            "login_textbox_bids": {key: real_candidate_bid(value) for key, value in login_textbox_map.items() if real_candidate_bid(value)},
+            "submit_or_login_bid": real_candidate_bid(submit_candidate) if submit_candidate else "",
+        }
         current_state = {
             "benchmark": "MiniWoB++",
             "env_id": self.env_id or "",
@@ -212,6 +227,7 @@ class BrowserGymAgentAdapter:
             "recent_actions": self._json_safe(history[-5:]),
             "no_progress_signal": self._json_safe(self._mini_wob_no_progress_signal(history)),
             "available_action_syntax_examples": action_examples,
+            "text_action_hints": text_action_hints,
         }
         system_prompt = (
             "You are controlling a BrowserGym MiniWoB++ environment. "
@@ -219,6 +235,11 @@ class BrowserGymAgentAdapter:
             "Do not produce a plan and do not call finish; MiniWoB success is determined only by environment reward. "
             "Do NOT invent click(submit) when BrowserGym requires an element id. "
             "Do not output Unicode(). Unicode is only the type of the action space, not an action. "
+            "For text input tasks, use fill(\"<textbox_bid>\", \"<required_text>\"). "
+            "Do not repeatedly click a textbox when the task requires entering text. "
+            "After filling required fields, click Submit/Login by real bid. "
+            "For username/password tasks, fill username field first, then password field, then Login. "
+            "Prefer real candidate.bid over coordinates. "
             "Prefer real candidate.bid for clicking. "
             "Use click(\"<bid>\", \"left\") when bid exists. "
             "Never infer bid from candidate index. "
@@ -231,6 +252,13 @@ class BrowserGymAgentAdapter:
         user_prompt = (
             "Select the single next MiniWoB action. Use one of the available action syntaxes exactly as supported by this BrowserGym version.\n"
             "Do not output Unicode(). Unicode is only the type of the action space, not an action.\n"
+            "For text input tasks, use fill(\"<textbox_bid>\", \"<required_text>\").\n"
+            "Do not repeatedly click a textbox when the task requires entering text.\n"
+            "After filling required fields, click Submit/Login by real bid.\n"
+            "For username/password tasks, fill username field first, then password field, then Login.\n"
+            "Prefer real candidate.bid over coordinates.\n"
+            "Never infer bid from candidate index.\n"
+            "Use one valid JSON object only. No prose outside JSON.\n"
             "For click actions:\n"
             "- Prefer real candidate.bid for clicking.\n"
             "- Use click(\"<bid>\", \"left\") when bid exists.\n"
@@ -296,6 +324,8 @@ class BrowserGymAgentAdapter:
             action_string_before_mapping=before_mapping,
             action_string_after_mapping=action,
             selected_candidate=selected_candidate,
+            selected_candidate_bid=real_candidate_bid(selected_candidate),
+            bid_source=selected_candidate.get("bid_source") if isinstance(selected_candidate, dict) else None,
             clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0),
             page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
             mapping_strategy=mapping_strategy,

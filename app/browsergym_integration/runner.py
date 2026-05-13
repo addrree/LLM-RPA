@@ -7,6 +7,7 @@ import traceback
 from datetime import datetime
 
 from app.browsergym_integration.config import BrowserGymRunConfig, validate_webarena_env_vars
+from app.browsergym_integration.miniwob_grounding import real_candidate_bid
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context
 from app.browsergym_integration.report import BrowserGymRunReport, BrowserGymStepRecord
 
@@ -29,7 +30,7 @@ class BrowserGymRunner:
 
     @staticmethod
     def _browsergym_default_action_syntax() -> list[str]:
-        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'keyboard_press("Enter")', 'noop()']
+        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'clear("bid")', 'focus("bid")', 'press("bid", "Enter")', 'keyboard_type("text")', 'keyboard_insert_text("text")', 'noop()']
 
     @staticmethod
     def _looks_like_action_space_repr(value: str) -> bool:
@@ -235,6 +236,8 @@ class BrowserGymRunner:
 
     @staticmethod
     def _make_step_record(idx: int, obs, info, action: str, reward, terminated: bool, truncated: bool, decision) -> BrowserGymStepRecord:
+        selected_candidate = getattr(decision, "selected_candidate", None)
+        selected_bid_source = selected_candidate.get("bid_source") if isinstance(selected_candidate, dict) else None
         return BrowserGymStepRecord(
             step_idx=idx,
             url=str((obs or {}).get("url", "")) if isinstance(obs, dict) else "",
@@ -253,8 +256,10 @@ class BrowserGymRunner:
             mapping_error=getattr(decision, "mapping_error", None),
             action_string_before_mapping=getattr(decision, "action_string_before_mapping", None),
             action_string_after_mapping=getattr(decision, "action_string_after_mapping", None),
-            selected_candidate=getattr(decision, "selected_candidate", None),
-            selected_candidate_verbose=BrowserGymRunner._candidate_verbose_summary(getattr(decision, "selected_candidate", None)),
+            selected_candidate=selected_candidate,
+            selected_candidate_bid=getattr(decision, "selected_candidate_bid", None) or real_candidate_bid(selected_candidate),
+            bid_source=getattr(decision, "bid_source", None) or selected_bid_source,
+            selected_candidate_verbose=BrowserGymRunner._candidate_verbose_summary(selected_candidate),
             clickable_candidates_count=getattr(decision, "clickable_candidates_count", None),
             page_candidate_extraction_failed=getattr(decision, "page_candidate_extraction_failed", None),
             mapping_strategy=getattr(decision, "mapping_strategy", None),
