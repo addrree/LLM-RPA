@@ -91,6 +91,7 @@ class BrowserGymAgentAdapter:
             return self.browsergym_action_syntax[:20]
         if self._is_miniwob_context():
             return [
+                'click("bid", "left")',
                 'click("bid")',
                 'mouse_click(x, y, "left")',
                 'fill("bid", "text")',
@@ -218,7 +219,9 @@ class BrowserGymAgentAdapter:
             "Do not produce a plan and do not call finish; MiniWoB success is determined only by environment reward. "
             "Do NOT invent click(submit) when BrowserGym requires an element id. "
             "Do not output Unicode(). Unicode is only the type of the action space, not an action. "
-            "Prefer one of the provided clickable candidate ids (bid/element_id/node_id), or use mouse coordinates if no id is available. "
+            "If a clickable candidate has a real BrowserGym bid, use bid click with that exact bid. "
+            "Never infer bid from candidate index, and do not treat raw DOM id as BrowserGym bid unless it is explicitly from bid/ref/data-testid/browsergym_id/data-bid. "
+            "Use mouse coordinates only if no real bid/ref/data-testid/browsergym_id/data-bid is available. "
             "Coordinates in clickable_candidates include browsergym_center_x/browsergym_center_y; use those for BrowserGym mouse_click and do not use page_center_x/page_center_y directly. "
             "If candidates include a button with name/text matching the instruction, choose that candidate. "
             "Return STRICT JSON only with keys rationale, target_text, target_bid, and action."
@@ -226,12 +229,12 @@ class BrowserGymAgentAdapter:
         user_prompt = (
             "Select the single next MiniWoB action. Use one of the available action syntaxes exactly as supported by this BrowserGym version.\n"
             "Do not output Unicode(). Unicode is only the type of the action space, not an action.\n"
-            "For click actions, prefer click(\"<real candidate bid/id>\") over text-only click labels. If there is no bid/id but a candidate has browsergym_center_x/browsergym_center_y, use mouse_click(browsergym_center_x, browsergym_center_y, \"left\"). Do NOT use page_center_x/page_center_y directly for BrowserGym mouse_click. If no scaled coordinates are present, fall back to action-space center_x/center_y. Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
-            "If clickable_candidates contains a button whose name/text/label matches target_text, set target_bid to that candidate id and use it in action.\n"
+            "For click actions, if the selected candidate has bid, use click(\"<bid>\", \"left\") (or another explicitly supported bid-click syntax) over coordinates or text-only click labels. Never infer bid from candidate index. Do not use raw DOM id as BrowserGym bid unless it is explicitly bid/ref/data-testid/browsergym_id/data-bid. If there is no real bid but a candidate has browsergym_center_x/browsergym_center_y, use mouse_click(browsergym_center_x, browsergym_center_y, \"left\"). Do NOT use page_center_x/page_center_y directly for BrowserGym mouse_click. If no scaled coordinates are present, fall back to action-space center_x/center_y. Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
+            "If clickable_candidates contains a button whose name/text/label matches target_text and has a real bid, set target_bid to that candidate bid and use it in action.\n"
             "Do not repeat exactly the same previous action after reward=0 unless new evidence changed.\n"
             "If unsure, choose the safest grounded interaction; use noop() only when no valid grounded action is possible.\n\n"
             f"Current state JSON:\n{json.dumps(current_state, ensure_ascii=False, indent=2)}\n\n"
-            "Return exactly: {\"rationale\": \"...\", \"target_text\": \"submit\", \"target_bid\": \"...\", \"action\": \"click(\\\"...\\\")\"}"
+            "Return exactly: {\"rationale\": \"...\", \"target_text\": \"submit\", \"target_bid\": \"...\", \"action\": \"click(\\\"...\\\", \\\"left\\\")\"}"
         )
         images = [image_base64] if image_base64 is not None else None
         mapping_error = None

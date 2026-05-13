@@ -58,6 +58,42 @@ def _real_bid(candidate: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _bid_click_action_variant(bid: str, variant: str) -> str:
+    escaped_double = str(bid).replace("\\", "\\\\").replace('"', '\\"')
+    escaped_single = str(bid).replace("\\", "\\\\").replace("'", "\\'")
+    if variant == "bid_click_double_with_left":
+        return f'click("{escaped_double}", "left")'
+    if variant == "bid_click_single_with_left":
+        return f"click('{escaped_single}', 'left')"
+    if variant == "bid_click_double_no_button":
+        return f'click("{escaped_double}")'
+    if variant == "bid_click_single_no_button":
+        return f"click('{escaped_single}')"
+    if variant == "bid_click":
+        return browsergym_click_action(bid)
+    raise ValueError(f"unknown bid click variant {variant}")
+
+
+def _candidate_verbose(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(candidate, dict):
+        return None
+    return {
+        "bid": _real_bid(candidate),
+        "bid_source": candidate.get("bid_source"),
+        "text": _candidate_text(candidate),
+        "bbox": candidate.get("bbox"),
+        "browsergym_bbox": candidate.get("browsergym_bbox"),
+        "centers": {
+            "center_x": candidate.get("center_x"),
+            "center_y": candidate.get("center_y"),
+            "page_center_x": candidate.get("page_center_x"),
+            "page_center_y": candidate.get("page_center_y"),
+            "browsergym_center_x": candidate.get("browsergym_center_x"),
+            "browsergym_center_y": candidate.get("browsergym_center_y"),
+        },
+    }
+
+
 def _safe_repr(value: Any, *, limit: int = 1000) -> str:
     try:
         rendered = repr(value)
@@ -230,11 +266,11 @@ def _method_actions(method: str, page_center: tuple[float, float], browsergym_ce
         return [_mouse_down_action(raw_x, raw_y, with_coords=True), _mouse_up_action(raw_x, raw_y, with_coords=True)], None
     if method == "scaled_mouse_down_up_with_coords":
         return [_mouse_down_action(scaled_x, scaled_y, with_coords=True), _mouse_up_action(scaled_x, scaled_y, with_coords=True)], None
-    if method == "bid_click":
+    if method in {"bid_click", "bid_click_double_with_left", "bid_click_single_with_left", "bid_click_double_no_button", "bid_click_single_no_button"}:
         bid = _real_bid(candidate)
         if not bid:
             return None, "no real bid/data-testid/browsergym_id/data-bid/ref on selected candidate"
-        return [browsergym_click_action(bid)], None
+        return [_bid_click_action_variant(bid, method)], None
     return None, f"unknown method {method}"
 
 
@@ -250,6 +286,7 @@ def _run_method(env: Any, *, method: str, seed: int | None, target_text: str | N
         "candidate_extraction_failed": failed,
         "scale_factor": scale_factor,
         "selected_candidate": candidate,
+        "selected_candidate_verbose": _candidate_verbose(candidate),
         "page_center": None,
         "browsergym_center": None,
         "reward": None,
@@ -318,7 +355,10 @@ def main() -> int:
                 "scaled_mouse_move_down_up",
                 "raw_mouse_down_up_with_coords",
                 "scaled_mouse_down_up_with_coords",
-                "bid_click",
+                "bid_click_double_with_left",
+                "bid_click_single_with_left",
+                "bid_click_double_no_button",
+                "bid_click_single_no_button",
                 "playwright_direct_control",
             ]
         ),
@@ -349,6 +389,7 @@ def main() -> int:
                 "observation_dump": _obs_text_dump(obs),
                 "instruction": instruction,
                 "selected_candidate": selected,
+                "selected_candidate_verbose": _candidate_verbose(selected),
                 "candidate_extraction_failed": failed,
                 "candidate_count": len(candidates),
                 "scale_factor": scale_factor,
