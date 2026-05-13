@@ -94,6 +94,9 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
                 "mapping_error": getattr(step, "mapping_error", None),
                 "miniwob_instruction": getattr(step, "miniwob_instruction", None),
                 "selected_candidate": getattr(step, "selected_candidate", None),
+                "selected_candidate_verbose": getattr(step, "selected_candidate_verbose", None),
+                "selected_candidate_bid": (getattr(step, "selected_candidate", None) or {}).get("bid") if isinstance(getattr(step, "selected_candidate", None), dict) else None,
+                "bid_source": (getattr(step, "selected_candidate", None) or {}).get("bid_source") if isinstance(getattr(step, "selected_candidate", None), dict) else None,
                 "mapping_strategy": getattr(step, "mapping_strategy", None),
                 "action_string_before_mapping": getattr(step, "action_string_before_mapping", None),
                 "action_string_after_mapping": getattr(step, "action_string_after_mapping", None),
@@ -252,7 +255,7 @@ def main(argv=None) -> int:
                 for step in result.get("steps", []):
                     step_no = (step.get("step_idx") if step.get("step_idx") is not None else 0) + 1
                     print(f"[MiniWoB] step {step_no}/{args.max_steps} action={step.get('action_string') or step.get('action')} before_grounding={step.get('action_string_before_mapping')} after_grounding={step.get('action_string_after_mapping')} mapping_strategy={step.get('mapping_strategy')}", flush=True)
-                    print(f"[MiniWoB] step {step_no} selected_candidate={json.dumps(step.get('selected_candidate'), ensure_ascii=False, default=str)}", flush=True)
+                    print(f"[MiniWoB] step {step_no} selected_candidate.bid={step.get('selected_candidate_bid')} bid_source={step.get('bid_source')} selected_candidate={json.dumps(step.get('selected_candidate'), ensure_ascii=False, default=str)} selected_candidate_verbose={json.dumps(step.get('selected_candidate_verbose'), ensure_ascii=False, default=str)}", flush=True)
                     print(f"[MiniWoB] step {step_no} reward={step.get('reward')} terminated={step.get('terminated')} truncated={step.get('truncated')}", flush=True)
                 print(f"[MiniWoB] task done success={result.get('success')} reward={result.get('reward')}", flush=True)
             results.append(result)

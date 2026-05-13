@@ -245,7 +245,7 @@ def test_candidate_with_bid_maps_to_click_bid():
         candidates=[{"bid": "a12", "role": "button", "name": "Submit", "center_x": 11, "center_y": 22}],
     )
     assert result.action == 'click("a12", "left")'
-    assert result.mapping_strategy == "bid"
+    assert result.mapping_strategy == "bid_click"
 
 
 def test_click_submit_goes_through_grounding_before_env_step(monkeypatch):
@@ -458,4 +458,72 @@ def test_grounding_prefers_real_bid_over_coordinates():
     )
 
     assert result.action == 'click("12", "left")'
-    assert result.mapping_strategy == "bid"
+    assert result.mapping_strategy == "bid_click"
+
+
+def test_candidate_with_bid_18_maps_to_browsergym_bid_click():
+    result = ground_miniwob_action(
+        action='click("cancel")',
+        parsed_response={"target_text": "cancel"},
+        candidates=[{"text": "cancel", "bid": "18", "bid_source": "bid", "role": "button"}],
+    )
+
+    assert result.action == 'click("18", "left")'
+    assert result.selected_candidate["bid"] == "18"
+    assert result.selected_candidate["bid_source"] == "bid"
+    assert result.mapping_strategy == "bid_click"
+
+
+def test_grounding_rewrites_case_text_numeric_and_mouse_click_to_selected_bid():
+    candidates = [{"text": "cancel", "bid": "18", "bid_source": "bid", "role": "button", "browsergym_center_x": 1, "browsergym_center_y": 2}]
+
+    for action, parsed in (
+        ('click("cancel")', {}),
+        ('click("Cancel")', {}),
+        ('click("2")', {"target_text": "cancel"}),
+        ('mouse_click(1, 2, "left")', {"target_text": "cancel"}),
+        ('noop()', {"target_text": "cancel"}),
+    ):
+        result = ground_miniwob_action(action=action, parsed_response=parsed, candidates=candidates)
+        assert result.action == 'click("18", "left")'
+        assert result.mapping_strategy == "bid_click"
+
+
+def test_fake_bid_source_index_is_forbidden_and_falls_back_to_coordinates():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit", "target_bid": "2"},
+        candidates=[{"bid": "2", "bid_source": "index", "role": "button", "text": "Submit", "center_x": 11, "center_y": 22}],
+    )
+
+    assert result.action == 'mouse_click(11, 22, "left")'
+    assert result.mapping_strategy == "coordinate_raw"
+
+
+def test_dom_id_is_not_browsergym_bid_even_when_matching_target_bid():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit", "target_bid": "plain-dom-id"},
+        candidates=[{"id": "plain-dom-id", "role": "button", "text": "Submit", "center_x": 11, "center_y": 22}],
+    )
+
+    assert result.action == 'mouse_click(11, 22, "left")'
+    assert result.mapping_strategy == "coordinate_raw"
+
+
+def test_coordinate_fallback_only_when_no_real_bid():
+    with_bid = ground_miniwob_action(
+        action='mouse_click(11, 22, "left")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"bid": "18", "bid_source": "bid", "role": "button", "text": "Submit", "center_x": 11, "center_y": 22}],
+    )
+    without_bid = ground_miniwob_action(
+        action='mouse_click(11, 22, "left")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"role": "button", "text": "Submit", "center_x": 11, "center_y": 22}],
+    )
+
+    assert with_bid.action == 'click("18", "left")'
+    assert with_bid.mapping_strategy == "bid_click"
+    assert without_bid.action == 'mouse_click(11, 22, "left")'
+    assert without_bid.mapping_strategy == "coordinate_raw"

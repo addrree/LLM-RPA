@@ -19,15 +19,31 @@ def _norm(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
 
 
-REAL_BID_KEYS = ("bid", "browsergym_id", "data-bid", "data_bid", "data-testid", "data_testid", "ref")
+REAL_BID_KEYS = ("bid", "data-testid", "data_testid", "browsergym_id", "data-bid", "data_bid", "ref")
+REAL_BID_SOURCES = {"bid", "data-testid", "data_testid", "browsergym_id", "data-bid", "data_bid", "ref"}
+FAKE_BID_SOURCES = {"id", "dom_id", "element_id", "index", "candidate_index", "node_id", "backend_node_id"}
 
 
-def _candidate_id(candidate: dict[str, Any]) -> str:
+def real_candidate_bid(candidate: dict[str, Any] | None) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    source = str(candidate.get("bid_source") or "").strip()
+    if source in FAKE_BID_SOURCES:
+        return ""
+    if source and source not in REAL_BID_SOURCES:
+        return ""
     for key in REAL_BID_KEYS:
         value = candidate.get(key)
         if value is not None and str(value).strip():
-            return str(value).strip()
+            if key == "bid" and not source:
+                return str(value).strip()
+            if source in REAL_BID_SOURCES or key != "bid":
+                return str(value).strip()
     return ""
+
+
+def _candidate_id(candidate: dict[str, Any]) -> str:
+    return real_candidate_bid(candidate)
 
 
 def _candidate_text_values(candidate: dict[str, Any]) -> list[str]:
@@ -209,16 +225,16 @@ def ground_miniwob_action(
             mapping_strategy="none",
         )
 
-    if before.lower().startswith("click") or (before.lower().startswith("mouse_click") and (target or target_bid)):
+    if before.lower().startswith("click") or before.lower().startswith("mouse_click") or target or target_bid:
         selected = None
         if target_bid:
             selected = next((c for c in candidates if _candidate_id(c) == target_bid), None)
         if selected is None and target:
             selected = find_click_candidate(candidates, target)
         if selected is not None:
-            candidate_id = _candidate_id(selected)
+            candidate_id = real_candidate_bid(selected)
             if candidate_id:
-                return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid")
+                return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid_click")
             center = candidate_center_with_strategy(selected)
             if center is not None:
                 return MiniWoBGroundingResult(action=browsergym_mouse_click_action(center[0], center[1]), selected_candidate=selected, mapping_strategy=center[2])

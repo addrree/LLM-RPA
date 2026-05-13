@@ -381,7 +381,10 @@ class BrowserGymRunner:
                 if self._is_miniwob_config(self.config):
                     obs, reward, terminated, truncated, info = self._try_miniwob_playwright_fallback(env, decision, obs, reward, terminated, truncated, info)
                     selected = getattr(decision, "selected_candidate", None)
-                    print(f"[MiniWoB] step {idx + 1} selected_candidate={selected} selected_candidate_verbose={self._candidate_verbose_summary(selected)} mapping_strategy={getattr(decision, 'mapping_strategy', None)}", flush=True)
+                    selected_verbose = self._candidate_verbose_summary(selected)
+                    selected_bid = selected.get("bid") if isinstance(selected, dict) else None
+                    selected_bid_source = selected.get("bid_source") if isinstance(selected, dict) else None
+                    print(f"[MiniWoB] step {idx + 1} selected_candidate.bid={selected_bid} bid_source={selected_bid_source} selected_candidate={selected} selected_candidate_verbose={selected_verbose} mapping_strategy={getattr(decision, 'mapping_strategy', None)}", flush=True)
                     print(f"[MiniWoB] step {idx + 1} reward={reward} terminated={terminated} truncated={truncated}", flush=True)
                 history_note = None
                 if self._is_miniwob_config(self.config) and getattr(decision, "mapping_error", None):
