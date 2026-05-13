@@ -108,7 +108,7 @@ def find_click_candidate(candidates: list[dict[str, Any]], target: str) -> dict[
 
 def browsergym_click_action(candidate_id: str, action_syntax: list[str] | None = None) -> str:
     escaped = str(candidate_id).replace("\\", "\\\\").replace('"', '\\"')
-    return f'click("{escaped}")'
+    return f'click("{escaped}", "left")'
 
 
 def _numeric(value: Any) -> float | None:

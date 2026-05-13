@@ -29,7 +29,7 @@ class BrowserGymRunner:
 
     @staticmethod
     def _browsergym_default_action_syntax() -> list[str]:
-        return ['click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'keyboard_press("Enter")', 'noop()']
+        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'keyboard_press("Enter")', 'noop()']
 
     @staticmethod
     def _looks_like_action_space_repr(value: str) -> bool:
@@ -145,6 +145,13 @@ class BrowserGymRunner:
             const style = window.getComputedStyle(el);
             const visible = !!(rect.width || rect.height) && style.visibility !== 'hidden' && style.display !== 'none';
             const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || el.name || el.id || '').trim();
+            const bid = el.getAttribute('bid');
+            const dataTestId = el.getAttribute('data-testid');
+            const browsergymId = el.getAttribute('browsergym_id');
+            const dataBid = el.getAttribute('data-bid');
+            const ref = el.getAttribute('ref');
+            const realBid = bid || dataTestId || browsergymId || dataBid || ref || '';
+            const bidSource = bid ? 'bid' : (dataTestId ? 'data-testid' : (browsergymId ? 'browsergym_id' : (dataBid ? 'data-bid' : (ref ? 'ref' : ''))));
             return {
               tag: el.tagName.toLowerCase(),
               type: el.getAttribute('type') || '',
@@ -154,6 +161,12 @@ class BrowserGymRunner:
               ariaLabel: el.getAttribute('aria-label') || '',
               id: el.id || '',
               name: el.getAttribute('name') || '',
+              bid: realBid,
+              bid_source: bidSource,
+              dataTestId: dataTestId || '',
+              browsergymId: browsergymId || '',
+              dataBid: dataBid || '',
+              ref: ref || '',
               disabled: !!el.disabled,
               enabled: !el.disabled,
               visible,
@@ -199,6 +212,27 @@ class BrowserGymRunner:
         report.output_path = str(out)
         return report
 
+
+    @staticmethod
+    def _candidate_verbose_summary(candidate: dict | None) -> dict | None:
+        if not isinstance(candidate, dict):
+            return None
+        return {
+            "bid": candidate.get("bid"),
+            "bid_source": candidate.get("bid_source"),
+            "text": candidate.get("text") or candidate.get("name") or candidate.get("value") or candidate.get("label") or candidate.get("ariaLabel"),
+            "bbox": candidate.get("bbox"),
+            "browsergym_bbox": candidate.get("browsergym_bbox"),
+            "centers": {
+                "center_x": candidate.get("center_x"),
+                "center_y": candidate.get("center_y"),
+                "page_center_x": candidate.get("page_center_x"),
+                "page_center_y": candidate.get("page_center_y"),
+                "browsergym_center_x": candidate.get("browsergym_center_x"),
+                "browsergym_center_y": candidate.get("browsergym_center_y"),
+            },
+        }
+
     @staticmethod
     def _make_step_record(idx: int, obs, info, action: str, reward, terminated: bool, truncated: bool, decision) -> BrowserGymStepRecord:
         return BrowserGymStepRecord(
@@ -220,6 +254,7 @@ class BrowserGymRunner:
             action_string_before_mapping=getattr(decision, "action_string_before_mapping", None),
             action_string_after_mapping=getattr(decision, "action_string_after_mapping", None),
             selected_candidate=getattr(decision, "selected_candidate", None),
+            selected_candidate_verbose=BrowserGymRunner._candidate_verbose_summary(getattr(decision, "selected_candidate", None)),
             clickable_candidates_count=getattr(decision, "clickable_candidates_count", None),
             page_candidate_extraction_failed=getattr(decision, "page_candidate_extraction_failed", None),
             mapping_strategy=getattr(decision, "mapping_strategy", None),
@@ -346,7 +381,7 @@ class BrowserGymRunner:
                 if self._is_miniwob_config(self.config):
                     obs, reward, terminated, truncated, info = self._try_miniwob_playwright_fallback(env, decision, obs, reward, terminated, truncated, info)
                     selected = getattr(decision, "selected_candidate", None)
-                    print(f"[MiniWoB] step {idx + 1} selected_candidate={selected} mapping_strategy={getattr(decision, 'mapping_strategy', None)}", flush=True)
+                    print(f"[MiniWoB] step {idx + 1} selected_candidate={selected} selected_candidate_verbose={self._candidate_verbose_summary(selected)} mapping_strategy={getattr(decision, 'mapping_strategy', None)}", flush=True)
                     print(f"[MiniWoB] step {idx + 1} reward={reward} terminated={terminated} truncated={truncated}", flush=True)
                 history_note = None
                 if self._is_miniwob_config(self.config) and getattr(decision, "mapping_error", None):

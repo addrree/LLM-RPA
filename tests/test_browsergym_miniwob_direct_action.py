@@ -173,7 +173,7 @@ def test_miniwob_grounding_click_bare_text_to_bid():
         parsed_response={"target_text": "submit"},
         candidates=[{"bid": "7", "role": "button", "name": "submit"}],
     )
-    assert result.action == 'click("7")'
+    assert result.action == 'click("7", "left")'
     assert result.selected_candidate["bid"] == "7"
 
 
@@ -183,7 +183,7 @@ def test_miniwob_grounding_click_quoted_text_to_bid():
         parsed_response={},
         candidates=[{"bid": "7", "role": "button", "name": "submit"}],
     )
-    assert result.action == 'click("7")'
+    assert result.action == 'click("7", "left")'
 
 
 def test_miniwob_grounding_exact_match_precedes_fuzzy():
@@ -195,7 +195,7 @@ def test_miniwob_grounding_exact_match_precedes_fuzzy():
             {"bid": "7", "role": "button", "name": "submit"},
         ],
     )
-    assert result.action == 'click("7")'
+    assert result.action == 'click("7", "left")'
 
 
 def test_miniwob_grounding_no_candidate_noops_with_mapping_error():
@@ -225,7 +225,7 @@ def test_action_space_unicode_repr_not_in_action_syntax_examples():
     env = types.SimpleNamespace(action_space=_UnicodeSpace(), unwrapped=types.SimpleNamespace(action_space=_UnicodeSpace()))
     examples = BrowserGymRunner._extract_action_syntax(env)
     assert "Unicode()" not in examples
-    assert 'click("bid")' in examples
+    assert 'click("bid", "left")' in examples
 
 
 def test_dom_candidate_with_bbox_maps_to_mouse_click():
@@ -244,7 +244,7 @@ def test_candidate_with_bid_maps_to_click_bid():
         parsed_response={"target_text": "Submit"},
         candidates=[{"bid": "a12", "role": "button", "name": "Submit", "center_x": 11, "center_y": 22}],
     )
-    assert result.action == 'click("a12")'
+    assert result.action == 'click("a12", "left")'
     assert result.mapping_strategy == "bid"
 
 
@@ -266,9 +266,9 @@ def test_click_submit_goes_through_grounding_before_env_step(monkeypatch):
         agent_factory=_LLMAgentFactory(),
         config=BrowserGymRunConfig(env_id="browsergym/miniwob.click-button", goal="g", benchmark="miniwob", max_steps=1),
     ).run_one()
-    assert env.actions == ['click("real_bid")']
+    assert env.actions == ['click("real_bid", "left")']
     assert report.steps[0].action_string_before_mapping == 'click("Submit")'
-    assert report.steps[0].action_string_after_mapping == 'click("real_bid")'
+    assert report.steps[0].action_string_after_mapping == 'click("real_bid", "left")'
 
 
 def test_non_miniwob_action_syntax_defaults_do_not_change_mode():
@@ -405,3 +405,57 @@ def test_grounding_remaps_mouse_click_when_target_text_selects_scaled_candidate(
     )
     assert result.action == 'mouse_click(38.34, 221.25, "left")'
     assert result.mapping_strategy == "coordinate_scaled"
+
+
+def test_page_candidate_extractor_preserves_plain_bid_and_source(monkeypatch):
+    class _Page:
+        _bgym_scale_factor = 1.0
+
+        def evaluate(self, script):
+            assert "el.getAttribute('bid')" in script
+            assert "el.getAttribute('data-testid')" in script
+            assert "el.getAttribute('browsergym_id')" in script
+            assert "el.getAttribute('data-bid')" in script
+            assert "el.getAttribute('ref')" in script
+            return [
+                {
+                    "tag": "button",
+                    "text": "Submit",
+                    "id": "plain-dom-id",
+                    "bid": "12",
+                    "bid_source": "bid",
+                    "bbox": {"x": 1, "y": 2, "width": 10, "height": 20},
+                    "center_x": 6,
+                    "center_y": 12,
+                }
+            ]
+
+    monkeypatch.setattr(BrowserGymRunner, "_find_page", classmethod(lambda cls, env: _Page()))
+    candidates, failed = BrowserGymRunner._extract_page_clickable_candidates(object())
+
+    assert failed is False
+    assert candidates[0]["bid"] == "12"
+    assert candidates[0]["bid_source"] == "bid"
+    assert candidates[0]["id"] == "plain-dom-id"
+
+
+def test_candidate_index_and_plain_dom_id_are_not_used_as_bid():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"index": 12, "id": "plain-dom-id", "role": "button", "text": "Submit", "center_x": 11, "center_y": 22}],
+    )
+
+    assert result.action == 'mouse_click(11, 22, "left")'
+    assert result.mapping_strategy == "coordinate_raw"
+
+
+def test_grounding_prefers_real_bid_over_coordinates():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"target_text": "Submit"},
+        candidates=[{"bid": "12", "bid_source": "bid", "role": "button", "text": "Submit", "center_x": 11, "center_y": 22}],
+    )
+
+    assert result.action == 'click("12", "left")'
+    assert result.mapping_strategy == "bid"

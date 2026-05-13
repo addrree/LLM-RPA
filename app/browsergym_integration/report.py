@@ -22,6 +22,7 @@ class BrowserGymStepRecord(BaseModel):
     action_string_before_mapping: str | None = None
     action_string_after_mapping: str | None = None
     selected_candidate: dict | None = None
+    selected_candidate_verbose: dict | None = None
     clickable_candidates_count: int | None = None
     page_candidate_extraction_failed: bool | None = None
     mapping_strategy: str | None = None
