@@ -173,6 +173,167 @@ def textbox_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
     return [c for c in candidates or [] if _is_textbox(c)]
 
 
+
+def _role_value(value: Any) -> str:
+    if isinstance(value, dict):
+        return str(value.get("value") or value.get("name") or "").strip()
+    return str(value or "").strip()
+
+
+def _attrs_dict(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return {str(k): v for k, v in value.items()}
+    if isinstance(value, (list, tuple)):
+        if len(value) % 2 == 0 and all(not isinstance(item, (dict, list, tuple)) for item in value):
+            return {str(value[i]): value[i + 1] for i in range(0, len(value), 2)}
+        out: dict[str, Any] = {}
+        for item in value:
+            if isinstance(item, dict):
+                name = item.get("name") or item.get("key") or item.get("attribute")
+                if name is not None:
+                    out[str(name)] = item.get("value")
+        return out
+    return {}
+
+
+def _first_scalar(mapping: dict[str, Any], *keys: str) -> Any:
+    for key in keys:
+        if key in mapping and mapping[key] not in (None, ""):
+            return mapping[key]
+    return None
+
+
+def _copy_real_bid(candidate: dict[str, Any], source: dict[str, Any], attrs: dict[str, Any] | None = None) -> None:
+    attrs = attrs or {}
+    for key in REAL_BID_KEYS:
+        value = source.get(key)
+        if value in (None, ""):
+            value = attrs.get(key)
+        if value not in (None, ""):
+            candidate["bid"] = str(value).strip()
+            candidate["bid_source"] = key
+            candidate[key] = str(value).strip()
+            return
+
+
+def _looks_editable(node: dict[str, Any], attrs: dict[str, Any]) -> bool:
+    role = _norm(_role_value(node.get("role")))
+    node_name = _norm(node.get("nodeName") or node.get("tagName") or node.get("tag"))
+    typ = _norm(node.get("type") or attrs.get("type"))
+    if role == "textbox" or node_name == "textarea":
+        return True
+    if node_name == "input":
+        return typ in {"", "text", "password", "search", "email", "tel", "url"}
+    for key in ("editable", "focusable", "isEditable", "isTextInput", "input"):
+        value = node.get(key)
+        if value is True or _norm(value) in {"true", "1", "yes"}:
+            return True
+    return False
+
+
+def _textbox_candidate_from_axtree_node(node: dict[str, Any]) -> dict[str, Any] | None:
+    attrs = _attrs_dict(node.get("attributes"))
+    if not _looks_editable(node, attrs):
+        return None
+    candidate: dict[str, Any] = {"role": "textbox", "source": "axtree_object"}
+    _copy_real_bid(candidate, node, attrs)
+    for out_key, *in_keys in (
+        ("name", "name", "accessibleName", "label"),
+        ("value", "value", "inputValue"),
+        ("backendDOMNodeId", "backendDOMNodeId", "backend_node_id"),
+        ("tag", "tag", "tagName", "nodeName"),
+        ("type", "type"),
+    ):
+        value = _first_scalar(node, *in_keys)
+        if value not in (None, ""):
+            candidate[out_key] = _role_value(value) if out_key in {"name", "value"} else str(value).strip()
+    for key in ("bbox", "bounding_box", "browsergym_bbox", "action_bbox"):
+        if node.get(key) not in (None, ""):
+            candidate[key] = node.get(key)
+    for key in ("editable", "focusable", "enabled", "visible", "disabled"):
+        if key in node:
+            candidate[key] = node.get(key)
+    return candidate if real_candidate_bid(candidate) or candidate.get("backendDOMNodeId") else None
+
+
+def _textbox_candidate_from_dom_node(node: dict[str, Any]) -> dict[str, Any] | None:
+    attrs = _attrs_dict(node.get("attributes"))
+    node_name = _norm(node.get("nodeName") or node.get("tagName") or node.get("tag"))
+    typ = _norm(node.get("type") or attrs.get("type"))
+    if node_name not in {"input", "textarea"}:
+        return None
+    if node_name == "input" and typ not in {"", "text", "password", "search", "email", "tel", "url"}:
+        return None
+    candidate: dict[str, Any] = {"role": "textbox", "tag": node_name, "source": "dom_object", "input_type": typ or "text"}
+    _copy_real_bid(candidate, node, attrs)
+    for out_key, *in_keys in (
+        ("name", "name", "aria-label", "ariaLabel", "placeholder"),
+        ("value", "value", "inputValue"),
+        ("backendDOMNodeId", "backendDOMNodeId", "backend_node_id"),
+        ("type", "type"),
+    ):
+        value = _first_scalar(node, *in_keys)
+        if value in (None, ""):
+            value = _first_scalar(attrs, *in_keys)
+        if value not in (None, ""):
+            candidate[out_key] = str(value).strip()
+    for key in ("bbox", "bounding_box", "browsergym_bbox", "action_bbox"):
+        if node.get(key) not in (None, ""):
+            candidate[key] = node.get(key)
+    return candidate if real_candidate_bid(candidate) or candidate.get("backendDOMNodeId") else None
+
+
+def _walk_textbox_nodes(value: Any, *, source: str, out: list[dict[str, Any]]) -> None:
+    if isinstance(value, dict):
+        candidate = _textbox_candidate_from_axtree_node(value) if source == "axtree_object" else _textbox_candidate_from_dom_node(value)
+        if candidate:
+            out.append(candidate)
+        for child in value.values():
+            if isinstance(child, (dict, list, tuple)):
+                _walk_textbox_nodes(child, source=source, out=out)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            _walk_textbox_nodes(item, source=source, out=out)
+
+
+def merge_textbox_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    index: dict[tuple[str, str], dict[str, Any]] = {}
+    for candidate in candidates or []:
+        if not isinstance(candidate, dict):
+            continue
+        bid = real_candidate_bid(candidate)
+        backend_id = str(candidate.get("backendDOMNodeId") or candidate.get("backend_node_id") or "").strip()
+        keys = []
+        if bid:
+            keys.append(("bid", bid))
+        if backend_id:
+            keys.append(("backendDOMNodeId", backend_id))
+        existing = next((index[key] for key in keys if key in index), None)
+        if existing is None:
+            existing = dict(candidate)
+            merged.append(existing)
+        else:
+            for key, value in candidate.items():
+                if value not in (None, "") and existing.get(key) in (None, ""):
+                    existing[key] = value
+            if existing.get("source") != candidate.get("source") and candidate.get("source"):
+                existing["source"] = "+".join(sorted(set(str(existing.get("source") or "").split("+")) | {str(candidate.get("source"))}))
+        for key in keys:
+            index[key] = existing
+    return merged
+
+
+def extract_textbox_candidates_from_observation(obs: dict[str, Any] | None, info: dict[str, Any] | None = None) -> list[dict[str, Any]]:
+    found: list[dict[str, Any]] = []
+    for source_map in (obs if isinstance(obs, dict) else {}, info if isinstance(info, dict) else {}):
+        if source_map.get("axtree_object") is not None:
+            _walk_textbox_nodes(source_map.get("axtree_object"), source="axtree_object", out=found)
+        if source_map.get("dom_object") is not None:
+            _walk_textbox_nodes(source_map.get("dom_object"), source="dom_object", out=found)
+    return merge_textbox_candidates(found)
+
+
 def parse_quoted_strings(instruction: str) -> list[str]:
     return [m.group(1) or m.group(2) for m in re.finditer(r'"([^"]*)"|\'([^\']*)\'', str(instruction or ""))]
 
@@ -198,6 +359,26 @@ def map_login_textboxes(instruction: str, candidates: list[dict[str, Any]]) -> d
     if "password" in values and len(boxes) >= 2:
         mapped["password"] = boxes[1]
     return mapped
+
+
+
+def _text_from_instruction_for_fill(instruction: str, selected: dict[str, Any] | None = None) -> str:
+    values = parse_username_password_instruction(instruction)
+    if values:
+        input_type = _norm((selected or {}).get("input_type") or (selected or {}).get("type"))
+        name_text = _norm(" ".join(_candidate_text_values(selected or {})))
+        if input_type == "password" or "password" in name_text:
+            return values.get("password", "")
+        return values.get("username", "")
+    quoted = parse_quoted_strings(instruction)
+    if quoted:
+        return quoted[0]
+    return ""
+
+
+def _instruction_requires_text_entry(instruction: str) -> bool:
+    text = _norm(instruction)
+    return bool(parse_quoted_strings(instruction)) and any(word in text for word in ("enter", "type", "input", "text field", "password", "username"))
 
 
 def find_submit_button(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -402,12 +583,25 @@ def ground_miniwob_action(
 
     if before.lower().startswith("click") or before.lower().startswith("mouse_click") or target or target_bid:
         selected = None
-        if target_bid:
-            selected = _find_by_real_bid(candidates, target_bid)
+        click_arg = str(parsed[1][0]).strip() if parsed and parsed[1] else ""
+        for bid in (target_bid, click_arg):
+            if bid:
+                selected = _find_by_real_bid(candidates, bid)
+                if selected is not None:
+                    break
         if selected is None and target:
             selected = find_click_candidate(candidates, target)
         if selected is not None:
             candidate_id = real_candidate_bid(selected)
+            instruction = str(parsed_response.get("instruction") or parsed_response.get("miniwob_instruction") or parsed_response.get("task_instruction") or "")
+            text = str(parsed_response.get("text") or parsed_response.get("value") or "")
+            if _is_textbox(selected) and candidate_id:
+                if not text and parsed_response.get("target_text") and str(parsed_response.get("target_text")).strip() != candidate_id:
+                    text = str(parsed_response.get("target_text") or "")
+                if not text and _instruction_requires_text_entry(instruction):
+                    text = _text_from_instruction_for_fill(instruction, selected)
+                if text:
+                    return MiniWoBGroundingResult(action=browsergym_fill_action(candidate_id, text), selected_candidate=selected, mapping_strategy="bid_fill")
             if candidate_id:
                 return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid_click")
             center = candidate_center_with_strategy(selected)

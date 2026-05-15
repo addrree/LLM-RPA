@@ -7,7 +7,7 @@ from typing import Any
 
 from app.browsergym_integration.action_mapper import browsergym_finish_action, task_step_to_browsergym_action
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
-from app.browsergym_integration.miniwob_grounding import find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
+from app.browsergym_integration.miniwob_grounding import extract_textbox_candidates_from_observation, find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
 from app.browsergym_integration.local_extractor import (
     extract_pattern_from_observation,
     extract_structured_items_from_observation,
@@ -198,6 +198,11 @@ class BrowserGymAgentAdapter:
         miniwob_instruction = context.get("goal_instruction") or goal or "Complete the MiniWoB task according to the page instruction"
         action_examples = self._default_action_syntax_examples()
         candidates_for_state = list(context.get("clickable_candidates") or [])
+        for textbox in extract_textbox_candidates_from_observation(obs, info):
+            bid = real_candidate_bid(textbox)
+            backend_id = str(textbox.get("backendDOMNodeId") or "").strip()
+            if not any((bid and real_candidate_bid(existing) == bid) or (backend_id and str(existing.get("backendDOMNodeId") or "").strip() == backend_id) for existing in candidates_for_state):
+                candidates_for_state.append(textbox)
         submit_candidate = find_submit_button(candidates_for_state)
         login_textbox_map = map_login_textboxes(miniwob_instruction, candidates_for_state)
         text_action_hints = {
@@ -285,6 +290,7 @@ class BrowserGymAgentAdapter:
             parsed = self._extract_json_object(parsed)
         elif not isinstance(parsed, dict):
             parsed = {}
+        parsed.setdefault("miniwob_instruction", miniwob_instruction)
         rationale = str(parsed.get("rationale") or parsed.get("reason") or "").strip()
         raw_action = str(parsed.get("action") or "").strip()
         action, validation_error = self._validate_direct_action(raw_action)
@@ -296,7 +302,7 @@ class BrowserGymAgentAdapter:
             grounding = ground_miniwob_action(
                 action=action,
                 parsed_response=parsed,
-                candidates=list(context.get("clickable_candidates") or []),
+                candidates=candidates_for_state,
                 history=history,
                 action_syntax=self.browsergym_action_syntax,
             )
