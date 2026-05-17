@@ -2,13 +2,29 @@ from __future__ import annotations
 
 from typing import Any
 
-ACTION_ALIASES: dict[str, str] = {}
+ACTION_ALIASES: dict[str, str] = {
+    "enter_text": "fill",
+    "input_text": "fill",
+    "select": "select_option",
+    "choose_list": "select_option",
+    "autocomplete": "select_autocomplete",
+}
 
 CANONICAL_ACTIONS = {
     "open_url",
     "click",
     "navigate_to_relevant_section",
     "type",
+    "fill",
+    "focus",
+    "clear",
+    "press",
+    "hover",
+    "select_option",
+    "check",
+    "uncheck",
+    "select_autocomplete",
+    "choose_date",
     "wait_for",
     "extract_text",
     "extract_html",

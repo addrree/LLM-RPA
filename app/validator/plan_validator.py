@@ -55,6 +55,20 @@ class PlanValidator:
                 self._validate_click_args(step.args)
             if step.action == "type" and ("selector" not in step.args or "text" not in step.args):
                 raise PlanValidationError("type requires 'selector' and 'text'")
+            if step.action == "fill":
+                self._validate_fill_args(step.args)
+            if step.action in {"focus", "clear", "hover"}:
+                self._validate_target_args(step.action, step.args)
+            if step.action == "press":
+                self._validate_press_args(step.args)
+            if step.action == "select_option":
+                self._validate_select_option_args(step.args)
+            if step.action in {"check", "uncheck"}:
+                self._validate_target_args(step.action, step.args)
+            if step.action == "choose_date":
+                self._validate_choose_date_args(step.args)
+            if step.action == "select_autocomplete":
+                self._validate_select_autocomplete_args(step.args)
             if step.action == "navigate_to_relevant_section":
                 self._validate_click_args(step.args)
             if step.action == "wait_for":
@@ -83,6 +97,44 @@ class PlanValidator:
                 self._validate_extract_text_near_text(step.args, step.save_as)
             if step.action == "extract_value_near_anchor":
                 self._validate_extract_value_near_anchor(step.args, step.save_as)
+
+    @staticmethod
+    def _has_target_reference(args: dict) -> bool:
+        return any(str(args.get(key, "")).strip() for key in ("selector", "target", "label", "candidate_id", "target_text", "text", "name", "placeholder"))
+
+    def _validate_target_args(self, action: str, args: dict) -> None:
+        if not self._has_target_reference(args):
+            raise PlanValidationError(f"{action} requires selector/target/label/candidate_id/text")
+
+    def _validate_fill_args(self, args: dict) -> None:
+        if not self._has_target_reference(args):
+            raise PlanValidationError("fill requires selector/text OR target/label/candidate_id")
+        if not any(str(args.get(key, "")).strip() for key in ("text", "value")):
+            raise PlanValidationError("fill requires text/value")
+
+    def _validate_press_args(self, args: dict) -> None:
+        if not str(args.get("key", "")).strip():
+            raise PlanValidationError("press requires key")
+
+    def _validate_select_option_args(self, args: dict) -> None:
+        if not any(str(args.get(key, "")).strip() for key in ("selector", "target", "label", "candidate_id", "target_text")):
+            raise PlanValidationError("select_option requires selector/target/label/candidate_id")
+        if not any(str(args.get(key, "")).strip() for key in ("option_text", "option_value", "value")):
+            raise PlanValidationError("select_option requires option_text/option_value/value")
+
+    def _validate_choose_date_args(self, args: dict) -> None:
+        if not any(str(args.get(key, "")).strip() for key in ("selector", "target", "label", "candidate_id", "target_text")):
+            raise PlanValidationError("choose_date requires target")
+        if not str(args.get("date", args.get("value", ""))).strip():
+            raise PlanValidationError("choose_date requires date")
+
+    def _validate_select_autocomplete_args(self, args: dict) -> None:
+        if not any(str(args.get(key, "")).strip() for key in ("selector", "target", "label", "candidate_id", "target_text")):
+            raise PlanValidationError("select_autocomplete requires input target")
+        if not str(args.get("query", args.get("text", ""))).strip():
+            raise PlanValidationError("select_autocomplete requires query/text")
+        if not any(str(args.get(key, "")).strip() for key in ("suggestion_target", "suggestion", "option_text", "value")):
+            raise PlanValidationError("select_autocomplete requires suggestion target/value")
 
     @staticmethod
     def _validate_click_args(args: dict) -> None:

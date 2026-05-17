@@ -13,7 +13,7 @@ UTC = timezone.utc
 
 
 class PlaywrightExecutor:
-    BROWSER_RETRYABLE_ACTIONS = {"open_url", "click", "wait_for", "navigate_to_relevant_section"}
+    BROWSER_RETRYABLE_ACTIONS = {"open_url", "click", "fill", "focus", "clear", "press", "hover", "select_option", "check", "uncheck", "select_autocomplete", "choose_date", "wait_for", "navigate_to_relevant_section"}
 
     def __init__(self, *, headless: bool = True, slow_mo: int = 0, record_video: bool = False):
         self.handlers = ActionHandlers()

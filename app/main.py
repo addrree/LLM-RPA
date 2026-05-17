@@ -47,7 +47,7 @@ def build_llm_client(force_dummy: bool = False, backend: str | None = None):
     )
 
 
-def build_workflow(*, llm_client, show_browser: bool, slow_mo: int, record_video: bool, two_stage_planning: bool):
+def build_workflow(*, llm_client, show_browser: bool, slow_mo: int, record_video: bool, two_stage_planning: bool, interaction_mode: str = "plan"):
     return WorkflowManager(
         planner=Planner(llm_client),
         validator=PlanValidator(),
@@ -55,6 +55,7 @@ def build_workflow(*, llm_client, show_browser: bool, slow_mo: int, record_video
         verifier=LLMVerifier(llm_client),
         replanner=Replanner(llm_client),
         two_stage_planning=two_stage_planning,
+        interaction_mode=interaction_mode,
     )
 
 
@@ -67,6 +68,7 @@ async def run(
     record_video: bool = False,
     export_formats: list[str] | None = None,
     two_stage_planning: bool = False,
+    interaction_mode: str = "plan",
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
@@ -78,6 +80,7 @@ async def run(
         slow_mo=slow_mo,
         record_video=record_video,
         two_stage_planning=two_stage_planning,
+        interaction_mode=interaction_mode,
     )
 
     result = await workflow.run(user_goal)
@@ -120,6 +123,7 @@ async def run_benchmark(
     export_formats: list[str] | None,
     two_stage_planning: bool,
     benchmark_runs: int,
+    interaction_mode: str = "plan",
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
@@ -133,6 +137,7 @@ async def run_benchmark(
             slow_mo=slow_mo,
             record_video=record_video,
             two_stage_planning=two_stage_planning,
+            interaction_mode=interaction_mode,
         ),
         export_formats=export_formats,
     )
@@ -195,6 +200,12 @@ def parse_args():
         "--two-stage-planning",
         action="store_true",
         help="Enable two-stage planning: initial observation plan + context-aware replanning",
+    )
+    parser.add_argument(
+        "--interaction-mode",
+        choices=["plan", "observe_action"],
+        default="plan",
+        help="Use the existing planning pipeline or opt-in observe/action loop",
     )
     parser.add_argument(
         "--export-format",
@@ -270,6 +281,7 @@ if __name__ == "__main__":
                     export_formats=args.export_format,
                     two_stage_planning=args.two_stage_planning,
                     benchmark_runs=max(args.benchmark_runs, 1),
+                    interaction_mode=args.interaction_mode,
                 )
             )
         else:
@@ -283,6 +295,7 @@ if __name__ == "__main__":
                     record_video=args.record_video,
                     export_formats=args.export_format,
                     two_stage_planning=args.two_stage_planning,
+                    interaction_mode=args.interaction_mode,
                 )
             )
     except LLMClientError as exc:
