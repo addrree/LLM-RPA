@@ -388,3 +388,47 @@ def test_effective_max_retries_keeps_corrective_loop_active():
     assert WorkflowManager._effective_max_retries(0) == 1
     assert WorkflowManager._effective_max_retries(1) == 1
     assert WorkflowManager._effective_max_retries(5) == 3
+
+
+def test_llm_json_parser_valid_json_parses_without_repair():
+    diagnostics = {}
+    parsed = LLMClient._safe_parse_json('{"a": 1, "pattern": "English\\\\s+articles"}', stage="planner", diagnostics=diagnostics)
+
+    assert parsed == {"a": 1, "pattern": r"English\s+articles"}
+    assert diagnostics["json_escape_repair_applied"] is False
+
+
+def test_llm_json_parser_repairs_invalid_regex_escapes():
+    raw = r'''
+{
+  "steps": [
+    {
+      "action": "extract_pattern_from_page_text",
+      "args": {
+        "pattern": "English\s+([0-9][0-9,\.\s]*\+?)\s+articles"
+      }
+    }
+  ]
+}
+'''
+    diagnostics = {}
+
+    parsed = LLMClient._safe_parse_json(raw, stage="replanner", diagnostics=diagnostics)
+
+    pattern = parsed["steps"][0]["args"]["pattern"]
+    assert pattern == r"English\s+([0-9][0-9,\.\s]*\+?)\s+articles"
+    assert diagnostics["json_escape_repair_applied"] is True
+
+
+def test_llm_json_parser_irreparable_malformed_json_still_raises():
+    raw = r'{"pattern": "English\s+", "steps": [}'
+    diagnostics = {}
+
+    try:
+        LLMClient._safe_parse_json(raw, stage="replanner", diagnostics=diagnostics)
+        raise AssertionError("Expected parse failure")
+    except LLMClientError as exc:
+        msg = str(exc)
+        assert "stage=replanner" in msg
+        assert "line=" in msg and "col=" in msg and "pos=" in msg
+        assert diagnostics["json_escape_repair_applied"] is False
