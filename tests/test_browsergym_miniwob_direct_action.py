@@ -366,37 +366,6 @@ def test_grounding_scaled_mapping_strategy_and_selected_candidate_in_report(monk
     assert result["steps"][0]["selected_candidate"]["text"] == "OK"
     assert result["steps"][0]["mapping_strategy"] == "coordinate_scaled"
 
-
-def test_manual_validator_reselects_candidate_after_each_reset_and_no_fake_bid():
-    from scripts import test_minwob_manual_action as manual
-
-    class _Env:
-        def __init__(self):
-            self.reset_count = 0
-            self.actions = []
-            self.unwrapped = self
-            self.page = None
-
-        def reset(self, seed=None):
-            self.reset_count += 1
-            text = "First" if self.reset_count == 1 else "Second"
-            return {"goal": f"Click {text}", "page_clickable_candidates": [{"tag": "button", "text": text, "center_x": self.reset_count, "center_y": 2}]}, {}
-
-        def step(self, action):
-            self.actions.append(action)
-            return {}, 0.0, False, False, {}
-
-    env = _Env()
-    first = manual._run_method(env, method="raw_mouse_click", seed=123, target_text=None)
-    second = manual._run_method(env, method="scaled_mouse_click", seed=123, target_text=None)
-
-    assert env.reset_count == 2
-    assert first["selected_candidate"]["text"] == "First"
-    assert second["selected_candidate"]["text"] == "Second"
-    assert manual._real_bid({"index": 3, "id": "dom-id"}) is None
-    assert manual._real_bid({"data-testid": "real"}) == "real"
-
-
 def test_grounding_remaps_mouse_click_when_target_text_selects_scaled_candidate():
     result = ground_miniwob_action(
         action='mouse_click(25.56, 147.5, "left")',

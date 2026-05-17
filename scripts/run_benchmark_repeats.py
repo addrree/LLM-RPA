@@ -26,8 +26,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run benchmark suite N times and aggregate scenario stability metrics.")
     parser.add_argument("--suite", type=Path, required=True, help="Path to benchmark suite JSON")
     parser.add_argument("--runs", type=int, default=3, help="Number of repeated runs")
-    parser.add_argument("--backend", choices=["ollama", "ollama_cloud", "dummy"], default=None)
-    parser.add_argument("--dummy", action="store_true", help="Force DummyLLM backend")
+    parser.add_argument("--backend", choices=["ollama", "ollama_cloud"], default=None)
     parser.add_argument("--two-stage-planning", action="store_true")
     parser.add_argument("--show-browser", action="store_true")
     parser.add_argument("--slow-mo", type=int, default=0)
@@ -86,7 +85,7 @@ def _summarize_by_scenario(reports: list[dict]) -> list[dict]:
 async def main() -> None:
     args = parse_args()
     suite = load_scenario_suite(args.suite)
-    llm_client = build_llm_client(force_dummy=args.dummy, backend=args.backend)
+    llm_client = build_llm_client(backend=args.backend)
 
     runner = BenchmarkRunner(
         workflow_factory=lambda: build_workflow(

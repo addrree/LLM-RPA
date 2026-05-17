@@ -21,20 +21,15 @@ from app.orchestrator.persistence import export_results, save_artifacts
 from app.orchestrator.workflow_manager import WorkflowManager
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
-from app.utils.llm_client import DummyLLMClient, LLMClient, LLMClientError
+from app.utils.llm_client import LLMClient, LLMClientError
 from app.validator.plan_validator import PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
 UTC = timezone.utc
 
 
-def build_llm_client(force_dummy: bool = False, backend: str | None = None):
-    if force_dummy:
-        return DummyLLMClient()
-
+def build_llm_client(backend: str | None = None):
     selected_backend = (backend or os.getenv("LLM_BACKEND", "ollama")).strip().lower()
-    if selected_backend == "dummy":
-        return DummyLLMClient()
 
     return LLMClient(
         backend=selected_backend,
@@ -61,7 +56,6 @@ def build_workflow(*, llm_client, show_browser: bool, slow_mo: int, record_video
 
 async def run(
     user_goal: str,
-    force_dummy: bool = False,
     backend: str | None = None,
     show_browser: bool = False,
     slow_mo: int = 0,
@@ -72,7 +66,7 @@ async def run(
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
-    llm_client = build_llm_client(force_dummy=force_dummy, backend=backend)
+    llm_client = build_llm_client(backend=backend)
 
     workflow = build_workflow(
         llm_client=llm_client,
@@ -115,7 +109,6 @@ async def run_benchmark(
     suite_path: Path,
     scenario_ids: list[str] | None,
     categories: list[str] | None,
-    force_dummy: bool,
     backend: str | None,
     show_browser: bool,
     slow_mo: int,
@@ -127,7 +120,7 @@ async def run_benchmark(
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
-    llm_client = build_llm_client(force_dummy=force_dummy, backend=backend)
+    llm_client = build_llm_client(backend=backend)
     suite = load_scenario_suite(suite_path)
 
     runner = BenchmarkRunner(
@@ -170,13 +163,8 @@ def parse_args():
         help="User goal in natural language",
     )
     parser.add_argument(
-        "--dummy",
-        action="store_true",
-        help="Force DummyLLMClient",
-    )
-    parser.add_argument(
         "--backend",
-        choices=["ollama", "ollama_cloud", "dummy"],
+        choices=["ollama", "ollama_cloud"],
         default=None,
         help="LLM backend to use (default from LLM_BACKEND env, fallback: ollama)",
     )
@@ -273,7 +261,6 @@ if __name__ == "__main__":
                     suite_path=args.benchmark_suite,
                     scenario_ids=args.benchmark_scenario,
                     categories=args.benchmark_category,
-                    force_dummy=args.dummy,
                     backend=args.backend,
                     show_browser=args.show_browser,
                     slow_mo=args.slow_mo,
@@ -288,7 +275,6 @@ if __name__ == "__main__":
             asyncio.run(
                 run(
                     user_goal=args.goal,
-                    force_dummy=args.dummy,
                     backend=args.backend,
                     show_browser=args.show_browser,
                     slow_mo=args.slow_mo,

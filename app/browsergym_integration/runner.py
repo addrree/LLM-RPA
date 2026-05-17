@@ -6,7 +6,7 @@ import time
 import traceback
 from datetime import datetime
 
-from app.browsergym_integration.config import BrowserGymRunConfig, validate_webarena_env_vars
+from app.browsergym_integration.config import BrowserGymRunConfig
 from app.browsergym_integration.miniwob_grounding import real_candidate_bid
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context
 from app.browsergym_integration.report import BrowserGymRunReport, BrowserGymStepRecord
@@ -313,21 +313,14 @@ class BrowserGymRunner:
 
     def run_one(self) -> BrowserGymRunReport:
         started = time.time()
-        check = validate_webarena_env_vars(self.config.env_id)
-        if not check["ok"]:
-            return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage="env_validation", error_message=check["message"], runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
         try:
             import gymnasium as gym
             import browsergym.core  # noqa: F401
-            normalized_env_id = self.config.env_id.lower()
-            if "webarena" in normalized_env_id:
-                importlib.import_module("browsergym.webarena")
-            if "miniwob" in normalized_env_id:
+            if "miniwob" in self.config.env_id.lower():
                 importlib.import_module("browsergym.miniwob")
         except Exception as exc:
-            normalized_env_id = self.config.env_id.lower()
-            failure_stage = "webarena_import" if "webarena" in normalized_env_id else ("miniwob_import" if "miniwob" in normalized_env_id else "imports")
-            message = f"browsergym.webarena import failed: {exc}" if failure_stage == "webarena_import" else (f"browsergym.miniwob import failed: {exc}" if failure_stage == "miniwob_import" else f"Install browsergym dependencies first: {exc}")
+            failure_stage = "miniwob_import" if "miniwob" in self.config.env_id.lower() else "imports"
+            message = f"browsergym.miniwob import failed: {exc}" if failure_stage == "miniwob_import" else f"Install browsergym dependencies first: {exc}"
             return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage=failure_stage, error_message=message, runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
 
         try:

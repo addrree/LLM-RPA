@@ -1,7 +1,7 @@
 from app.planner.planner import Planner
 from app.schemas.execution import ExecutionResult, StepLog
 from app.schemas.task_spec import TaskSpec
-from app.utils.llm_client import DummyLLMClient
+from tests.fakes import DummyLLMClient
 from app.validator.plan_validator import PlanValidationError, PlanValidator
 from app.verifier.llm_verifier import LLMVerifier
 
