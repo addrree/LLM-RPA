@@ -4,6 +4,8 @@ from datetime import datetime, timezone
 from typing import Any
 
 from app.observer.page_observer import PageObserver
+from app.interaction.action_grounder import ActionGrounder
+from app.interaction.page_candidates import PageCandidateExtractor
 
 
 class StructuredExtractionError(ValueError):
@@ -28,6 +30,8 @@ class ActionHandlers:
 
     def __init__(self):
         self.page_observer = PageObserver()
+        self.candidate_extractor = PageCandidateExtractor()
+        self.action_grounder = ActionGrounder()
 
     async def open_url(self, page, args, runtime_state=None):
         wait_until = str(args.get("wait_until", "domcontentloaded"))
@@ -44,7 +48,77 @@ class ActionHandlers:
         )
 
     async def type(self, page, args, runtime_state=None):
-        await page.fill(args["selector"], args["text"])
+        await self.fill(page, args, runtime_state)
+
+    async def fill(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "fill", args, runtime_state)
+        selector = resolved["selector"]
+        text = str(resolved.get("text", resolved.get("value", "")))
+        await page.locator(selector).first.fill(text)
+        self._record_interaction_note(args, "fill", resolved, runtime_state)
+
+    async def focus(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "focus", args, runtime_state)
+        await page.locator(resolved["selector"]).first.focus()
+        self._record_interaction_note(args, "focus", resolved, runtime_state)
+
+    async def clear(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "clear", args, runtime_state)
+        await page.locator(resolved["selector"]).first.clear()
+        self._record_interaction_note(args, "clear", resolved, runtime_state)
+
+    async def press(self, page, args, runtime_state=None):
+        key = str(args.get("key", "Enter"))
+        if str(args.get("selector", "")).strip():
+            await page.locator(args["selector"]).first.press(key)
+            return
+        resolved = await self._resolve_interaction_args(page, "press", args, runtime_state) if self._has_interaction_target(args) else dict(args)
+        if resolved.get("selector"):
+            await page.locator(resolved["selector"]).first.press(key)
+        else:
+            await page.keyboard.press(key)
+        self._record_interaction_note(args, "press", resolved, runtime_state)
+
+    async def hover(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "hover", args, runtime_state)
+        await page.locator(resolved["selector"]).first.hover()
+        self._record_interaction_note(args, "hover", resolved, runtime_state)
+
+    async def select_option(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "select_option", args, runtime_state)
+        if resolved.get("action") == "click":
+            await page.locator(resolved["selector"]).first.click()
+        else:
+            option = resolved.get("option_value", resolved.get("option_text", resolved.get("value")))
+            try:
+                await page.locator(resolved["selector"]).first.select_option(label=str(option))
+            except Exception:
+                await page.locator(resolved["selector"]).first.select_option(str(option))
+        self._record_interaction_note(args, "select_option", resolved, runtime_state)
+
+    async def check(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "check", args, runtime_state)
+        await page.locator(resolved["selector"]).first.check()
+        self._record_interaction_note(args, "check", resolved, runtime_state)
+
+    async def uncheck(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "uncheck", args, runtime_state)
+        await page.locator(resolved["selector"]).first.uncheck()
+        self._record_interaction_note(args, "uncheck", resolved, runtime_state)
+
+    async def select_autocomplete(self, page, args, runtime_state=None):
+        result = await self._ground_interaction(page, "select_autocomplete", args, runtime_state)
+        for action in result.actions:
+            if action.action == "fill":
+                await page.locator(action.args["selector"]).first.fill(str(action.args.get("text", "")))
+            elif action.action == "click":
+                await page.locator(action.args["selector"]).first.click()
+        self._record_grounding(args, result, runtime_state)
+
+    async def choose_date(self, page, args, runtime_state=None):
+        resolved = await self._resolve_interaction_args(page, "choose_date", args, runtime_state)
+        await page.locator(resolved["selector"]).first.fill(str(resolved.get("date", resolved.get("value", resolved.get("text", "")))))
+        self._record_interaction_note(args, "choose_date", resolved, runtime_state)
 
     async def wait_for(self, page, args, runtime_state=None):
         timeout_ms = int(args.get("timeout_ms", 12000))
@@ -82,6 +156,53 @@ class ActionHandlers:
             },
             "final_url": page.url,
         }
+
+    @staticmethod
+    def _has_interaction_target(args: dict) -> bool:
+        return any(str(args.get(key, "")).strip() for key in ("selector", "target", "target_text", "label", "candidate_id", "text", "name", "placeholder"))
+
+    async def _ground_interaction(self, page, intent: str, args: dict, runtime_state=None):
+        candidates = await self.candidate_extractor.extract(page)
+        if runtime_state is not None:
+            runtime_state["last_page_candidates"] = PageCandidateExtractor.compact(candidates)
+        request = dict(args)
+        request.setdefault("intent", intent)
+        result = self.action_grounder.ground(
+            request,
+            candidates,
+            user_goal=str((runtime_state or {}).get("user_goal", "")),
+            page_snapshot=(runtime_state or {}).get("last_page_snapshot"),
+        )
+        self._record_grounding(args, result, runtime_state)
+        return result
+
+    async def _resolve_interaction_args(self, page, intent: str, args: dict, runtime_state=None) -> dict:
+        if str(args.get("selector", "")).strip():
+            resolved = dict(args)
+            resolved["selector"] = str(args["selector"]).strip()
+            return resolved
+        result = await self._ground_interaction(page, intent, args, runtime_state)
+        action = result.actions[0]
+        resolved = dict(args)
+        resolved.update(action.args)
+        resolved["action"] = action.action
+        return resolved
+
+    @staticmethod
+    def _record_grounding(args: dict, result, runtime_state=None) -> None:
+        diagnostics = {
+            "selected_candidate": result.selected_candidate,
+            "grounding_strategy": result.grounding_strategy,
+            "confidence": result.confidence,
+            "rejected_candidates": result.rejected_candidates[:20],
+        }
+        args["_grounding"] = diagnostics
+        if runtime_state is not None:
+            runtime_state["last_selected_candidate"] = result.selected_candidate
+            runtime_state["last_grounding"] = diagnostics
+
+    def _record_interaction_note(self, args: dict, action: str, resolved: dict, runtime_state=None) -> None:
+        args["_executor_note"] = f"{action} used selector={resolved.get('selector')!r}; candidate_id={resolved.get('candidate_id')!r}"
 
     async def extract_value_from_section(self, page, args, runtime_state=None):
         section_selector = str(args.get("section_selector", "")).strip()
