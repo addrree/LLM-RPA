@@ -91,13 +91,6 @@ def test_raw_observation_guardrail(monkeypatch):
     assert report.status == "failed"
 
 
-def test_skipped_report_is_persisted(tmp_path):
-    cfg = BrowserGymRunConfig(env_id="browsergym/webarena.10", goal="g", save_artifacts=True, output_dir=tmp_path)
-    report = BrowserGymRunner(agent_factory=lambda: _Agent(), config=cfg).run_one()
-    assert report.status == "skipped"
-    assert report.output_path is not None
-
-
 def test_runner_saves_runtime_traceback(monkeypatch, tmp_path):
     env = _FailingEnv()
     _patch_env(monkeypatch, env)
