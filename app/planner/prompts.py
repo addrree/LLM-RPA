@@ -28,6 +28,7 @@ PLANNER_SYSTEM_PROMPT = """
 }
 
 Правила:
+0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 1. Последний шаг всегда finish.
 2. step_id строго подряд: 1,2,3,...
 3. Для extract_* шагов с save_as в required_fields должны быть соответствующие поля.
@@ -155,6 +156,7 @@ REPLANNER_SYSTEM_PROMPT = """
 Верни только JSON TaskSpec.
 
 Ключевые правила:
+0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 1) Если final execution может запускаться в отдельной сессии, добавляй open_url(start_url) первым шагом.
 2) Не выдумывай CSS-селекторы, если можно извлечь значение из page_text через regex/pattern.
 3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor только когда page_text не дает надежный label-value-unit regex:
@@ -213,6 +215,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 Верни только JSON TaskSpec.
 
 Правила:
+0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 0) Never invent action names. Use only TaskSpec allowed actions exactly. Invalid examples: Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
 2) Если требовался список, возвращай массив объектов:

@@ -95,7 +95,7 @@ class LLMClient:
                 image_path=None,
                 images_base64=self._normalize_images_base64(images_base64, image_base64),
             )
-            parsed = self._safe_parse_json(raw_text, stage=stage)
+            parsed = self._safe_parse_json(raw_text, stage=stage, diagnostics=self.last_chat_diagnostics)
         except LLMClientError:
             logger.exception(
                 "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s)",
@@ -151,7 +151,7 @@ class LLMClient:
             image_path=image_path,
             images_base64=self._normalize_images_base64(images_base64, image_base64),
         )
-        parsed = self._safe_parse_json(raw_text, stage=stage)
+        parsed = self._safe_parse_json(raw_text, stage=stage, diagnostics=self.last_chat_diagnostics)
         fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
         return LLMArtifact(
             raw_response=raw_text,
@@ -331,25 +331,59 @@ class LLMClient:
         return base64.b64encode(image_bytes).decode("utf-8")
 
     @staticmethod
-    def _safe_parse_json(raw_text: str, *, stage: str = "unknown_stage") -> Dict[str, Any]:
+    def _safe_parse_json(
+        raw_text: str,
+        *,
+        stage: str = "unknown_stage",
+        diagnostics: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
         cleaned = LLMClient._sanitize_llm_json_text(raw_text)
+        if diagnostics is not None:
+            diagnostics["json_escape_repair_applied"] = False
         try:
             data = json.loads(cleaned)
         except json.JSONDecodeError as exc:
-            snippet_start = max(0, exc.pos - 60)
-            snippet_end = min(len(cleaned), exc.pos + 60)
-            snippet = cleaned[snippet_start:snippet_end]
-            raise LLMClientError(
-                f"Failed to parse JSON response from LLM at stage={stage}. "
-                f"line={exc.lineno}, col={exc.colno}, pos={exc.pos}. "
-                f"Context snippet: {snippet!r}. "
-                f"Raw response (first 500 chars): {raw_text[:500]}"
-            ) from exc
+            if LLMClient._is_invalid_json_escape_error(exc):
+                repaired = re.sub(r'\\(?!["\\/bfnrtu])', r'\\\\', cleaned)
+                try:
+                    data = json.loads(repaired)
+                except json.JSONDecodeError:
+                    LLMClient._raise_json_parse_error(raw_text, cleaned, stage, exc)
+                else:
+                    if diagnostics is not None:
+                        diagnostics["json_escape_repair_applied"] = True
+                    logger.warning(
+                        "Applied JSON invalid-escape repair to LLM response at stage=%s",
+                        stage,
+                    )
+            else:
+                LLMClient._raise_json_parse_error(raw_text, cleaned, stage, exc)
 
         if not isinstance(data, dict):
             raise LLMClientError("JSON response must be an object.")
 
         return data
+
+    @staticmethod
+    def _is_invalid_json_escape_error(exc: json.JSONDecodeError) -> bool:
+        return "Invalid \\escape" in exc.msg
+
+    @staticmethod
+    def _raise_json_parse_error(
+        raw_text: str,
+        cleaned: str,
+        stage: str,
+        exc: json.JSONDecodeError,
+    ) -> None:
+        snippet_start = max(0, exc.pos - 60)
+        snippet_end = min(len(cleaned), exc.pos + 60)
+        snippet = cleaned[snippet_start:snippet_end]
+        raise LLMClientError(
+            f"Failed to parse JSON response from LLM at stage={stage}. "
+            f"line={exc.lineno}, col={exc.colno}, pos={exc.pos}. "
+            f"Context snippet: {snippet!r}. "
+            f"Raw response (first 500 chars): {raw_text[:500]}"
+        ) from exc
 
     @staticmethod
     def _sanitize_llm_json_text(raw_text: str) -> str:
