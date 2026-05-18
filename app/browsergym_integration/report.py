@@ -28,6 +28,7 @@ class BrowserGymStepRecord(BaseModel):
     clickable_candidates_count: int | None = None
     page_candidate_extraction_failed: bool | None = None
     mapping_strategy: str | None = None
+    mapping_diagnostics: dict | None = None
     fallback_used: bool = False
     fallback_type: str | None = None
     fallback_reward: float | None = None

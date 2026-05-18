@@ -98,6 +98,7 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
                 "selected_candidate_bid": (getattr(step, "selected_candidate", None) or {}).get("bid") if isinstance(getattr(step, "selected_candidate", None), dict) else None,
                 "bid_source": (getattr(step, "selected_candidate", None) or {}).get("bid_source") if isinstance(getattr(step, "selected_candidate", None), dict) else None,
                 "mapping_strategy": getattr(step, "mapping_strategy", None),
+                "mapping_diagnostics": getattr(step, "mapping_diagnostics", None),
                 "action_string_before_mapping": getattr(step, "action_string_before_mapping", None),
                 "action_string_after_mapping": getattr(step, "action_string_after_mapping", None),
                 "fallback_used": bool(getattr(step, "fallback_used", False)),
