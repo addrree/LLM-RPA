@@ -14,6 +14,7 @@ class MiniWoBGroundingResult:
     selected_candidate: dict[str, Any] | None = None
     repeated_warning: str | None = None
     mapping_strategy: str | None = None
+    mapping_diagnostics: dict[str, Any] | None = None
 
 
 def _norm(value: Any) -> str:
@@ -53,7 +54,7 @@ def _candidate_id(candidate: dict[str, Any]) -> str:
 
 def _candidate_text_values(candidate: dict[str, Any]) -> list[str]:
     values: list[str] = []
-    for key in ("name", "text", "value", "label", "ariaLabel", "aria_label", "title"):
+    for key in ("name", "text", "value", "label", "visible_label", "ariaLabel", "aria_label", "aria-label", "title", "innerText"):
         value = candidate.get(key)
         if value is not None and str(value).strip():
             values.append(str(value).strip())
@@ -401,7 +402,7 @@ def _is_option_candidate(candidate: dict[str, Any] | None) -> bool:
         return False
     role = _norm(candidate.get("role") or candidate.get("kind"))
     tag = _norm(candidate.get("tag"))
-    return role in {"option", "menuitem", "radio"} or tag == "option"
+    return role in {"option", "listitem", "menuitem", "radio"} or tag in {"option", "li"}
 
 
 def _instruction_has_select_intent(instruction: str) -> bool:
@@ -482,6 +483,117 @@ def _select_option_supported(action_syntax: list[str] | None) -> bool:
     return any("select_option" in str(item) for item in action_syntax or [])
 
 
+def _is_submit_like(candidate: dict[str, Any] | None) -> bool:
+    return find_submit_button([candidate] if isinstance(candidate, dict) else []) is not None
+
+
+def _is_explicit_left_click(parsed: tuple[str, list[Any]] | None) -> bool:
+    if not parsed or parsed[0] != "click" or not parsed[1]:
+        return False
+    if len(parsed[1]) == 1:
+        return True
+    return _norm(parsed[1][1]) in {"", "left"}
+
+
+def _looks_like_bid_literal(value: str, parsed_response: dict[str, Any] | None = None, target_text: str = "") -> bool:
+    value = str(value or "").strip()
+    if not value:
+        return False
+    target_bid = str((parsed_response or {}).get("target_bid") or "").strip()
+    if target_bid and value == target_bid:
+        return True
+    if target_text and _norm(value) == _norm(target_text):
+        return False
+    return bool(re.search(r"\d", value) or (not re.search(r"\s", value) and re.search(r"[_.:-]", value)))
+
+
+def _candidate_matches_text(candidate: dict[str, Any] | None, target_text: str) -> bool:
+    if not isinstance(candidate, dict) or not target_text:
+        return False
+    target_n = _norm(target_text)
+    for text_value in _candidate_text_values(candidate):
+        text_n = _norm(text_value)
+        if text_n and (text_n == target_n or target_n in text_n or text_n in target_n):
+            return True
+    return False
+
+
+def _candidate_text_summary(candidate: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(candidate, dict):
+        return None
+    return {
+        "bid": real_candidate_bid(candidate) or candidate.get("bid"),
+        "bid_source": candidate.get("bid_source"),
+        "text": candidate.get("text"),
+        "name": candidate.get("name"),
+        "value": candidate.get("value"),
+        "label": candidate.get("label") or candidate.get("visible_label") or candidate.get("ariaLabel") or candidate.get("aria_label"),
+        "role": candidate.get("role"),
+        "kind": candidate.get("kind"),
+        "tag": candidate.get("tag"),
+        "selected": candidate.get("selected"),
+        "visible": candidate.get("visible"),
+    }
+
+
+def _option_candidate_texts(candidates: list[dict[str, Any]]) -> list[str]:
+    texts: list[str] = []
+    for candidate in candidates or []:
+        if _is_option_candidate(candidate):
+            text = _candidate_text(candidate)
+            if text:
+                texts.append(text)
+    return texts[:30]
+
+
+def _select_diagnostics(
+    *,
+    target_text: str,
+    candidates: list[dict[str, Any]],
+    clicked_bid: str = "",
+    clicked_candidate: dict[str, Any] | None = None,
+    decision: str = "",
+) -> dict[str, Any]:
+    return {
+        "target_option": target_text or "",
+        "option_candidates_count": sum(1 for candidate in candidates or [] if _is_option_candidate(candidate)),
+        "option_candidate_texts": _option_candidate_texts(candidates),
+        "clicked_bid": clicked_bid or "",
+        "clicked_bid_candidate": _candidate_text_summary(clicked_candidate),
+        "select_guard_decision": decision or "",
+    }
+
+
+def _selected_target_option(candidates: list[dict[str, Any]], target_text: str) -> dict[str, Any] | None:
+    for candidate in candidates or []:
+        if _is_option_candidate(candidate) and candidate.get("selected") is True and _candidate_matches_text(candidate, target_text):
+            return candidate
+    return None
+
+
+def _target_option_visible_enough(option: dict[str, Any] | None) -> bool:
+    return isinstance(option, dict) and option.get("visible", True) is not False
+
+
+def _same_select_control_repeat_error(mapped_action: str, candidate: dict[str, Any] | None, history: list[dict]) -> str | None:
+    if not _is_select_control(candidate):
+        return None
+    repeats = 0
+    for item in reversed(history or []):
+        if str(item.get("action") or "").strip() == mapped_action and float(item.get("reward") or 0) <= 0:
+            repeats += 1
+        else:
+            break
+    if repeats >= 2:
+        return "action_mapping_failure: no_progress_repeated_select repeated combobox/select click without progress"
+    return None
+
+
+def _rationale_links_bid_to_target(parsed_response: dict[str, Any], clicked_bid: str, target_text: str) -> bool:
+    haystack = _norm(" ".join(str(parsed_response.get(key) or "") for key in ("rationale", "reason", "target_text", "option_text", "option_value")))
+    return bool(clicked_bid and target_text and _norm(clicked_bid) in haystack and _norm(target_text) in haystack)
+
+
 def _history_action_target(action: str) -> str:
     parsed = _parse_call(action)
     if parsed and parsed[0] in {"click", "select_option"} and parsed[1]:
@@ -535,20 +647,125 @@ def _ground_select_intent(
     has_select_intent = _instruction_has_select_intent(instruction) or any(word in explicit_intent for word in ("select", "choose", "pick", "combobox", "dropdown", "list"))
     if not has_select_intent:
         return None
-    if not target_text:
-        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: select intent detected but target option text could not be extracted", mapping_strategy="none")
+
+    parsed_proposed = _parse_call(proposed_action)
+    clicked_raw = str(parsed_proposed[1][0]).strip() if _is_explicit_left_click(parsed_proposed) else ""
+    clicked_raw_candidate = _find_by_real_bid(candidates, clicked_raw) if clicked_raw else None
+    clicked_bid = clicked_raw if clicked_raw_candidate is not None or _looks_like_bid_literal(clicked_raw, parsed_response, target_text) else ""
+    clicked_candidate = clicked_raw_candidate if clicked_bid else None
     control = _find_select_control(candidates)
-    option = _find_option_candidate(candidates, target_text, control)
+    option = _find_option_candidate(candidates, target_text, control) if target_text else None
+    diagnostics = _select_diagnostics(
+        target_text=target_text,
+        candidates=candidates,
+        clicked_bid=clicked_bid,
+        clicked_candidate=clicked_candidate,
+        decision="evaluating_select_guard",
+    )
+
+    if clicked_bid and clicked_candidate is None:
+        diagnostics["select_guard_decision"] = "blocked_unknown_bid"
+        return MiniWoBGroundingResult(
+            action="noop()",
+            mapping_error=f"action_mapping_failure: clicked bid {clicked_bid!r} not found in candidates",
+            mapping_strategy="none",
+            mapping_diagnostics=diagnostics,
+        )
+
+    if clicked_candidate is not None and _is_submit_like(clicked_candidate) and not _selected_target_option(candidates, target_text):
+        diagnostics["select_guard_decision"] = "blocked_submit_before_option_selection"
+        return MiniWoBGroundingResult(
+            action="noop()",
+            mapping_error="action_mapping_failure: Submit/Login/Done clicked before target option selection",
+            selected_candidate=clicked_candidate,
+            mapping_strategy="none",
+            mapping_diagnostics=diagnostics,
+        )
+
+    if clicked_candidate is not None and _is_option_candidate(clicked_candidate):
+        texts = [value for value in _candidate_text_values(clicked_candidate) if str(value).strip()]
+        text_matches_target = bool(target_text and _candidate_matches_text(clicked_candidate, target_text))
+        target_known_from_instruction = bool(target_text)
+        if not target_known_from_instruction:
+            diagnostics["select_guard_decision"] = "blocked_random_option_without_target"
+            return MiniWoBGroundingResult(
+                action="noop()",
+                mapping_error="action_mapping_failure: select intent detected but target option text could not be extracted; refusing random option bid click",
+                selected_candidate=clicked_candidate,
+                mapping_strategy="none",
+                mapping_diagnostics=diagnostics,
+            )
+        if texts and not text_matches_target:
+            diagnostics["select_guard_decision"] = "blocked_option_text_mismatch"
+            return MiniWoBGroundingResult(
+                action="noop()",
+                mapping_error=f"action_mapping_failure: clicked option bid {clicked_bid!r} does not match target option {target_text!r}",
+                selected_candidate=clicked_candidate,
+                mapping_strategy="none",
+                mapping_diagnostics=diagnostics,
+            )
+        mapped = browsergym_click_action(clicked_bid, action_syntax=action_syntax)
+        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, selected_candidate=clicked_candidate, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        strategy = "select_option_bid_click" if text_matches_target else "explicit_bid_select_click_low_confidence"
+        diagnostics["select_guard_decision"] = "allowed_explicit_option_bid_click"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=clicked_candidate, mapping_strategy=strategy, mapping_diagnostics=diagnostics)
+
+    if clicked_candidate is not None and target_text and _candidate_matches_text(clicked_candidate, target_text):
+        mapped = browsergym_click_action(clicked_bid, action_syntax=action_syntax)
+        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, selected_candidate=clicked_candidate, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "allowed_explicit_bid_text_match"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=clicked_candidate, mapping_strategy="select_option_bid_click", mapping_diagnostics=diagnostics)
+
+    if clicked_candidate is not None and _is_select_control(clicked_candidate):
+        target_selected = _selected_target_option(candidates, target_text)
+        if target_selected is not None:
+            diagnostics["select_guard_decision"] = "blocked_select_control_target_already_selected"
+            return MiniWoBGroundingResult(
+                action="noop()",
+                mapping_error=f"action_mapping_failure: target option {target_text!r} is already selected; refusing repeated select control click",
+                selected_candidate=clicked_candidate,
+                mapping_strategy="none",
+                mapping_diagnostics=diagnostics,
+            )
+        if _target_option_visible_enough(option):
+            diagnostics["select_guard_decision"] = "blocked_select_control_target_option_visible"
+            return MiniWoBGroundingResult(
+                action="noop()",
+                mapping_error=f"action_mapping_failure: target option {target_text!r} is already visible; refusing select control click",
+                selected_candidate=clicked_candidate,
+                mapping_strategy="none",
+                mapping_diagnostics=diagnostics,
+            )
+        mapped = browsergym_click_action(clicked_bid, action_syntax=action_syntax)
+        loop_error = _same_select_control_repeat_error(mapped, clicked_candidate, history) or _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, selected_candidate=clicked_candidate, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "allowed_open_select_control"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=clicked_candidate, mapping_strategy="open_select_control", mapping_diagnostics=diagnostics)
+
+    if not target_text:
+        diagnostics["select_guard_decision"] = "blocked_missing_target_option"
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: select intent detected but target option text could not be extracted", mapping_strategy="none", mapping_diagnostics=diagnostics)
+
     if option is None:
+        diagnostics["select_guard_decision"] = "blocked_target_option_not_found"
         return MiniWoBGroundingResult(
             action="noop()",
             mapping_error=f"action_mapping_failure: target option {target_text!r} not found; refusing Submit/random option fallback",
             selected_candidate=control,
             mapping_strategy="none",
+            mapping_diagnostics=diagnostics,
         )
-    parsed_proposed = _parse_call(proposed_action)
+
     proposed_target = str(parsed_proposed[1][0]).strip() if parsed_proposed and parsed_proposed[1] else str(parsed_response.get("target_text") or "").strip()
-    proposed_candidate = _find_by_real_bid(candidates, proposed_target) or find_click_candidate(candidates, proposed_target) if proposed_target else None
+    proposed_candidate = (_find_by_real_bid(candidates, proposed_target) or find_click_candidate(candidates, proposed_target)) if proposed_target else None
     if option.get("selected") is True and find_submit_button([proposed_candidate] if isinstance(proposed_candidate, dict) else []):
         return None
     control_bid = real_candidate_bid(control) if control else ""
@@ -557,31 +774,41 @@ def _ground_select_intent(
         mapped = browsergym_select_option_action(control_bid, _candidate_text(option) or target_text)
         loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
         if loop_error:
-            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
-        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_select_option")
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "allowed_select_option_api"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_select_option", mapping_diagnostics=diagnostics)
     if option_bid and option.get("visible", True) is not False:
         mapped = browsergym_click_action(option_bid, action_syntax=action_syntax)
         loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
         if loop_error:
-            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
-        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_click_option")
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "allowed_found_option_bid_click"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_click_option", mapping_diagnostics=diagnostics)
     if control_bid:
         mapped = browsergym_click_action(control_bid, action_syntax=action_syntax)
-        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        loop_error = _same_select_control_repeat_error(mapped, control, history) or _should_block_repeated_select_loop(mapped, candidates, history)
         if loop_error:
-            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
-        return MiniWoBGroundingResult(action=mapped, selected_candidate=control, mapping_strategy="bid_click_select_control")
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "allowed_found_select_control_click"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=control, mapping_strategy="bid_click_select_control", mapping_diagnostics=diagnostics)
     if option_bid:
         mapped = browsergym_click_action(option_bid, action_syntax=action_syntax)
         loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
         if loop_error:
-            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
-        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_click_option")
+            diagnostics["select_guard_decision"] = "blocked_no_progress_repeated_select"
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "allowed_found_option_bid_click"
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_click_option", mapping_diagnostics=diagnostics)
+    diagnostics["select_guard_decision"] = "blocked_option_without_real_bid"
     return MiniWoBGroundingResult(
         action="noop()",
         mapping_error=f"action_mapping_failure: target option {target_text!r} found but has no real bid; refusing coordinate/random Submit fallback",
         selected_candidate=option,
         mapping_strategy="none",
+        mapping_diagnostics=diagnostics,
     )
 
 def find_submit_button(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
@@ -754,6 +981,17 @@ def ground_miniwob_action(
         else:
             break
     if repeats >= 2:
+        repeated_candidate = None
+        repeated_target = str(parsed[1][0]).strip() if parsed and parsed[0] == "click" and parsed[1] else ""
+        if repeated_target:
+            repeated_candidate = _find_by_real_bid(candidates, repeated_target)
+        if _is_select_control(repeated_candidate) or _is_option_candidate(repeated_candidate):
+            return MiniWoBGroundingResult(
+                action="noop()",
+                mapping_error="action_mapping_failure: no_progress_repeated_select repeated select/list click without progress",
+                repeated_warning="repeated select loop blocked",
+                mapping_strategy="none",
+            )
         return MiniWoBGroundingResult(
             action="noop()",
             mapping_error=f"action_mapping_failure: repeated ineffective action {before!r} without progress",

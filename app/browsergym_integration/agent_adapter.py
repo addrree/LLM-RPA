@@ -42,6 +42,7 @@ class BrowserGymAgentDecision:
     clickable_candidates_count: int | None = None
     page_candidate_extraction_failed: bool | None = None
     mapping_strategy: str | None = None
+    mapping_diagnostics: dict | None = None
     fallback_used: bool = False
     fallback_type: str | None = None
     fallback_reward: float | None = None
@@ -309,6 +310,7 @@ class BrowserGymAgentAdapter:
         before_mapping = action
         selected_candidate = None
         mapping_strategy = None
+        mapping_diagnostics = None
         if not validation_error:
             grounding = ground_miniwob_action(
                 action=action,
@@ -320,6 +322,7 @@ class BrowserGymAgentAdapter:
             action = grounding.action
             selected_candidate = grounding.selected_candidate
             mapping_strategy = grounding.mapping_strategy
+            mapping_diagnostics = grounding.mapping_diagnostics
             if grounding.mapping_error:
                 mapping_error = grounding.mapping_error
             if grounding.repeated_warning and rationale:
@@ -346,6 +349,7 @@ class BrowserGymAgentAdapter:
             clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0),
             page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
             mapping_strategy=mapping_strategy,
+            mapping_diagnostics=mapping_diagnostics,
         )
 
     def _extract_local(self, action: str, args: dict, compact_snapshot: dict, goal: str) -> str:

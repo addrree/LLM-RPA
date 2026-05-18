@@ -270,6 +270,7 @@ class BrowserGymRunner:
             clickable_candidates_count=getattr(decision, "clickable_candidates_count", None),
             page_candidate_extraction_failed=getattr(decision, "page_candidate_extraction_failed", None),
             mapping_strategy=getattr(decision, "mapping_strategy", None),
+            mapping_diagnostics=getattr(decision, "mapping_diagnostics", None),
             fallback_used=bool(getattr(decision, "fallback_used", False)),
             fallback_type=getattr(decision, "fallback_type", None),
             fallback_reward=getattr(decision, "fallback_reward", None),
