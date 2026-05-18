@@ -148,11 +148,11 @@ def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
         value = item.get(key)
         if value is not None and str(value).strip():
             out[key] = str(value).strip()
-    for key in ("role", "name", "text", "label", "tag", "type", "value", "ariaLabel", "aria_label", "title"):
+    for key in ("role", "kind", "name", "text", "label", "tag", "type", "value", "ariaLabel", "aria_label", "title", "parent_bid", "owner_bid", "select_bid", "parent_name"):
         value = item.get(key)
         if value not in (None, ""):
             out[key] = str(value).strip() if isinstance(value, str) else value
-    for key in ("enabled", "visible", "clickable", "disabled"):
+    for key in ("enabled", "visible", "clickable", "disabled", "selected"):
         if key in item:
             bool_value = _as_bool(item.get(key))
             out[key] = bool_value if bool_value is not None else item.get(key)
@@ -260,7 +260,7 @@ def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
         text = html.unescape(re.sub(r"\s+", " ", body).strip()) or attrs.get("value") or attrs.get("aria-label") or attrs.get("title") or attrs.get("name") or attrs.get("id")
         candidate = {
             "tag": tag,
-            "role": attrs.get("role") or ("button" if tag == "button" or attrs.get("type") in {"button", "submit"} else "link" if tag == "a" else "textbox" if tag in {"input", "textarea"} else ""),
+            "role": attrs.get("role") or ("button" if tag == "button" or attrs.get("type") in {"button", "submit"} else "link" if tag == "a" else "textbox" if tag in {"input", "textarea"} else "combobox" if tag == "select" else ""),
             "text": text,
             "value": attrs.get("value"),
             "label": attrs.get("aria-label"),
@@ -268,6 +268,7 @@ def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
             "name": attrs.get("name") or text,
             "visible": True,
             "enabled": "disabled" not in attrs,
+            "disabled": "disabled" in attrs,
         }
         if attrs.get("bid"):
             candidate["bid"] = attrs["bid"]
@@ -286,7 +287,37 @@ def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
             candidate["bid_source"] = "ref"
         if attrs.get("id"):
             candidate["element_id"] = attrs["id"]
-        _append_candidate(candidates, _candidate_from_dict(candidate), seen)
+        normalized_candidate = _candidate_from_dict(candidate)
+        _append_candidate(candidates, normalized_candidate, seen)
+        if tag == "select":
+            parent_bid = (normalized_candidate or {}).get("bid") or ""
+            option_re = re.compile(r"<option\b(?P<attrs>[^>]*)>(?P<body>.*?)</option>|<option\b(?P<selfattrs>[^>]*)/?>", re.IGNORECASE | re.DOTALL)
+            for option_match in option_re.finditer(match.group("body") or ""):
+                option_attrs_raw = option_match.group("attrs") or option_match.group("selfattrs") or ""
+                option_attrs = {m.group(1).lower(): html.unescape(m.group(2) or m.group(3) or m.group(4) or "") for m in attr_re.finditer(option_attrs_raw)}
+                option_body = html.unescape(re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", option_match.group("body") or "")).strip())
+                option_candidate = {
+                    "tag": "option",
+                    "role": "option",
+                    "text": option_body or option_attrs.get("label") or option_attrs.get("value"),
+                    "value": option_attrs.get("value") or option_body,
+                    "label": option_attrs.get("label"),
+                    "name": option_attrs.get("label") or option_body or option_attrs.get("value"),
+                    "parent_bid": parent_bid,
+                    "owner_bid": parent_bid,
+                    "parent_name": (normalized_candidate or {}).get("name") or (normalized_candidate or {}).get("text") or attrs.get("name") or attrs.get("id"),
+                    "selected": "selected" in option_attrs,
+                    "disabled": "disabled" in option_attrs,
+                    "enabled": "disabled" not in option_attrs,
+                    "visible": True,
+                    "clickable": True,
+                }
+                for bid_key, source_name in (("bid", "bid"), ("data-testid", "data-testid"), ("browsergym_id", "browsergym_id"), ("data-bid", "data-bid"), ("ref", "ref")):
+                    if option_attrs.get(bid_key):
+                        option_candidate["bid"] = option_attrs[bid_key]
+                        option_candidate["bid_source"] = source_name
+                        break
+                _append_candidate(candidates, _candidate_from_dict(option_candidate), seen)
     return candidates
 
 

@@ -23,6 +23,12 @@ def task_step_to_browsergym_action(step) -> str:
         if args.get("selector"):
             return f"click(selector={args['selector']!r})"
         raise UnsupportedBrowserGymActionError("click step missing supported targeting args")
+    if action == "select_option":
+        selector = args.get("selector")
+        option = args.get("option_text") if args.get("option_text") is not None else args.get("option_value", args.get("value"))
+        if not selector or option is None:
+            raise UnsupportedBrowserGymActionError("select_option requires selector and option_text/value")
+        return f"select_option(selector={selector!r}, option_text={option!r})"
     if action in {"type", "fill"}:
         selector = args.get("selector")
         text = args.get("text")

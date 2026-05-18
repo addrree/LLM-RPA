@@ -25,6 +25,8 @@ REAL_BID_SOURCES = {"bid", "data-testid", "data_testid", "browsergym_id", "data-
 FAKE_BID_SOURCES = {"id", "dom_id", "element_id", "index", "candidate_index", "node_id", "backend_node_id"}
 SUBMIT_BUTTON_NAMES = {"submit", "login", "ok", "done"}
 TEXT_INPUT_INTENTS = {"fill", "type", "enter", "input", "text", "username", "password"}
+SELECT_INTENT_WORDS = {"choose", "select", "pick"}
+SELECT_CONTAINER_WORDS = {"list", "dropdown", "drop-down", "combo", "combobox", "select", "option", "menu"}
 
 
 def real_candidate_bid(candidate: dict[str, Any] | None) -> str:
@@ -82,6 +84,10 @@ def browsergym_click_action(candidate_id: str, action_syntax: list[str] | None =
 
 def browsergym_fill_action(candidate_id: str, text: str) -> str:
     return f'fill("{_escape(candidate_id)}", "{_escape(text)}")'
+
+
+def browsergym_select_option_action(candidate_id: str, option_text: str) -> str:
+    return f'select_option("{_escape(candidate_id)}", "{_escape(option_text)}")'
 
 
 def _parse_call(action: str) -> tuple[str, list[Any]] | None:
@@ -381,6 +387,203 @@ def _instruction_requires_text_entry(instruction: str) -> bool:
     return bool(parse_quoted_strings(instruction)) and any(word in text for word in ("enter", "type", "input", "text field", "password", "username"))
 
 
+
+def _is_select_control(candidate: dict[str, Any] | None) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    role = _norm(candidate.get("role") or candidate.get("kind"))
+    tag = _norm(candidate.get("tag"))
+    return role in {"combobox", "listbox", "select"} or tag == "select"
+
+
+def _is_option_candidate(candidate: dict[str, Any] | None) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    role = _norm(candidate.get("role") or candidate.get("kind"))
+    tag = _norm(candidate.get("tag"))
+    return role in {"option", "menuitem", "radio"} or tag == "option"
+
+
+def _instruction_has_select_intent(instruction: str) -> bool:
+    text = _norm(instruction)
+    if not text:
+        return False
+    return any(re.search(rf"\b{re.escape(word)}\b", text) for word in SELECT_INTENT_WORDS) and any(word in text for word in SELECT_CONTAINER_WORDS)
+
+
+def extract_select_target_from_instruction(instruction: str, candidates: list[dict[str, Any]] | None = None) -> str:
+    text = str(instruction or "")
+    quoted = parse_quoted_strings(text)
+    if quoted:
+        return quoted[0].strip()
+    patterns = (
+        r"\b(?:choose|select|pick)\s+(?:the\s+)?(?:option|value|item)?\s*([^.,;:]+?)\s+(?:from|in|on)\s+(?:the\s+)?(?:list|dropdown|drop-down|combobox|combo|select|menu)\b",
+        r"\b(?:choose|select|pick)\s+(?:the\s+)?(?:option|value|item)\s+([^.,;:]+)",
+        r"\b(?:from|in)\s+(?:the\s+)?(?:list|dropdown|drop-down|combobox|combo|select|menu)[^.,;:]*?\b(?:choose|select|pick)\s+([^.,;:]+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text, flags=re.IGNORECASE)
+        if match:
+            value = re.sub(r"\b(?:option|value|item)\b", " ", match.group(1), flags=re.IGNORECASE)
+            value = re.sub(r"\s+", " ", value).strip(" .,:;\t")
+            if value:
+                return value
+    option_candidates = [c for c in candidates or [] if _is_option_candidate(c)]
+    instruction_n = _norm(text)
+    matches: list[tuple[int, int, str]] = []
+    for idx, candidate in enumerate(option_candidates):
+        for option_text in _candidate_text_values(candidate):
+            norm = _norm(option_text)
+            if norm and re.search(rf"(?<!\w){re.escape(norm)}(?!\w)", instruction_n):
+                matches.append((len(norm), -idx, option_text.strip()))
+    if matches:
+        matches.sort(reverse=True)
+        return matches[0][2]
+    return ""
+
+
+def _find_select_control(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
+    controls = [c for c in candidates or [] if _is_select_control(c) and c.get("disabled") is not True and c.get("enabled", True) is not False]
+    return controls[0] if controls else None
+
+
+def _candidate_parent_refs(candidate: dict[str, Any]) -> set[str]:
+    refs: set[str] = set()
+    for key in ("parent_bid", "owner_bid", "controlled_by", "controls", "listbox_bid", "select_bid"):
+        value = candidate.get(key)
+        if value not in (None, ""):
+            refs.add(str(value).strip())
+    return refs
+
+
+def _find_option_candidate(candidates: list[dict[str, Any]], target_text: str, control: dict[str, Any] | None = None) -> dict[str, Any] | None:
+    control_bid = real_candidate_bid(control) if control else ""
+    scored: list[tuple[tuple[int, float, int], int, dict[str, Any]]] = []
+    for idx, candidate in enumerate(candidates or []):
+        if not _is_option_candidate(candidate):
+            continue
+        if candidate.get("disabled") is True or candidate.get("enabled", True) is False:
+            continue
+        score = _score_candidate(candidate, target_text)
+        text_match_score = score[0] - _visible_enabled_bonus(candidate)
+        if text_match_score <= 0:
+            continue
+        if control_bid and control_bid in _candidate_parent_refs(candidate):
+            score = (score[0] + 20, score[1], score[2])
+        scored.append((score, -idx, candidate))
+    if not scored:
+        return None
+    scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
+    best_score, _, best = scored[0]
+    return best if best_score[0] >= 45 else None
+
+
+def _select_option_supported(action_syntax: list[str] | None) -> bool:
+    return any("select_option" in str(item) for item in action_syntax or [])
+
+
+def _history_action_target(action: str) -> str:
+    parsed = _parse_call(action)
+    if parsed and parsed[0] in {"click", "select_option"} and parsed[1]:
+        return str(parsed[1][0]).strip()
+    return ""
+
+
+def _should_block_repeated_select_loop(mapped_action: str, candidates: list[dict[str, Any]], history: list[dict]) -> str | None:
+    current_target = _history_action_target(mapped_action)
+    if not current_target:
+        return None
+    current_candidate = _find_by_real_bid(candidates, current_target)
+    if not (_is_select_control(current_candidate) or _is_option_candidate(current_candidate)):
+        return None
+    targets = [current_target]
+    for item in reversed(history):
+        if float(item.get("reward") or 0) > 0:
+            break
+        target = _history_action_target(str(item.get("action") or ""))
+        if not target:
+            break
+        candidate = _find_by_real_bid(candidates, target)
+        if not (_is_select_control(candidate) or _is_option_candidate(candidate)):
+            break
+        targets.append(target)
+    unique = set(targets)
+    if len(targets) >= 5 and len(unique) == 2:
+        kinds = {_norm((_find_by_real_bid(candidates, target) or {}).get("role") or (_find_by_real_bid(candidates, target) or {}).get("tag")) for target in unique}
+        if any(kind in {"combobox", "listbox", "select"} for kind in kinds) and "option" in kinds:
+            return "action_mapping_failure: no_progress_repeated_select combobox-option pair repeated without reward/progress"
+    return None
+
+
+def _ground_select_intent(
+    *,
+    proposed_action: str,
+    instruction: str,
+    parsed_response: dict[str, Any],
+    candidates: list[dict[str, Any]],
+    history: list[dict],
+    action_syntax: list[str] | None,
+) -> MiniWoBGroundingResult | None:
+    explicit_intent = _norm(parsed_response.get("intent") or parsed_response.get("action_intent") or parsed_response.get("rationale") or "")
+    target_text = str(parsed_response.get("option_text") or parsed_response.get("option_value") or "").strip()
+    if not target_text:
+        target_text = extract_select_target_from_instruction(instruction, candidates)
+    if not target_text:
+        proposed = str(parsed_response.get("target_text") or parsed_response.get("text") or parsed_response.get("value") or "").strip()
+        if proposed and _find_option_candidate(candidates, proposed):
+            target_text = proposed
+    has_select_intent = _instruction_has_select_intent(instruction) or any(word in explicit_intent for word in ("select", "choose", "pick", "combobox", "dropdown", "list"))
+    if not has_select_intent:
+        return None
+    if not target_text:
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: select intent detected but target option text could not be extracted", mapping_strategy="none")
+    control = _find_select_control(candidates)
+    option = _find_option_candidate(candidates, target_text, control)
+    if option is None:
+        return MiniWoBGroundingResult(
+            action="noop()",
+            mapping_error=f"action_mapping_failure: target option {target_text!r} not found; refusing Submit/random option fallback",
+            selected_candidate=control,
+            mapping_strategy="none",
+        )
+    parsed_proposed = _parse_call(proposed_action)
+    proposed_target = str(parsed_proposed[1][0]).strip() if parsed_proposed and parsed_proposed[1] else str(parsed_response.get("target_text") or "").strip()
+    proposed_candidate = _find_by_real_bid(candidates, proposed_target) or find_click_candidate(candidates, proposed_target) if proposed_target else None
+    if option.get("selected") is True and find_submit_button([proposed_candidate] if isinstance(proposed_candidate, dict) else []):
+        return None
+    control_bid = real_candidate_bid(control) if control else ""
+    option_bid = real_candidate_bid(option)
+    if control_bid and _select_option_supported(action_syntax):
+        mapped = browsergym_select_option_action(control_bid, _candidate_text(option) or target_text)
+        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_select_option")
+    if option_bid and option.get("visible", True) is not False:
+        mapped = browsergym_click_action(option_bid, action_syntax=action_syntax)
+        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_click_option")
+    if control_bid:
+        mapped = browsergym_click_action(control_bid, action_syntax=action_syntax)
+        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=control, mapping_strategy="bid_click_select_control")
+    if option_bid:
+        mapped = browsergym_click_action(option_bid, action_syntax=action_syntax)
+        loop_error = _should_block_repeated_select_loop(mapped, candidates, history)
+        if loop_error:
+            return MiniWoBGroundingResult(action="noop()", mapping_error=loop_error, repeated_warning="repeated select loop blocked", mapping_strategy="none")
+        return MiniWoBGroundingResult(action=mapped, selected_candidate=option, mapping_strategy="bid_click_option")
+    return MiniWoBGroundingResult(
+        action="noop()",
+        mapping_error=f"action_mapping_failure: target option {target_text!r} found but has no real bid; refusing coordinate/random Submit fallback",
+        selected_candidate=option,
+        mapping_strategy="none",
+    )
+
 def find_submit_button(candidates: list[dict[str, Any]]) -> dict[str, Any] | None:
     for candidate in candidates or []:
         if not isinstance(candidate, dict):
@@ -516,6 +719,8 @@ def _passthrough_call(parsed: tuple[str, list[Any]] | None, before: str) -> Mini
         return MiniWoBGroundingResult(action=f'focus("{_escape(args[0])}")', mapping_strategy="bid_focus")
     if name == "press" and len(args) >= 2:
         return MiniWoBGroundingResult(action=f'press("{_escape(args[0])}", "{_escape(args[1])}")', mapping_strategy="bid_press")
+    if name == "select_option" and len(args) >= 2:
+        return MiniWoBGroundingResult(action=browsergym_select_option_action(str(args[0]), str(args[1])), mapping_strategy="bid_select_option")
     if name == "keyboard_type" and len(args) >= 1:
         return MiniWoBGroundingResult(action=f'keyboard_type("{_escape(args[0])}")', mapping_strategy="keyboard_type")
     if name == "keyboard_insert_text" and len(args) >= 1:
@@ -555,6 +760,18 @@ def ground_miniwob_action(
             repeated_warning="previous action had no effect; exact repeat blocked",
             mapping_strategy="none",
         )
+
+    instruction = str(parsed_response.get("instruction") or parsed_response.get("miniwob_instruction") or parsed_response.get("task_instruction") or "")
+    select_grounding = _ground_select_intent(
+        proposed_action=before,
+        instruction=instruction,
+        parsed_response=parsed_response,
+        candidates=candidates,
+        history=history,
+        action_syntax=action_syntax,
+    )
+    if select_grounding is not None:
+        return select_grounding
 
     if parsed and parsed[0] in {"fill", "type"}:
         selected = _select_textbox_for_fill(parsed, parsed_response, candidates)
