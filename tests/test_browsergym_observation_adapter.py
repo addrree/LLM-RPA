@@ -111,3 +111,26 @@ def test_observation_adapter_preserves_browsergym_scaled_candidate_fields_and_sa
     assert candidate["browsergym_bbox"] == {"x": 30, "y": 210, "width": 20, "height": 20}
     assert candidate["custom_score"] == 7
     assert "raw_dom" not in candidate
+
+
+def test_observation_adapter_extracts_select_and_option_metadata_from_html():
+    ctx = browsergym_obs_to_page_context(
+        {
+            "pruned_html": """
+            <select bid='combo' name='city'>
+              <option bid='opt-ny' value='ny'>New York</option>
+              <option bid='opt-sf' value='sf' selected>San Francisco</option>
+            </select>
+            """
+        },
+        {},
+    )
+
+    candidates = ctx["clickable_candidates"]
+    combo = next(c for c in candidates if c.get("role") == "combobox")
+    option = next(c for c in candidates if c.get("text") == "San Francisco")
+    assert combo["bid"] == "combo"
+    assert option["bid"] == "opt-sf"
+    assert option["parent_bid"] == "combo"
+    assert option["selected"] is True
+    assert option["enabled"] is True

@@ -568,3 +568,77 @@ def test_repeated_textbox_click_no_progress_is_detected():
 
     assert result.action == "noop()"
     assert "no_progress repeated textbox click" in result.mapping_error
+
+
+def test_select_instruction_extracts_target_option():
+    from app.browsergym_integration.miniwob_grounding import extract_select_target_from_instruction
+
+    assert extract_select_target_from_instruction('Choose "Orlando" from the list.') == "Orlando"
+    assert extract_select_target_from_instruction("Select Boston from the dropdown.") == "Boston"
+
+
+def test_option_candidate_matching_text_maps_to_click_option_strategy():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"miniwob_instruction": "Choose orange from the list."},
+        candidates=[
+            {"bid": "combo", "bid_source": "bid", "role": "combobox", "text": "choices"},
+            {"bid": "opt2", "bid_source": "bid", "role": "option", "text": "orange", "parent_bid": "combo"},
+            {"bid": "submit", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+    )
+
+    assert result.action == 'click("opt2", "left")'
+    assert result.mapping_strategy == "bid_click_option"
+    assert result.selected_candidate["bid"] == "opt2"
+
+
+def test_select_option_syntax_is_used_when_supported():
+    result = ground_miniwob_action(
+        action='click("blue")',
+        parsed_response={"miniwob_instruction": "Select blue from the dropdown."},
+        candidates=[
+            {"bid": "combo", "bid_source": "bid", "role": "combobox", "text": "choices"},
+            {"bid": "opt-blue", "bid_source": "bid", "role": "option", "text": "blue", "parent_bid": "combo"},
+        ],
+        action_syntax=['select_option("bid", "option_text")'],
+    )
+
+    assert result.action == 'select_option("combo", "blue")'
+    assert result.mapping_strategy == "bid_select_option"
+
+
+def test_unknown_select_option_does_not_map_to_submit():
+    result = ground_miniwob_action(
+        action='click("Submit")',
+        parsed_response={"miniwob_instruction": "Choose purple from the list."},
+        candidates=[
+            {"bid": "combo", "bid_source": "bid", "role": "combobox", "text": "choices"},
+            {"bid": "opt2", "bid_source": "bid", "role": "option", "text": "orange", "parent_bid": "combo"},
+            {"bid": "submit", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+    )
+
+    assert result.action == "noop()"
+    assert "target option 'purple' not found" in result.mapping_error
+    assert result.mapping_strategy == "none"
+
+
+def test_repeated_combobox_option_loop_is_detected():
+    result = ground_miniwob_action(
+        action='click("green")',
+        parsed_response={"miniwob_instruction": "Choose green from the list."},
+        candidates=[
+            {"bid": "combo", "bid_source": "bid", "role": "combobox", "text": "choices"},
+            {"bid": "opt-green", "bid_source": "bid", "role": "option", "text": "green", "parent_bid": "combo"},
+        ],
+        history=[
+            {"action": 'click("combo", "left")', "reward": 0.0},
+            {"action": 'click("opt-green", "left")', "reward": 0.0},
+            {"action": 'click("combo", "left")', "reward": 0.0},
+            {"action": 'click("opt-green", "left")', "reward": 0.0},
+        ],
+    )
+
+    assert result.action == "noop()"
+    assert "no_progress_repeated_select" in result.mapping_error

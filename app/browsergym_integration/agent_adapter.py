@@ -7,7 +7,7 @@ from typing import Any
 
 from app.browsergym_integration.action_mapper import browsergym_finish_action, task_step_to_browsergym_action
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
-from app.browsergym_integration.miniwob_grounding import extract_textbox_candidates_from_observation, find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
+from app.browsergym_integration.miniwob_grounding import extract_select_target_from_instruction, extract_textbox_candidates_from_observation, find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
 from app.browsergym_integration.local_extractor import (
     extract_pattern_from_observation,
     extract_structured_items_from_observation,
@@ -97,6 +97,7 @@ class BrowserGymAgentAdapter:
                 'click("bid")',
                 'mouse_click(x, y, "left")',
                 'fill("bid", "text")',
+                'select_option("bid", "option_text")',
                 'press("bid", "Enter")',
                 'focus("bid")',
                 'clear("bid")',
@@ -167,7 +168,7 @@ class BrowserGymAgentAdapter:
             return "noop()", "action_mapping_failure: empty action"
         if normalized.lower().startswith(("finish(", "agent_finish(")):
             return "noop()", "action_mapping_failure: finish is disabled for MiniWoB; success requires reward > 0"
-        if not re.match(r"^(click|mouse_click|fill|type|press|focus|clear|keyboard_press|keyboard_type|keyboard_insert_text|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
+        if not re.match(r"^(click|mouse_click|fill|type|select_option|press|focus|clear|keyboard_press|keyboard_type|keyboard_insert_text|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
             return "noop()", f"action_mapping_failure: unsupported MiniWoB action syntax: {normalized[:120]}"
         return normalized, None
 
@@ -207,6 +208,7 @@ class BrowserGymAgentAdapter:
         login_textbox_map = map_login_textboxes(miniwob_instruction, candidates_for_state)
         text_action_hints = {
             "quoted_strings": parse_quoted_strings(miniwob_instruction),
+            "select_target_option_text": extract_select_target_from_instruction(miniwob_instruction, candidates_for_state),
             "textbox_bids_in_order": [real_candidate_bid(c) for c in textbox_candidates(candidates_for_state) if real_candidate_bid(c)],
             "login_textbox_bids": {key: real_candidate_bid(value) for key, value in login_textbox_map.items() if real_candidate_bid(value)},
             "submit_or_login_bid": real_candidate_bid(submit_candidate) if submit_candidate else "",
@@ -252,6 +254,9 @@ class BrowserGymAgentAdapter:
             "Do not treat raw DOM id as BrowserGym bid unless it is explicitly from bid/ref/data-testid/browsergym_id/data-bid. "
             "Coordinates in clickable_candidates include browsergym_center_x/browsergym_center_y; use those for BrowserGym mouse_click and do not use page_center_x/page_center_y directly. "
             "If candidates include a button with name/text matching the instruction, choose that candidate. "
+            "For list/select/combobox tasks, first identify the target option text from the instruction. "
+            "Prefer selecting the target option by real bid; do not click Submit before the requested option is selected. "
+            "If no target option is found, return noop() with target_text set to the missing option. "
             "Return STRICT JSON only with keys rationale, target_text, target_bid, and action."
         )
         user_prompt = (
@@ -274,6 +279,12 @@ class BrowserGymAgentAdapter:
             "Do NOT use page_center_x/page_center_y directly for BrowserGym mouse_click. If no scaled coordinates are present, fall back to action-space center_x/center_y. "
             "Do NOT return click(submit) unless the action_space explicitly says text labels are valid.\n"
             "If clickable_candidates contains a button whose name/text/label matches target_text and has a real bid, set target_bid to that candidate bid and use it in action.\n"
+            "For list/select/combobox tasks:\n"
+            "- First identify the requested option text from task_instruction.\n"
+            "- Prefer selecting/clicking the target option by its real bid.\n"
+            "- Do not alternate between combobox and option without progress.\n"
+            "- Do not click Submit before the requested option is selected.\n"
+            "- If no target option is found in clickable_candidates, return noop() rather than clicking Submit/random option.\n"
             "Do not repeat exactly the same previous action after reward=0 unless new evidence changed.\n"
             "If unsure, choose the safest grounded interaction; use noop() only when no valid grounded action is possible.\n\n"
             f"Current state JSON:\n{json.dumps(current_state, ensure_ascii=False, indent=2)}\n\n"

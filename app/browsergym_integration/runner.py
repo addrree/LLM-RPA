@@ -136,7 +136,7 @@ class BrowserGymRunner:
         () => {
           const selectors = [
             'button','input[type=button]','input[type=submit]','input[type=checkbox]','input[type=radio]',
-            'a','select','textarea','[role=button]','[role=link]','[onclick]','label'
+            'a','select','select option','textarea','[role=button]','[role=link]','[role=option]','[onclick]','label'
           ];
           const seen = new Set();
           return Array.from(document.querySelectorAll(selectors.join(','))).map((el) => {
@@ -145,7 +145,9 @@ class BrowserGymRunner:
             const rect = el.getBoundingClientRect();
             const style = window.getComputedStyle(el);
             const visible = !!(rect.width || rect.height) && style.visibility !== 'hidden' && style.display !== 'none';
-            const text = (el.innerText || el.value || el.getAttribute('aria-label') || el.title || el.name || el.id || '').trim();
+            const isOption = el.tagName.toLowerCase() === 'option';
+            const parentSelect = isOption ? el.closest('select') : null;
+            const text = (el.innerText || el.label || el.value || el.getAttribute('aria-label') || el.title || el.name || el.id || '').trim();
             const bid = el.getAttribute('bid');
             const dataTestId = el.getAttribute('data-testid');
             const browsergymId = el.getAttribute('browsergym_id');
@@ -156,7 +158,8 @@ class BrowserGymRunner:
             return {
               tag: el.tagName.toLowerCase(),
               type: el.getAttribute('type') || '',
-              role: el.getAttribute('role') || '',
+              role: el.getAttribute('role') || (el.tagName.toLowerCase() === 'select' ? 'combobox' : (el.tagName.toLowerCase() === 'option' ? 'option' : '')),
+              kind: el.tagName.toLowerCase() === 'select' ? 'select' : (el.tagName.toLowerCase() === 'option' ? 'option' : ''),
               text,
               value: el.value || '',
               ariaLabel: el.getAttribute('aria-label') || '',
@@ -168,6 +171,10 @@ class BrowserGymRunner:
               browsergymId: browsergymId || '',
               dataBid: dataBid || '',
               ref: ref || '',
+              parent_bid: parentSelect ? (parentSelect.getAttribute('bid') || parentSelect.getAttribute('data-testid') || parentSelect.getAttribute('browsergym_id') || parentSelect.getAttribute('data-bid') || parentSelect.getAttribute('ref') || '') : '',
+              owner_bid: parentSelect ? (parentSelect.getAttribute('bid') || parentSelect.getAttribute('data-testid') || parentSelect.getAttribute('browsergym_id') || parentSelect.getAttribute('data-bid') || parentSelect.getAttribute('ref') || '') : '',
+              parent_name: parentSelect ? (parentSelect.getAttribute('name') || parentSelect.id || parentSelect.getAttribute('aria-label') || '') : '',
+              selected: !!el.selected,
               disabled: !!el.disabled,
               enabled: !el.disabled,
               visible,

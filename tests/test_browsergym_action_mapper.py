@@ -38,3 +38,8 @@ def test_press_mapping():
 
 def test_scroll_mapping():
     assert task_step_to_browsergym_action({"action": "scroll", "args": {"direction": "down"}}) == "scroll(direction='down')"
+
+
+def test_select_option_mapping():
+    action = task_step_to_browsergym_action({"action": "select_option", "args": {"selector": "#city", "option_text": "Paris"}})
+    assert action == "select_option(selector='#city', option_text='Paris')"
