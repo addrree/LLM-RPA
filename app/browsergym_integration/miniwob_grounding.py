@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import ast
 import json
 import re
 from difflib import SequenceMatcher
@@ -19,6 +20,42 @@ class MiniWoBGroundingResult:
 
 def _norm(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def normalize_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "").strip()).casefold()
+
+
+def normalize_candidate_value(value: Any) -> str:
+    if isinstance(value, dict):
+        for key in ("value", "name", "text", "label"):
+            if key in value and value.get(key) not in (None, ""):
+                return normalize_candidate_value(value.get(key))
+        return ""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                parsed = ast.literal_eval(stripped)
+            except Exception:
+                parsed = None
+            if isinstance(parsed, dict):
+                return normalize_candidate_value(parsed)
+        return re.sub(r"\s+", " ", stripped)
+    if value is None:
+        return ""
+    return re.sub(r"\s+", " ", str(value).strip())
+
+
+def _candidate_normalized_text(candidate: dict[str, Any] | None) -> str:
+    if not isinstance(candidate, dict):
+        return ""
+    for key in ("value", "name", "text", "label"):
+        if key in candidate and candidate.get(key) not in (None, ""):
+            text = normalize_candidate_value(candidate.get(key))
+            if text:
+                return text
+    return ""
 
 
 REAL_BID_KEYS = ("bid", "data-testid", "data_testid", "browsergym_id", "data-bid", "data_bid", "ref")
@@ -508,10 +545,10 @@ def _select_control_current_value(candidate: dict[str, Any] | None) -> str:
 def _select_control_has_target_value(candidate: dict[str, Any] | None, target_text: str) -> bool:
     if not isinstance(candidate, dict) or not target_text:
         return False
-    target_n = _norm(target_text)
+    target_n = normalize_text(target_text)
     for key in ("value", "selected_value", "current_value", "name", "text", "label"):
         value = candidate.get(key)
-        if value not in (None, "") and not isinstance(value, bool) and _norm(value) == target_n:
+        if value not in (None, "") and not isinstance(value, bool) and normalize_text(normalize_candidate_value(value)) == target_n:
             return True
     return False
 
@@ -565,7 +602,7 @@ def _looks_like_bid_literal(value: str, parsed_response: dict[str, Any] | None =
     target_bid = str((parsed_response or {}).get("target_bid") or "").strip()
     if target_bid and value == target_bid:
         return True
-    if target_text and _norm(value) == _norm(target_text):
+    if target_text and _norm(value) == normalize_text(target_text):
         return False
     return bool(re.search(r"\d", value) or (not re.search(r"\s", value) and re.search(r"[_.:-]", value)))
 
@@ -573,7 +610,7 @@ def _looks_like_bid_literal(value: str, parsed_response: dict[str, Any] | None =
 def _candidate_matches_text(candidate: dict[str, Any] | None, target_text: str) -> bool:
     if not isinstance(candidate, dict) or not target_text:
         return False
-    target_n = _norm(target_text)
+    target_n = normalize_text(target_text)
     for text_value in _candidate_text_values(candidate):
         text_n = _norm(text_value)
         if text_n and (text_n == target_n or target_n in text_n or text_n in target_n):
@@ -648,7 +685,7 @@ def _same_select_control_repeat_error(mapped_action: str, candidate: dict[str, A
 
 def _rationale_links_bid_to_target(parsed_response: dict[str, Any], clicked_bid: str, target_text: str) -> bool:
     haystack = _norm(" ".join(str(parsed_response.get(key) or "") for key in ("rationale", "reason", "target_text", "option_text", "option_value")))
-    return bool(clicked_bid and target_text and _norm(clicked_bid) in haystack and _norm(target_text) in haystack)
+    return bool(clicked_bid and target_text and _norm(clicked_bid) in haystack and normalize_text(target_text) in haystack)
 
 
 def _history_action_target(action: str) -> str:
@@ -702,6 +739,8 @@ def _ground_select_intent(
         if proposed and _find_option_candidate(candidates, proposed):
             target_text = proposed
     has_select_intent = _instruction_has_select_intent(instruction) or any(word in explicit_intent for word in ("select", "choose", "pick", "combobox", "dropdown", "list"))
+    instruction_n = normalize_text(instruction)
+    requires_submit_click = any(token in instruction_n for token in ("submit", "login", "done", "click submit", "press submit"))
     if not has_select_intent:
         return None
 
@@ -716,7 +755,10 @@ def _ground_select_intent(
     option_text = _candidate_text(option) if option else target_text
     submit_candidate = find_submit_button(candidates)
     current_value = _select_control_current_value(control)
-    selected = _selected_target_option(candidates, target_text)
+    normalized_current_value = normalize_candidate_value(current_value)
+    normalized_target_text = normalize_text(target_text)
+    selected_value_matches_target = normalize_text(normalized_current_value) == normalized_target_text if normalized_current_value and normalized_target_text else False
+    selected = _selected_target_option(candidates, target_text) if selected_value_matches_target else None
     diagnostics = _select_diagnostics(
         target_text=target_text,
         candidates=candidates,
@@ -728,7 +770,8 @@ def _ground_select_intent(
         {
             "select_control_bid": control_bid,
             "current_select_value_before": current_value,
-            "selected_value_matches_target": bool(selected),
+            "normalized_current_select_value": normalized_current_value,
+            "selected_value_matches_target": bool(selected_value_matches_target),
             "submit_candidate": _candidate_text_summary(submit_candidate),
         }
     )
@@ -749,14 +792,20 @@ def _ground_select_intent(
     proposed_target = str(parsed_proposed[1][0]).strip() if parsed_proposed and parsed_proposed[1] else str(parsed_response.get("target_text") or "").strip()
     proposed_candidate = (_find_by_real_bid(candidates, proposed_target) or find_click_candidate(candidates, proposed_target)) if proposed_target else None
     is_submit_attempt = bool(clicked_candidate is not None and _is_submit_like(clicked_candidate)) or bool(find_submit_button([proposed_candidate] if isinstance(proposed_candidate, dict) else []))
-    if is_submit_attempt and selected is not None:
-        return None
-
-    if is_submit_attempt:
+    if is_submit_attempt and requires_submit_click:
+        diagnostics["clicked_bid_candidate_text"] = _candidate_normalized_text(clicked_candidate)
+        diagnostics["clicked_bid_candidate_role"] = normalize_candidate_value((clicked_candidate or {}).get("role"))
+        if selected_value_matches_target and clicked_bid:
+            diagnostics["submit_allowed"] = True
+            diagnostics["select_guard_decision"] = "allow_submit_after_match"
+            return MiniWoBGroundingResult(action=browsergym_click_action(clicked_bid, action_syntax=action_syntax), mapping_strategy="select_submit_after_match", mapping_diagnostics=diagnostics)
+        diagnostics["submit_allowed"] = False
         candidate_action = browsergym_select_option_action(control_bid, option_text or target_text, action_syntax=action_syntax) if control_bid and _select_option_supported(action_syntax) else ""
         if candidate_action and any(str(item.get("action") or "").strip() == candidate_action and float(item.get("reward") or 0) <= 0 for item in reversed(history or [])):
             diagnostics["select_guard_decision"] = "blocked_submit_after_select_option_no_state_change"
             return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: select_option_no_state_change", selected_candidate=control, repeated_warning="select_option did not change selected value", mapping_strategy="select_option_control", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "blocked_submit_before_select"
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: submit_before_select", selected_candidate=control, mapping_strategy="select_option_control", mapping_diagnostics=diagnostics)
 
     if not control_bid:
         diagnostics["select_guard_decision"] = "blocked_missing_select_control"
@@ -767,6 +816,15 @@ def _ground_select_intent(
         return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: select_option_unsupported", selected_candidate=control, mapping_strategy="none", mapping_diagnostics=diagnostics)
 
     mapped = browsergym_select_option_action(control_bid, option_text or target_text, action_syntax=action_syntax)
+    if selected_value_matches_target:
+        diagnostics["submit_allowed"] = bool(submit_candidate)
+        if submit_candidate:
+            submit_bid = real_candidate_bid(submit_candidate)
+            if submit_bid:
+                diagnostics["select_guard_decision"] = "map_redundant_select_to_submit"
+                return MiniWoBGroundingResult(action=browsergym_click_action(submit_bid, action_syntax=action_syntax), mapping_strategy="select_submit_after_match", mapping_diagnostics=diagnostics)
+        diagnostics["select_guard_decision"] = "target_selected_waiting_for_submit"
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: target_selected_waiting_for_submit", selected_candidate=control, mapping_strategy="select_option_control", mapping_diagnostics=diagnostics)
     progress_error = _select_option_no_progress_error(mapped, control, target_text, history)
     if progress_error:
         diagnostics["select_guard_decision"] = "blocked_select_option_no_progress"
