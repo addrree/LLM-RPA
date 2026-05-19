@@ -134,3 +134,6 @@ def test_observation_adapter_extracts_select_and_option_metadata_from_html():
     assert option["parent_bid"] == "combo"
     assert option["selected"] is True
     assert option["enabled"] is True
+    assert ctx["select_control_candidates"][0]["bid"] == "combo"
+    assert {candidate["bid"] for candidate in ctx["option_candidates"]} == {"opt-ny", "opt-sf"}
+    assert ctx["submit_candidates"] == []

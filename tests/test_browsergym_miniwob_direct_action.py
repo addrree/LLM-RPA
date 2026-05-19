@@ -578,7 +578,7 @@ def test_select_instruction_extracts_target_option():
     assert extract_select_target_from_instruction("Select Azerbaijan from the list and click Submit.") == "Azerbaijan"
 
 
-def test_option_candidate_matching_text_maps_to_click_option_strategy():
+def test_option_candidate_matching_text_maps_to_select_option_control_strategy():
     result = ground_miniwob_action(
         action='click("Submit")',
         parsed_response={"miniwob_instruction": "Choose orange from the list."},
@@ -587,11 +587,12 @@ def test_option_candidate_matching_text_maps_to_click_option_strategy():
             {"bid": "opt2", "bid_source": "bid", "role": "option", "text": "orange", "parent_bid": "combo"},
             {"bid": "submit", "bid_source": "bid", "role": "button", "text": "Submit"},
         ],
+        action_syntax=['select_option("bid", "option_text")'],
     )
 
-    assert result.action == 'click("opt2", "left")'
-    assert result.mapping_strategy == "bid_click_option"
-    assert result.selected_candidate["bid"] == "opt2"
+    assert result.action == 'select_option("combo", "orange")'
+    assert result.mapping_strategy == "select_option_control"
+    assert result.selected_candidate["bid"] == "combo"
 
 
 
@@ -607,11 +608,12 @@ def test_explicit_option_bid_click_is_allowed_when_option_lookup_would_fail():
             {"bid": "19", "bid_source": "bid", "role": "option", "text": "", "parent_bid": "13"},
             {"bid": "20", "bid_source": "bid", "role": "button", "text": "Submit"},
         ],
+        action_syntax=['select_option("bid", "option_text")'],
     )
 
-    assert result.action == 'click("19", "left")'
-    assert result.mapping_strategy == "explicit_bid_select_click_low_confidence"
-    assert result.selected_candidate["bid"] == "19"
+    assert result.action == 'select_option("13", "Azerbaijan")'
+    assert result.mapping_strategy == "select_option_control"
+    assert result.selected_candidate["bid"] == "13"
     assert result.mapping_error is None
     assert result.mapping_diagnostics["target_option"] == "Azerbaijan"
     assert result.mapping_diagnostics["clicked_bid"] == "19"
@@ -625,11 +627,12 @@ def test_explicit_option_bid_click_with_matching_text_uses_select_option_strateg
             {"bid": "13", "bid_source": "bid", "role": "combobox", "text": "countries"},
             {"bid": "19", "bid_source": "bid", "role": "option", "text": "Azerbaijan", "parent_bid": "13"},
         ],
+        action_syntax=['select_option("bid", "option_text")'],
     )
 
-    assert result.action == 'click("19", "left")'
-    assert result.mapping_strategy == "select_option_bid_click"
-    assert result.selected_candidate["text"] == "Azerbaijan"
+    assert result.action == 'select_option("13", "Azerbaijan")'
+    assert result.mapping_strategy == "select_option_control"
+    assert result.selected_candidate["bid"] == "13"
 
 
 def test_unknown_explicit_select_bid_is_blocked():
@@ -655,8 +658,7 @@ def test_submit_before_select_option_is_blocked_even_with_explicit_bid():
     )
 
     assert result.action == "noop()"
-    assert "Submit/Login/Done clicked before target option selection" in result.mapping_error
-    assert result.selected_candidate["bid"] == "20"
+    assert "missing_select_control" in result.mapping_error
 
 
 def test_repeated_combobox_open_click_no_progress_is_detected():
@@ -685,7 +687,8 @@ def test_select_option_syntax_is_used_when_supported():
     )
 
     assert result.action == 'select_option("combo", "blue")'
-    assert result.mapping_strategy == "bid_select_option"
+    assert result.mapping_strategy == "select_option_control"
+    assert result.selected_candidate["bid"] == "combo"
 
 
 def test_unknown_select_option_does_not_map_to_submit():
@@ -697,11 +700,11 @@ def test_unknown_select_option_does_not_map_to_submit():
             {"bid": "opt2", "bid_source": "bid", "role": "option", "text": "orange", "parent_bid": "combo"},
             {"bid": "submit", "bid_source": "bid", "role": "button", "text": "Submit"},
         ],
+        action_syntax=['select_option("bid", "option_text")'],
     )
 
-    assert result.action == "noop()"
-    assert "target option 'purple' not found" in result.mapping_error
-    assert result.mapping_strategy == "none"
+    assert result.action == 'select_option("combo", "purple")'
+    assert result.mapping_strategy == "select_option_control"
 
 
 def test_repeated_combobox_option_loop_is_detected():
@@ -713,12 +716,104 @@ def test_repeated_combobox_option_loop_is_detected():
             {"bid": "opt-green", "bid_source": "bid", "role": "option", "text": "green", "parent_bid": "combo"},
         ],
         history=[
-            {"action": 'click("combo", "left")', "reward": 0.0},
-            {"action": 'click("opt-green", "left")', "reward": 0.0},
-            {"action": 'click("combo", "left")', "reward": 0.0},
-            {"action": 'click("opt-green", "left")', "reward": 0.0},
+            {"action": 'select_option("combo", "green")', "reward": 0.0},
+            {"action": 'select_option("combo", "green")', "reward": 0.0},
         ],
+        action_syntax=['select_option("bid", "option_text")'],
     )
 
     assert result.action == "noop()"
-    assert "no_progress_repeated_select" in result.mapping_error
+    assert "select_option_no_progress" in result.mapping_error
+
+
+def test_choose_list_instruction_extracts_denmark_target_option():
+    from app.browsergym_integration.miniwob_grounding import extract_select_target_from_instruction
+
+    assert extract_select_target_from_instruction("Select Denmark from the list and click Submit.") == "Denmark"
+
+
+def test_choose_list_control_bid_maps_to_select_option_list_syntax():
+    result = ground_miniwob_action(
+        action='click("16", "left")',
+        parsed_response={"miniwob_instruction": "Select Denmark from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": "Latvia", "text": "countries"},
+            {"bid": "16", "bid_source": "bid", "role": "option", "text": "Denmark", "parent_bid": "13"},
+            {"bid": "20", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+        action_syntax=['select_option("bid", ["option_text"])'],
+    )
+
+    assert result.action == 'select_option("13", ["Denmark"])'
+    assert result.mapping_strategy == "select_option_control"
+    assert result.selected_candidate["bid"] == "13"
+    assert result.mapping_diagnostics["target_option"] == "Denmark"
+    assert result.mapping_diagnostics["select_control_bid"] == "13"
+    assert result.mapping_diagnostics["current_select_value_before"] == "Latvia"
+
+
+def test_choose_list_combobox_click_is_overridden_to_select_option_control():
+    result = ground_miniwob_action(
+        action='click("13", "left")',
+        parsed_response={"miniwob_instruction": "Select Denmark from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": {"value": "combobox"}, "value": "Latvia"},
+            {"bid": "16", "bid_source": "bid", "role": "option", "text": "Denmark", "parent_bid": "13"},
+        ],
+        action_syntax=['select_option("bid", "option_text")'],
+    )
+
+    assert result.action == 'select_option("13", "Denmark")'
+    assert result.mapping_strategy == "select_option_control"
+
+
+def test_choose_list_submit_allowed_after_control_value_equals_target():
+    result = ground_miniwob_action(
+        action='click("20", "left")',
+        parsed_response={"miniwob_instruction": "Select Denmark from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": "Denmark"},
+            {"bid": "20", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+        action_syntax=['select_option("bid", "option_text")'],
+    )
+
+    assert result.action == 'click("20", "left")'
+    assert result.mapping_strategy == "bid_click"
+
+
+def test_choose_list_submit_after_failed_select_option_reports_no_state_change():
+    result = ground_miniwob_action(
+        action='click("20", "left")',
+        parsed_response={"miniwob_instruction": "Select Denmark from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": "Latvia"},
+            {"bid": "16", "bid_source": "bid", "role": "option", "text": "Denmark", "parent_bid": "13"},
+            {"bid": "20", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+        history=[{"action": 'select_option("13", "Denmark")', "reward": 0.0}],
+        action_syntax=['select_option("bid", "option_text")'],
+    )
+
+    assert result.action == "noop()"
+    assert "select_option_no_state_change" in result.mapping_error
+    assert result.mapping_strategy == "select_option_control"
+
+
+def test_choose_list_select_option_no_progress_stops_after_two_attempts():
+    result = ground_miniwob_action(
+        action='click("16", "left")',
+        parsed_response={"miniwob_instruction": "Select Denmark from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": "Latvia"},
+            {"bid": "16", "bid_source": "bid", "role": "option", "text": "Denmark", "parent_bid": "13"},
+        ],
+        history=[
+            {"action": 'select_option("13", "Denmark")', "reward": 0.0},
+            {"action": 'select_option("13", "Denmark")', "reward": 0.0},
+        ],
+        action_syntax=['select_option("bid", "option_text")'],
+    )
+
+    assert result.action == "noop()"
+    assert "select_option_no_progress" in result.mapping_error
