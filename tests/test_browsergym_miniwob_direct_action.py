@@ -658,7 +658,7 @@ def test_submit_before_select_option_is_blocked_even_with_explicit_bid():
     )
 
     assert result.action == "noop()"
-    assert "missing_select_control" in result.mapping_error
+    assert "submit_before_select" in result.mapping_error
 
 
 def test_repeated_combobox_open_click_no_progress_is_detected():
@@ -779,7 +779,7 @@ def test_choose_list_submit_allowed_after_control_value_equals_target():
     )
 
     assert result.action == 'click("20", "left")'
-    assert result.mapping_strategy == "bid_click"
+    assert result.mapping_strategy == "select_submit_after_match"
 
 
 def test_choose_list_submit_after_failed_select_option_reports_no_state_change():
@@ -817,3 +817,61 @@ def test_choose_list_select_option_no_progress_stops_after_two_attempts():
 
     assert result.action == "noop()"
     assert "select_option_no_progress" in result.mapping_error
+
+
+def test_normalize_candidate_value_dict_and_stringified_dict():
+    from app.browsergym_integration.miniwob_grounding import normalize_candidate_value
+
+    assert normalize_candidate_value({"type": "string", "value": "Alfreda"}) == "Alfreda"
+    assert normalize_candidate_value("{'type': 'string', 'value': 'Alfreda'}") == "Alfreda"
+
+
+def test_choose_list_selected_value_match_with_dict_value_allows_submit():
+    result = ground_miniwob_action(
+        action='click("20", "left")',
+        parsed_response={"miniwob_instruction": "Select Alfreda from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": {"type": "string", "value": "Alfreda"}},
+            {"bid": "20", "bid_source": "bid", "role": "button", "name": {"type": "computedString", "value": "Submit"}},
+        ],
+        action_syntax=['select_option("bid", ["option_text"])'],
+    )
+
+    assert result.action == 'click("20", "left")'
+    assert result.mapping_strategy == "select_submit_after_match"
+    assert result.mapping_diagnostics["selected_value_matches_target"] is True
+
+
+def test_choose_list_submit_blocked_when_selected_value_not_matching_target():
+    result = ground_miniwob_action(
+        action='click("20", "left")',
+        parsed_response={"miniwob_instruction": "Select Alfreda from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": {"type": "string", "value": "Gavra"}},
+            {"bid": "20", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+        action_syntax=['select_option("bid", ["option_text"])'],
+    )
+
+    assert result.action == "noop()"
+    assert "submit_before_select" in (result.mapping_error or "")
+
+
+def test_select_option_no_progress_not_triggered_when_target_already_selected():
+    result = ground_miniwob_action(
+        action='click("16", "left")',
+        parsed_response={"miniwob_instruction": "Select Alfreda from the list and click Submit."},
+        candidates=[
+            {"bid": "13", "bid_source": "bid", "role": "combobox", "value": {"type": "string", "value": "Alfreda"}},
+            {"bid": "16", "bid_source": "bid", "role": "option", "text": "Alfreda", "parent_bid": "13"},
+            {"bid": "20", "bid_source": "bid", "role": "button", "text": "Submit"},
+        ],
+        history=[
+            {"action": 'select_option("13", ["Alfreda"])', "reward": 0.0},
+            {"action": 'select_option("13", ["Alfreda"])', "reward": 0.0},
+        ],
+        action_syntax=['select_option("bid", ["option_text"])'],
+    )
+
+    assert "select_option_no_progress" not in (result.mapping_error or "")
+    assert result.action == 'click("20", "left")'
