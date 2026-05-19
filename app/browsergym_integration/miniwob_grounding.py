@@ -47,6 +47,10 @@ def normalize_candidate_value(value: Any) -> str:
     return re.sub(r"\s+", " ", str(value).strip())
 
 
+def normalize_candidate_text(value: Any) -> str:
+    return normalize_text(normalize_candidate_value(value))
+
+
 def _candidate_normalized_text(candidate: dict[str, Any] | None) -> str:
     if not isinstance(candidate, dict):
         return ""
@@ -62,6 +66,7 @@ REAL_BID_KEYS = ("bid", "data-testid", "data_testid", "browsergym_id", "data-bid
 REAL_BID_SOURCES = {"bid", "data-testid", "data_testid", "browsergym_id", "data-bid", "data_bid", "ref"}
 FAKE_BID_SOURCES = {"id", "dom_id", "element_id", "index", "candidate_index", "node_id", "backend_node_id"}
 SUBMIT_BUTTON_NAMES = {"submit", "login", "ok", "done"}
+SUBMIT_BUTTON_ALIASES = SUBMIT_BUTTON_NAMES | {"go"}
 TEXT_INPUT_INTENTS = {"fill", "type", "enter", "input", "text", "username", "password"}
 SELECT_INTENT_WORDS = {"choose", "select", "pick"}
 SELECT_CONTAINER_WORDS = {"list", "dropdown", "drop-down", "combo", "combobox", "select", "option", "menu"}
@@ -583,8 +588,23 @@ def _select_option_no_progress_error(mapped_action: str, control: dict[str, Any]
     return None
 
 
+def is_submit_like_candidate(candidate: dict[str, Any] | None) -> bool:
+    if not isinstance(candidate, dict):
+        return False
+    role = normalize_candidate_text(candidate.get("role"))
+    kind = normalize_candidate_text(candidate.get("kind"))
+    tag = normalize_candidate_text(candidate.get("tag"))
+    typ = normalize_candidate_text(candidate.get("type"))
+    if role != "button" and kind != "button" and tag != "button" and typ not in {"button", "submit"}:
+        return False
+    for key in ("name", "text", "value", "label", "visible_label", "ariaLabel", "aria_label", "aria-label", "title", "innerText"):
+        if normalize_candidate_text(candidate.get(key)) in SUBMIT_BUTTON_ALIASES:
+            return True
+    return False
+
+
 def _is_submit_like(candidate: dict[str, Any] | None) -> bool:
-    return find_submit_button([candidate] if isinstance(candidate, dict) else []) is not None
+    return is_submit_like_candidate(candidate)
 
 
 def _is_explicit_left_click(parsed: tuple[str, list[Any]] | None) -> bool:
@@ -797,6 +817,8 @@ def _ground_select_intent(
         diagnostics["clicked_bid_candidate_role"] = normalize_candidate_value((clicked_candidate or {}).get("role"))
         if selected_value_matches_target and clicked_bid:
             diagnostics["submit_allowed"] = True
+            diagnostics["submit_source"] = "clicked_bid_candidate"
+            diagnostics["selected_candidate_bid"] = clicked_bid
             diagnostics["select_guard_decision"] = "allow_submit_after_match"
             return MiniWoBGroundingResult(action=browsergym_click_action(clicked_bid, action_syntax=action_syntax), mapping_strategy="select_submit_after_match", mapping_diagnostics=diagnostics)
         diagnostics["submit_allowed"] = False
@@ -817,10 +839,22 @@ def _ground_select_intent(
 
     mapped = browsergym_select_option_action(control_bid, option_text or target_text, action_syntax=action_syntax)
     if selected_value_matches_target:
+        if clicked_bid and is_submit_like_candidate(clicked_candidate):
+            diagnostics["submit_allowed"] = True
+            diagnostics["submit_source"] = "clicked_bid_candidate"
+            diagnostics["selected_candidate_bid"] = clicked_bid
+            diagnostics["select_guard_decision"] = "allow_submit_after_match"
+            return MiniWoBGroundingResult(
+                action=browsergym_click_action(clicked_bid, action_syntax=action_syntax),
+                selected_candidate=clicked_candidate,
+                mapping_strategy="select_submit_after_match",
+                mapping_diagnostics=diagnostics,
+            )
         diagnostics["submit_allowed"] = bool(submit_candidate)
         if submit_candidate:
             submit_bid = real_candidate_bid(submit_candidate)
             if submit_bid:
+                diagnostics["submit_source"] = "submit_candidate"
                 diagnostics["select_guard_decision"] = "map_redundant_select_to_submit"
                 return MiniWoBGroundingResult(action=browsergym_click_action(submit_bid, action_syntax=action_syntax), mapping_strategy="select_submit_after_match", mapping_diagnostics=diagnostics)
         diagnostics["select_guard_decision"] = "target_selected_waiting_for_submit"
@@ -844,13 +878,13 @@ def find_submit_button(candidates: list[dict[str, Any]]) -> dict[str, Any] | Non
     for candidate in candidates or []:
         if not isinstance(candidate, dict):
             continue
-        role = _norm(candidate.get("role"))
-        tag = _norm(candidate.get("tag"))
-        typ = _norm(candidate.get("type"))
+        role = normalize_candidate_text(candidate.get("role"))
+        tag = normalize_candidate_text(candidate.get("tag"))
+        typ = normalize_candidate_text(candidate.get("type"))
         if role != "button" and tag != "button" and typ not in {"button", "submit"}:
             continue
-        names = {_norm(value) for value in _candidate_text_values(candidate)}
-        if names & SUBMIT_BUTTON_NAMES:
+        names = {normalize_candidate_text(value) for value in _candidate_text_values(candidate)}
+        if names & SUBMIT_BUTTON_ALIASES:
             return candidate
     return None
 
