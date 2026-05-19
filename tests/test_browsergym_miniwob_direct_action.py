@@ -820,10 +820,17 @@ def test_choose_list_select_option_no_progress_stops_after_two_attempts():
 
 
 def test_normalize_candidate_value_dict_and_stringified_dict():
-    from app.browsergym_integration.miniwob_grounding import normalize_candidate_value
+    from app.browsergym_integration.miniwob_grounding import normalize_candidate_text, normalize_candidate_value
 
     assert normalize_candidate_value({"type": "string", "value": "Alfreda"}) == "Alfreda"
     assert normalize_candidate_value("{'type': 'string', 'value': 'Alfreda'}") == "Alfreda"
+    assert normalize_candidate_text({"type": "computedString", "value": "Submit"}) == "submit"
+
+
+def test_is_submit_like_candidate_accepts_button_with_submit_name():
+    from app.browsergym_integration.miniwob_grounding import is_submit_like_candidate
+
+    assert is_submit_like_candidate({"role": {"value": "button"}, "name": {"value": "Submit"}}) is True
 
 
 def test_choose_list_selected_value_match_with_dict_value_allows_submit():
@@ -840,6 +847,8 @@ def test_choose_list_selected_value_match_with_dict_value_allows_submit():
     assert result.action == 'click("20", "left")'
     assert result.mapping_strategy == "select_submit_after_match"
     assert result.mapping_diagnostics["selected_value_matches_target"] is True
+    assert result.mapping_diagnostics["submit_allowed"] is True
+    assert result.mapping_diagnostics["submit_source"] == "clicked_bid_candidate"
 
 
 def test_choose_list_submit_blocked_when_selected_value_not_matching_target():
