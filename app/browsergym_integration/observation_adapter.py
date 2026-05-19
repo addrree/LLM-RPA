@@ -321,6 +321,40 @@ def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
     return candidates
 
 
+
+def _role_text(candidate: dict[str, Any]) -> str:
+    role = candidate.get("role")
+    if isinstance(role, dict):
+        return str(role.get("value") or role.get("name") or "").strip().lower()
+    return str(role or "").strip().lower()
+
+
+def _candidate_tag(candidate: dict[str, Any]) -> str:
+    return str(candidate.get("tag") or candidate.get("kind") or "").strip().lower()
+
+
+def _is_select_control_candidate(candidate: dict[str, Any]) -> bool:
+    return _role_text(candidate) in {"combobox", "listbox", "select"} or _candidate_tag(candidate) == "select"
+
+
+def _is_option_candidate(candidate: dict[str, Any]) -> bool:
+    return _role_text(candidate) in {"option", "listitem", "menuitem", "radio"} or _candidate_tag(candidate) in {"option", "li"}
+
+
+def _is_submit_candidate(candidate: dict[str, Any]) -> bool:
+    role = _role_text(candidate)
+    tag = _candidate_tag(candidate)
+    typ = str(candidate.get("type") or "").strip().lower()
+    if role != "button" and tag != "button" and typ not in {"button", "submit"}:
+        return False
+    names = {str(candidate.get(key) or "").strip().lower() for key in ("name", "text", "label", "value", "ariaLabel", "aria_label")}
+    return bool(names & {"submit", "login", "ok", "done"})
+
+
+def _candidate_public_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    keys = ("bid", "bid_source", "role", "kind", "tag", "value", "selected_value", "current_value", "name", "text", "label", "enabled", "visible", "selected", "parent_bid", "owner_bid", "select_bid", "parent_name")
+    return {key: candidate.get(key) for key in keys if key in candidate}
+
 def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -374,6 +408,9 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
 
     goal_instruction = extract_goal_instruction(obs, info)
     clickable_candidates = extract_clickable_candidates(obs, info, limit=30)
+    select_control_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_select_control_candidate(candidate)]
+    option_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_option_candidate(candidate)]
+    submit_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_submit_candidate(candidate)]
 
     context = {
         "url": get_first_not_none(obs, "url") if get_first_not_none(obs, "url") is not None else (get_first_not_none(info, "url") or ""),
@@ -389,6 +426,9 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
         "dom_excerpt": _safe_text(pruned_html, 1200),
         "clickable_candidates": clickable_candidates,
         "clickable_candidates_count": len(clickable_candidates),
+        "select_control_candidates": select_control_candidates,
+        "option_candidates": option_candidates,
+        "submit_candidates": submit_candidates,
         "screenshot": None,
         "image": None,
         "screenshot_summary": _serialize_field_summary(raw_screenshot),
@@ -427,4 +467,7 @@ def page_context_to_snapshot_like(context: dict) -> dict:
         "goal_instruction": context.get("goal_instruction", ""),
         "source": "browsergym",
         "clickable_candidates": context.get("clickable_candidates", []),
+        "select_control_candidates": context.get("select_control_candidates", []),
+        "option_candidates": context.get("option_candidates", []),
+        "submit_candidates": context.get("submit_candidates", []),
     }

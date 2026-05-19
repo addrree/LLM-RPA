@@ -30,7 +30,7 @@ class BrowserGymRunner:
 
     @staticmethod
     def _browsergym_default_action_syntax() -> list[str]:
-        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'clear("bid")', 'focus("bid")', 'press("bid", "Enter")', 'keyboard_type("text")', 'keyboard_insert_text("text")', 'noop()']
+        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'select_option("bid", ["option_text"])', 'select_option("bid", "option_text")', 'clear("bid")', 'focus("bid")', 'press("bid", "Enter")', 'keyboard_type("text")', 'keyboard_insert_text("text")', 'noop()']
 
     @staticmethod
     def _looks_like_action_space_repr(value: str) -> bool:
@@ -386,6 +386,21 @@ class BrowserGymRunner:
                 obs, reward, terminated, truncated, info = env.step(action)
                 if self._is_miniwob_config(self.config):
                     obs, reward, terminated, truncated, info = self._try_miniwob_playwright_fallback(env, decision, obs, reward, terminated, truncated, info)
+                    if getattr(decision, "mapping_strategy", None) == "select_option_control":
+                        try:
+                            after_ctx = browsergym_obs_to_page_context(obs if isinstance(obs, dict) else {}, info if isinstance(info, dict) else {})
+                            controls = after_ctx.get("select_control_candidates") or []
+                            selected = getattr(decision, "selected_candidate", None)
+                            selected_bid = real_candidate_bid(selected) if isinstance(selected, dict) else ""
+                            after_control = next((c for c in controls if str(c.get("bid") or "") == selected_bid), controls[0] if controls else None)
+                            after_value = None
+                            if isinstance(after_control, dict):
+                                after_value = after_control.get("value") or after_control.get("selected_value") or after_control.get("current_value") or after_control.get("name") or after_control.get("text")
+                            diagnostics = getattr(decision, "mapping_diagnostics", None)
+                            if isinstance(diagnostics, dict):
+                                diagnostics["current_select_value_after"] = after_value
+                        except Exception:
+                            pass
                     selected = getattr(decision, "selected_candidate", None)
                     selected_verbose = self._candidate_verbose_summary(selected)
                     selected_bid = selected.get("bid") if isinstance(selected, dict) else None
