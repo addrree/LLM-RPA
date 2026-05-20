@@ -72,6 +72,49 @@ SELECT_INTENT_WORDS = {"choose", "select", "pick"}
 SELECT_CONTAINER_WORDS = {"list", "dropdown", "drop-down", "combo", "combobox", "select", "option", "menu"}
 LINK_INTENT_WORDS = {"link", "follow", "open", "visit"}
 
+_DATE_PATTERN = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
+
+
+def classify_miniwob_interaction(
+    *,
+    instruction: str,
+    action_name: str,
+    clicked_bid_candidate: dict[str, Any] | None,
+    fill_candidate: dict[str, Any] | None,
+    candidates: list[dict[str, Any]],
+    env_id: str = "",
+    task_name: str = "",
+) -> str:
+    role = _norm((clicked_bid_candidate or {}).get("role"))
+    if role == "checkbox":
+        return "checkbox"
+    if role == "radio":
+        return "radio"
+    if role == "menuitem":
+        return "menu"
+    if _is_link_like(clicked_bid_candidate or {}):
+        return "link"
+
+    instruction_n = normalize_text(instruction)
+    has_select_control = _find_select_control(candidates) is not None
+    if action_name == "fill" and _is_textbox(fill_candidate):
+        if _DATE_PATTERN.search(instruction) or "date" in instruction_n:
+            return "date_input"
+        return "text_input"
+
+    if role in {"list", "listitem", "option"} and not has_select_control:
+        if any(tok in instruction_n for tok in ("starts with", "ends with", "autocomplete", "suggestion", "enter an item")):
+            return "autocomplete"
+
+    if env_id.endswith("choose-list") or task_name == "choose-list":
+        return "native_select"
+    select_phrase = any(tok in instruction_n for tok in ("from the list", "from dropdown", "from the dropdown", "from the list and click submit"))
+    if select_phrase and (has_select_control or any(_is_option_candidate(c) for c in candidates)):
+        return "native_select"
+    if role == "button":
+        return "button"
+    return "unknown"
+
 
 def real_candidate_bid(candidate: dict[str, Any] | None) -> str:
     if not isinstance(candidate, dict):
@@ -736,6 +779,11 @@ def _select_diagnostics(
         "clicked_bid": clicked_bid or "",
         "clicked_bid_candidate": _candidate_text_summary(clicked_candidate),
         "select_guard_decision": decision or "",
+        "interaction_classification": "",
+        "select_guard_applied": True,
+        "reason": "",
+        "clicked_bid_candidate_role": normalize_candidate_value((clicked_candidate or {}).get("role")),
+        "clicked_bid_candidate_text": _candidate_normalized_text(clicked_candidate),
     }
 
 
@@ -820,6 +868,7 @@ def _ground_select_intent(
         return None
 
     parsed_proposed = _parse_call(proposed_action)
+    action_name = (parsed_proposed[0] if parsed_proposed else "")
     clicked_raw = str(parsed_proposed[1][0]).strip() if _is_explicit_left_click(parsed_proposed) else ""
     clicked_raw_candidate = _find_by_real_bid(candidates, clicked_raw) if clicked_raw else None
     clicked_bid = clicked_raw if clicked_raw_candidate is not None or _looks_like_bid_literal(clicked_raw, parsed_response, target_text) else ""
@@ -834,6 +883,23 @@ def _ground_select_intent(
     normalized_target_text = normalize_text(target_text)
     selected_value_matches_target = normalize_text(normalized_current_value) == normalized_target_text if normalized_current_value and normalized_target_text else False
     selected = _selected_target_option(candidates, target_text) if selected_value_matches_target else None
+    fill_candidate = None
+    if action_name in {"fill", "type"} and parsed_proposed and parsed_proposed[1]:
+        fill_candidate = _find_by_real_bid(candidates, str(parsed_proposed[1][0]).strip())
+    env_id = str(parsed_response.get("env_id") or parsed_response.get("task_id") or "")
+    task_name = str(parsed_response.get("task_name") or env_id.split(".")[-1] if env_id else "")
+    classification = classify_miniwob_interaction(
+        instruction=instruction,
+        action_name=action_name,
+        clicked_bid_candidate=clicked_candidate,
+        fill_candidate=fill_candidate,
+        candidates=candidates,
+        env_id=env_id,
+        task_name=task_name,
+    )
+    if classification != "native_select":
+        return None
+
     diagnostics = _select_diagnostics(
         target_text=target_text,
         candidates=candidates,
@@ -843,6 +909,9 @@ def _ground_select_intent(
     )
     diagnostics.update(
         {
+            "interaction_classification": classification,
+            "select_guard_applied": True,
+            "reason": "native_select_classification",
             "select_control_bid": control_bid,
             "current_select_value_before": current_value,
             "normalized_current_select_value": normalized_current_value,
@@ -1142,7 +1211,8 @@ def ground_miniwob_action(
         if selected is not None:
             bid = real_candidate_bid(selected)
             if bid:
-                return MiniWoBGroundingResult(action=browsergym_fill_action(bid, text), selected_candidate=selected, mapping_strategy="bid_fill")
+                strategy = "date_or_text_bid_fill" if (_DATE_PATTERN.search(instruction) or "date" in normalize_text(instruction)) else "bid_fill"
+                return MiniWoBGroundingResult(action=browsergym_fill_action(bid, text), selected_candidate=selected, mapping_strategy=strategy)
         passthrough = _passthrough_call(parsed, before)
         if passthrough is not None:
             return passthrough
@@ -1152,6 +1222,8 @@ def ground_miniwob_action(
         if parsed and parsed[0] == "fill":
             selected = _select_textbox_for_fill(parsed, parsed_response, candidates)
             passthrough.selected_candidate = selected
+            if _DATE_PATTERN.search(instruction) or "date" in normalize_text(instruction):
+                passthrough.mapping_strategy = "date_or_text_bid_fill"
         return passthrough
 
     intent = _norm(parsed_response.get("intent") or parsed_response.get("action_intent") or parsed_response.get("rationale") or "")
@@ -1183,7 +1255,17 @@ def ground_miniwob_action(
                 if text:
                     return MiniWoBGroundingResult(action=browsergym_fill_action(candidate_id, text), selected_candidate=selected, mapping_strategy="bid_fill")
             if candidate_id:
-                return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid_click")
+                role = _norm(selected.get("role"))
+                strategy = "bid_click"
+                if role == "checkbox":
+                    strategy = "checkbox_bid_click"
+                elif role == "radio":
+                    strategy = "radio_bid_click"
+                elif role == "menuitem":
+                    strategy = "menuitem_bid_click"
+                elif role in {"list", "listitem", "option"} and _find_select_control(candidates) is None:
+                    strategy = "autocomplete_suggestion_click"
+                return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy=strategy)
             if _is_link_like(selected):
                 return MiniWoBGroundingResult(
                     action="noop()",
