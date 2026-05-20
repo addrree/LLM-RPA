@@ -137,3 +137,15 @@ def test_observation_adapter_extracts_select_and_option_metadata_from_html():
     assert ctx["select_control_candidates"][0]["bid"] == "combo"
     assert {candidate["bid"] for candidate in ctx["option_candidates"]} == {"opt-ny", "opt-sf"}
     assert ctx["submit_candidates"] == []
+
+
+def test_observation_adapter_extracts_link_candidates_from_anchor():
+    ctx = browsergym_obs_to_page_context(
+        {"pruned_html": '<a bid="lnk-1" href="/news" title="Latest news">Read news</a>'},
+        {},
+    )
+    assert ctx["link_candidates"]
+    first = ctx["link_candidates"][0]
+    assert first["bid"] == "lnk-1"
+    assert first["text"] == "Read news"
+    assert first["href"] == "/news"

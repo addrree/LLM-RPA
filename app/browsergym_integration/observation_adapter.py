@@ -148,7 +148,7 @@ def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
         value = item.get(key)
         if value is not None and str(value).strip():
             out[key] = str(value).strip()
-    for key in ("role", "kind", "name", "text", "label", "tag", "type", "value", "ariaLabel", "aria_label", "title", "parent_bid", "owner_bid", "select_bid", "parent_name"):
+    for key in ("role", "kind", "name", "text", "label", "tag", "type", "value", "ariaLabel", "aria_label", "title", "href", "parent_bid", "owner_bid", "select_bid", "parent_name"):
         value = item.get(key)
         if value not in (None, ""):
             out[key] = str(value).strip() if isinstance(value, str) else value
@@ -257,13 +257,14 @@ def _parse_html_clickables(markup: str) -> list[dict[str, Any]]:
         attrs_raw = match.group("attrs") or match.group("selfattrs") or ""
         attrs = {m.group(1).lower(): html.unescape(m.group(2) or m.group(3) or m.group(4) or "") for m in attr_re.finditer(attrs_raw)}
         body = re.sub(r"<[^>]+>", " ", match.group("body") or "")
-        text = html.unescape(re.sub(r"\s+", " ", body).strip()) or attrs.get("value") or attrs.get("aria-label") or attrs.get("title") or attrs.get("name") or attrs.get("id")
+        text = html.unescape(re.sub(r"\s+", " ", body).strip()) or attrs.get("innertext") or attrs.get("textcontent") or attrs.get("value") or attrs.get("aria-label") or attrs.get("title") or attrs.get("name") or attrs.get("id")
         candidate = {
             "tag": tag,
             "role": attrs.get("role") or ("button" if tag == "button" or attrs.get("type") in {"button", "submit"} else "link" if tag == "a" else "textbox" if tag in {"input", "textarea"} else "combobox" if tag == "select" else ""),
             "text": text,
             "value": attrs.get("value"),
             "label": attrs.get("aria-label"),
+            "href": attrs.get("href"),
             "id": attrs.get("id"),
             "name": attrs.get("name") or text,
             "visible": True,
@@ -355,6 +356,32 @@ def _candidate_public_summary(candidate: dict[str, Any]) -> dict[str, Any]:
     keys = ("bid", "bid_source", "role", "kind", "tag", "value", "selected_value", "current_value", "name", "text", "label", "enabled", "visible", "selected", "parent_bid", "owner_bid", "select_bid", "parent_name")
     return {key: candidate.get(key) for key in keys if key in candidate}
 
+
+def _candidate_href(candidate: dict[str, Any]) -> str:
+    for key in ("href", "url", "link", "src"):
+        value = candidate.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+    return ""
+
+
+def _is_link_candidate(candidate: dict[str, Any]) -> bool:
+    return _role_text(candidate) == "link" or _candidate_tag(candidate) == "a" or bool(_candidate_href(candidate))
+
+
+def _link_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "bid": candidate.get("bid"),
+        "bid_source": candidate.get("bid_source"),
+        "text": str(candidate.get("text") or candidate.get("name") or candidate.get("label") or "").strip(),
+        "name": str(candidate.get("name") or candidate.get("label") or "").strip(),
+        "href": _candidate_href(candidate),
+        "role": candidate.get("role"),
+        "tag": candidate.get("tag"),
+        "visible": candidate.get("visible"),
+        "enabled": candidate.get("enabled"),
+    }
+
 def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -411,6 +438,7 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     select_control_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_select_control_candidate(candidate)]
     option_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_option_candidate(candidate)]
     submit_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_submit_candidate(candidate)]
+    link_candidates = [_link_candidate_summary(candidate) for candidate in clickable_candidates if _is_link_candidate(candidate)]
 
     context = {
         "url": get_first_not_none(obs, "url") if get_first_not_none(obs, "url") is not None else (get_first_not_none(info, "url") or ""),
@@ -429,6 +457,7 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
         "select_control_candidates": select_control_candidates,
         "option_candidates": option_candidates,
         "submit_candidates": submit_candidates,
+        "link_candidates": link_candidates,
         "screenshot": None,
         "image": None,
         "screenshot_summary": _serialize_field_summary(raw_screenshot),
