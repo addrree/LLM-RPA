@@ -927,3 +927,52 @@ def test_select_option_no_progress_not_triggered_when_target_already_selected():
 
     assert "select_option_no_progress" not in (result.mapping_error or "")
     assert result.action == 'click("20", "left")'
+
+def test_checkbox_select_instruction_does_not_trigger_native_select_guard():
+    result = ground_miniwob_action(
+        action='click("21", "left")',
+        parsed_response={"miniwob_instruction": "Select HWy32jZ and click Submit."},
+        candidates=[{"bid": "21", "bid_source": "bid", "role": "checkbox", "name": "HWy32jZ"}],
+    )
+    assert result.action == 'click("21", "left")'
+    assert result.mapping_strategy == "checkbox_bid_click"
+
+
+def test_radio_select_instruction_does_not_trigger_native_select_guard():
+    result = ground_miniwob_action(
+        action='click("24", "left")',
+        parsed_response={"miniwob_instruction": "Select Ix2km and click Submit."},
+        candidates=[{"bid": "24", "bid_source": "bid", "role": "radio", "name": "Ix2km"}],
+    )
+    assert result.action == 'click("24", "left")'
+    assert result.mapping_strategy == "radio_bid_click"
+
+
+def test_menu_path_instruction_does_not_trigger_native_select_guard():
+    result = ground_miniwob_action(
+        action='click("19", "left")',
+        parsed_response={"miniwob_instruction": "Select Pris>Cherlyn>Libbi"},
+        candidates=[{"bid": "19", "bid_source": "bid", "role": "menuitem", "name": "Pris"}],
+    )
+    assert result.action == 'click("19", "left")'
+    assert result.mapping_strategy == "menuitem_bid_click"
+
+
+def test_date_fill_does_not_trigger_native_select_guard():
+    result = ground_miniwob_action(
+        action='fill("17", "12/28/2016")',
+        parsed_response={"miniwob_instruction": "Select 12/28/2016 as the date and hit submit."},
+        candidates=[{"bid": "17", "bid_source": "bid", "role": "textbox"}],
+    )
+    assert result.action == 'fill("17", "12/28/2016")'
+    assert result.mapping_strategy == "date_or_text_bid_fill"
+
+
+def test_autocomplete_click_without_select_control_does_not_trigger_native_select_guard():
+    result = ground_miniwob_action(
+        action='click("19", "left")',
+        parsed_response={"miniwob_instruction": 'Enter an item that starts with "Po" and ends with "land".'},
+        candidates=[{"bid": "19", "bid_source": "bid", "role": "list", "name": "Poland"}],
+    )
+    assert result.action == 'click("19", "left")'
+    assert result.mapping_strategy == "autocomplete_suggestion_click"
