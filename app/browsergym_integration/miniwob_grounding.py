@@ -70,6 +70,7 @@ SUBMIT_BUTTON_ALIASES = SUBMIT_BUTTON_NAMES | {"go"}
 TEXT_INPUT_INTENTS = {"fill", "type", "enter", "input", "text", "username", "password"}
 SELECT_INTENT_WORDS = {"choose", "select", "pick"}
 SELECT_CONTAINER_WORDS = {"list", "dropdown", "drop-down", "combo", "combobox", "select", "option", "menu"}
+LINK_INTENT_WORDS = {"link", "follow", "open", "visit"}
 
 
 def real_candidate_bid(candidate: dict[str, Any] | None) -> str:
@@ -228,6 +229,60 @@ def find_click_candidate(candidates: list[dict[str, Any]], target: str) -> dict[
     scored.sort(reverse=True, key=lambda item: (item[0], item[1]))
     best_score, _, best = scored[0]
     return best if best_score[0] >= 45 else None
+
+
+def _extract_link_target_from_instruction(instruction: str) -> str:
+    text = str(instruction or "").strip()
+    if not text:
+        return ""
+    quoted = re.findall(r"['\"]([^'\"]{1,200})['\"]", text)
+    if quoted:
+        return quoted[0].strip()
+    m = re.search(r"(?:click|follow|open|visit)\s+(?:the\s+)?(?:link\s+)?(?:to\s+)?(.+?)(?:\.|$)", text, flags=re.IGNORECASE)
+    return (m.group(1).strip() if m else "")
+
+
+def _link_fields(candidate: dict[str, Any]) -> list[str]:
+    out: list[str] = []
+    for key in ("text", "name", "label", "href", "title", "ariaLabel", "aria_label", "aria-label", "value"):
+        v = candidate.get(key)
+        if v not in (None, ""):
+            out.append(str(v))
+    return out
+
+
+def _is_link_like(candidate: dict[str, Any]) -> bool:
+    role = _norm(candidate.get("role"))
+    tag = _norm(candidate.get("tag"))
+    return role == "link" or tag == "a" or bool(candidate.get("href"))
+
+
+def _ground_link_intent(instruction: str, candidates: list[dict[str, Any]]) -> MiniWoBGroundingResult | None:
+    target = _extract_link_target_from_instruction(instruction)
+    if not target:
+        return None
+    target_n = _norm(target)
+    links = [c for c in (candidates or []) if isinstance(c, dict) and _is_link_like(c)]
+    diagnostics = {
+        "target_link_text": target,
+        "link_candidates_count": len(links),
+        "link_candidate_texts": ["/".join(_link_fields(c)[:2]) for c in links][:20],
+        "mapping_strategy": "link_bid_click",
+    }
+    exact = [c for c in links if any(_norm(v) == target_n for v in _link_fields(c))]
+    partial = [c for c in links if any(target_n in _norm(v) or _norm(v) in target_n for v in _link_fields(c))]
+    match_pool = exact if exact else partial
+    if not match_pool:
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: link_target_not_found", mapping_strategy="none", mapping_diagnostics=diagnostics)
+    if len(match_pool) > 1:
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: ambiguous_link_target", mapping_strategy="none", mapping_diagnostics=diagnostics)
+    selected = match_pool[0]
+    bid = real_candidate_bid(selected)
+    if not bid:
+        return MiniWoBGroundingResult(action="noop()", mapping_error="action_mapping_failure: matched_link_has_no_real_bid", selected_candidate=selected, mapping_strategy="none", mapping_diagnostics=diagnostics)
+    diagnostics["matched_link_bid"] = bid
+    diagnostics["matched_link_text"] = _candidate_text(selected)
+    return MiniWoBGroundingResult(action=browsergym_click_action(bid), selected_candidate=selected, mapping_strategy="link_bid_click", mapping_diagnostics=diagnostics)
 
 
 def textbox_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1076,6 +1131,10 @@ def ground_miniwob_action(
     )
     if select_grounding is not None:
         return select_grounding
+    if any(word in _norm(instruction) for word in LINK_INTENT_WORDS):
+        link_grounding = _ground_link_intent(instruction, candidates)
+        if link_grounding is not None:
+            return link_grounding
 
     if parsed and parsed[0] in {"fill", "type"}:
         selected = _select_textbox_for_fill(parsed, parsed_response, candidates)
@@ -1125,6 +1184,13 @@ def ground_miniwob_action(
                     return MiniWoBGroundingResult(action=browsergym_fill_action(candidate_id, text), selected_candidate=selected, mapping_strategy="bid_fill")
             if candidate_id:
                 return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="bid_click")
+            if _is_link_like(selected):
+                return MiniWoBGroundingResult(
+                    action="noop()",
+                    mapping_error=f"action_mapping_failure: matched_link_without_bid target_text={target!r}",
+                    selected_candidate=selected,
+                    mapping_strategy="none",
+                )
             center = candidate_center_with_strategy(selected)
             if center is not None:
                 return MiniWoBGroundingResult(action=browsergym_mouse_click_action(center[0], center[1]), selected_candidate=selected, mapping_strategy=center[2])

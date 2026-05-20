@@ -767,6 +767,49 @@ def test_choose_list_combobox_click_is_overridden_to_select_option_control():
     assert result.mapping_strategy == "select_option_control"
 
 
+def test_click_link_instruction_matches_link_text():
+    result = ground_miniwob_action(
+        action='click("news")',
+        parsed_response={"miniwob_instruction": 'Click the link "News".'},
+        candidates=[{"bid": "42", "bid_source": "bid", "role": "link", "text": "News", "href": "/news"}],
+    )
+    assert result.action == 'click("42", "left")'
+    assert result.mapping_strategy == "link_bid_click"
+
+
+def test_click_link_instruction_can_match_href_title_or_aria_label():
+    result = ground_miniwob_action(
+        action='click("profile")',
+        parsed_response={"miniwob_instruction": "Open link profile page."},
+        candidates=[{"bid": "7", "bid_source": "bid", "role": "link", "text": "", "href": "/profile", "title": "Profile page", "aria_label": "profile"}],
+    )
+    assert result.action == 'click("7", "left")'
+    assert result.mapping_strategy == "link_bid_click"
+
+
+def test_click_link_ambiguous_targets_are_blocked():
+    result = ground_miniwob_action(
+        action='click("news")',
+        parsed_response={"miniwob_instruction": 'Click the link "News".'},
+        candidates=[
+            {"bid": "1", "bid_source": "bid", "role": "link", "text": "News"},
+            {"bid": "2", "bid_source": "bid", "role": "link", "text": "News"},
+        ],
+    )
+    assert result.action == "noop()"
+    assert "ambiguous_link_target" in (result.mapping_error or "")
+
+
+def test_click_link_unknown_target_is_blocked():
+    result = ground_miniwob_action(
+        action='click("unknown")',
+        parsed_response={"miniwob_instruction": 'Follow link "Unknown".'},
+        candidates=[{"bid": "1", "bid_source": "bid", "role": "link", "text": "Home"}],
+    )
+    assert result.action == "noop()"
+    assert "link_target_not_found" in (result.mapping_error or "")
+
+
 def test_choose_list_submit_allowed_after_control_value_equals_target():
     result = ground_miniwob_action(
         action='click("20", "left")',
