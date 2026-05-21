@@ -1202,7 +1202,7 @@ def ground_miniwob_action(
         return select_grounding
     if any(word in _norm(instruction) for word in LINK_INTENT_WORDS):
         link_grounding = _ground_link_intent(instruction, candidates)
-        if link_grounding is not None:
+        if link_grounding is not None and not (parsed and parsed[0] == "click" and parsed[1] and _find_by_real_bid(candidates, str(parsed[1][0]).strip()) is not None and "link_target_not_found" in str(link_grounding.mapping_error or "")):
             return link_grounding
 
     if parsed and parsed[0] in {"fill", "type"}:
