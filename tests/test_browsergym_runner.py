@@ -106,3 +106,16 @@ def test_smoke_like_env_with_ndarray_observation(monkeypatch):
     runner = BrowserGymRunner(agent_factory=lambda: _AgentUsingAdapter(), config=BrowserGymRunConfig(env_id="browsergym/openended", goal="g", max_steps=2))
     report = runner.run_one()
     assert report.status == "success"
+
+
+def test_miniwob_context_keeps_page_link_candidates():
+    ax = [{"bid": str(i), "role": "generic", "text": ""} for i in range(35)]
+    obs = {
+        "clickable_candidates": ax,
+        "clickable_candidates_count": 35,
+        "page_clickable_candidates": [{"bid": "99", "tag": "a", "role": "link", "text": "ornare", "href": "/ornare"}],
+    }
+    ctx = browsergym_obs_to_page_context(obs, {})
+    bids = {str(c.get("bid")) for c in ctx["clickable_candidates"]}
+    assert "99" in bids
+    assert any(str(c.get("bid")) == "99" for c in ctx["link_candidates"])

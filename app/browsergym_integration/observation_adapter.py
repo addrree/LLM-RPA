@@ -188,7 +188,20 @@ def _candidate_is_clickable(candidate: dict[str, Any]) -> bool:
 
 
 def _dedupe_key(candidate: dict[str, Any]) -> tuple[Any, ...]:
-    return tuple(str(candidate.get(k) or "").strip().lower() for k in ("bid", "element_id", "node_id", "backend_node_id", "id", "role", "tag", "name", "text", "label", "value"))
+    bid = str(candidate.get("bid") or "").strip()
+    if bid:
+        return ("bid", bid.lower())
+    href = _candidate_href(candidate).strip().lower()
+    text = str(candidate.get("text") or candidate.get("innerText") or candidate.get("textContent") or candidate.get("name") or candidate.get("label") or "").strip().lower()
+    tag = _candidate_tag(candidate)
+    if href:
+        return ("href_text_tag", href, text, tag)
+    bbox = candidate.get("bbox") or candidate.get("browsergym_bbox") or {}
+    if isinstance(bbox, dict):
+        bbox_key = tuple(bbox.get(k) for k in ("x", "y", "width", "height", "left", "top", "right", "bottom"))
+    else:
+        bbox_key = ("",)
+    return ("bbox_text_tag", bbox_key, text, tag)
 
 
 def _append_candidate(candidates: list[dict[str, Any]], candidate: dict[str, Any] | None, seen: set[tuple[Any, ...]]) -> None:
@@ -434,7 +447,10 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
         axtree = get_first_not_none(info, "axtree_txt", "axtree", "accessibility_tree", "text_tree")
 
     goal_instruction = extract_goal_instruction(obs, info)
-    clickable_candidates = extract_clickable_candidates(obs, info, limit=30)
+    base_count = int(obs.get("clickable_candidates_count") or 0) if isinstance(obs, dict) else 0
+    has_page_candidates = bool(obs.get("page_clickable_candidates")) if isinstance(obs, dict) else False
+    limit = 80 if (base_count > 30 or has_page_candidates) else 30
+    clickable_candidates = extract_clickable_candidates(obs, info, limit=limit)
     select_control_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_select_control_candidate(candidate)]
     option_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_option_candidate(candidate)]
     submit_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_submit_candidate(candidate)]

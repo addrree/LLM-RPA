@@ -162,6 +162,10 @@ class BrowserGymRunner:
               kind: el.tagName.toLowerCase() === 'select' ? 'select' : (el.tagName.toLowerCase() === 'option' ? 'option' : ''),
               text,
               value: el.value || '',
+              href: el.href || el.getAttribute('href') || '',
+              textContent: el.textContent || '',
+              innerText: el.innerText || '',
+              className: typeof el.className === "string" ? el.className : '',
               ariaLabel: el.getAttribute('aria-label') || '',
               id: el.id || '',
               name: el.getAttribute('name') || '',
@@ -205,11 +209,19 @@ class BrowserGymRunner:
         merged = list(ax)
         seen = set()
         def key(c):
+            if not isinstance(c, dict):
+                return ("",)
             bid = str(real_candidate_bid(c) or "").strip()
-            backend = str(c.get("backendDOMNodeId") or "").strip() if isinstance(c, dict) else ""
-            href = str((c or {}).get("href") or "").strip().lower()
-            text = str((c or {}).get("text") or (c or {}).get("innerText") or "").strip().lower()
-            return (bid, backend, href, text)
+            if bid:
+                return ("bid", bid.lower())
+            href = str(c.get("href") or "").strip().lower()
+            text = str(c.get("text") or c.get("innerText") or c.get("textContent") or c.get("name") or "").strip().lower()
+            tag = str(c.get("tag") or c.get("role") or "").strip().lower()
+            if href:
+                return ("href_text_tag", href, text, tag)
+            bbox = c.get("bbox") or c.get("browsergym_bbox") or {}
+            bbox_key = tuple((bbox or {}).get(k) for k in ("x", "y", "width", "height", "left", "top", "right", "bottom")) if isinstance(bbox, dict) else ("",)
+            return ("bbox_text_tag", bbox_key, text, tag)
         for c in merged:
             seen.add(key(c))
         for c in candidates or []:
@@ -221,7 +233,7 @@ class BrowserGymRunner:
         if merged:
             augmented["clickable_candidates"] = merged[:80]
             augmented["clickable_candidates_count"] = len(merged)
-            augmented["page_clickable_candidates"] = (candidates or [])[:30]
+            augmented["page_clickable_candidates"] = (candidates or [])[:80]
         if failed:
             augmented["page_candidate_extraction_failed"] = True
         return augmented
