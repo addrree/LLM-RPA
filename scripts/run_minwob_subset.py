@@ -38,6 +38,7 @@ def parse_args(argv=None):
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--task-ids", default=None, help="Comma-separated full env IDs or MiniWoB task names")
+    parser.add_argument("--subset", choices=["basic", "complex"], default=None, help="basic excludes book-flight; complex includes only book-flight")
     parser.add_argument("--include", default=None, help="Comma-separated regex patterns to include")
     parser.add_argument("--exclude", default=None, help="Comma-separated regex patterns to exclude")
     parser.add_argument("--use-vision", action="store_true", help="Send BrowserGym screenshot to the planner LLM payload")
@@ -193,13 +194,29 @@ def skipped_result(env_id: str, message: str, *, use_vision: bool) -> dict[str, 
 def main(argv=None) -> int:
     args = parse_args(argv)
     env_ids = list_minwob_env_ids()
+    task_ids = args.task_ids
+    if args.subset == "basic" and not task_ids:
+        task_ids = ",".join(t for t in [
+            "click-button","click-button-sequence","click-checkboxes","click-dialog","click-link","click-menu","click-option","click-test","enter-text","focus-text","login-user","choose-list","choose-date","use-autocomplete"
+        ])
+    if args.subset == "complex" and not task_ids:
+        task_ids = "book-flight"
     selected = select_minwob_subset(
         env_ids,
         limit=args.limit,
-        task_ids=args.task_ids,
+        task_ids=task_ids,
         include_patterns=args.include,
         exclude_patterns=args.exclude,
     )
+    if any(task_name_from_env_id(env_id) == "book-flight" for env_id in selected) and args.max_steps < 20:
+        print("[MiniWoB] warning: book-flight requires max_steps >= 20; raising to 25", flush=True)
+        args.max_steps = 25
+    if any(task_name_from_env_id(env_id) == "click-checkboxes" for env_id in selected) and args.max_steps < 5:
+        print("[MiniWoB] warning: click-checkboxes benefits from max_steps >= 5; raising to 5", flush=True)
+        args.max_steps = 5
+    if any(task_name_from_env_id(env_id) in {"use-autocomplete", "choose-date"} for env_id in selected) and args.max_steps < 6:
+        print("[MiniWoB] warning: choose-date/use-autocomplete benefit from max_steps >= 6; raising to 6", flush=True)
+        args.max_steps = 6
 
     if not os.getenv("MINIWOB_URL"):
         message = "MINIWOB_URL is not set. Start MiniWoB++ HTTP server and set MINIWOB_URL=http://127.0.0.1:8765 before running tasks."

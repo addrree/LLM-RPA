@@ -6,18 +6,51 @@ from typing import Any
 from app.browsergym_integration.miniwob_grounding import MiniWoBGroundingResult, browsergym_click_action, normalize_text, real_candidate_bid
 
 
+def unwrap_ax_value(x: Any) -> Any:
+    if x is None:
+        return ""
+    if isinstance(x, (str, int, float, bool)):
+        return x
+    if isinstance(x, dict):
+        for key in ("value", "name", "text", "role", "attributeValue"):
+            if key in x:
+                return unwrap_ax_value(x.get(key))
+        return ""
+    if isinstance(x, list):
+        return " ".join(str(unwrap_ax_value(item) or "") for item in x).strip()
+    return ""
+
+
 class MiniWoBDeterministicPolicy:
     def _norm(self, s: Any) -> str:
-        return normalize_text(str(s or ""))
+        return normalize_text(str(unwrap_ax_value(s) or ""))
 
     def _candidate_texts(self, c: dict[str, Any]) -> list[str]:
-        return [str(c.get(k)) for k in ("text", "innerText", "textContent", "name", "title", "aria-label", "aria_label", "href", "label", "value", "className") if c.get(k)]
+        keys = ("text", "innerText", "textContent", "name", "title", "aria-label", "aria_label", "href", "label", "value", "className", "role", "tag", "type", "id", "placeholder")
+        return [str(unwrap_ax_value(c.get(k)) or "") for k in keys if str(unwrap_ax_value(c.get(k)) or "").strip()]
+
+    def candidate_role(self, c: dict[str, Any]) -> str:
+        return self._norm(c.get("role"))
+
+    def candidate_type(self, c: dict[str, Any]) -> str:
+        return self._norm(c.get("type"))
+
+    def candidate_tag(self, c: dict[str, Any]) -> str:
+        return self._norm(c.get("tag"))
+
+    def candidate_text(self, c: dict[str, Any]) -> str:
+        for key in ("text", "innerText", "textContent", "name", "label", "title", "placeholder", "value"):
+            v = str(unwrap_ax_value(c.get(key)) or "").strip()
+            if v:
+                return v
+        vals = self._candidate_texts(c)
+        return vals[0] if vals else ""
 
     def _find_by_text(self, candidates: list[dict], target: str, roles: set[str] | None = None) -> dict | None:
         tn = self._norm(target)
         matches = []
         for c in candidates:
-            role = self._norm(c.get("role"))
+            role = self.candidate_role(c)
             if roles and role not in roles:
                 continue
             if any(self._norm(v) == tn for v in self._candidate_texts(c)) and real_candidate_bid(c):
@@ -66,7 +99,7 @@ class MiniWoBDeterministicPolicy:
                 raw_target = m.group(1).strip()
                 target = self._norm(raw_target)
                 loose = self._norm(raw_target.rstrip(".,!?;:"))
-                links = [c for c in candidates if (self._norm(c.get("role")) == "link" or self._norm(c.get("tag")) == "a" or c.get("href")) and real_candidate_bid(c) and any(self._norm(v) for v in self._candidate_texts(c))]
+                links = [c for c in candidates if (self.candidate_role(c) == "link" or self.candidate_tag(c) == "a" or c.get("href")) and real_candidate_bid(c) and any(self._norm(v) for v in self._candidate_texts(c))]
                 exact = [c for c in links if any(self._norm(v) == target for v in self._candidate_texts(c))]
                 if len(exact) == 1:
                     c = exact[0]
@@ -82,7 +115,7 @@ class MiniWoBDeterministicPolicy:
             prefix = (p.group(1) if p else "").strip()
             suffix = (s.group(1) if s else "").strip()
             submit = self._find_by_text(candidates, "submit")
-            suggestions = [c for c in candidates if (self._norm(c.get("role")) in {"option", "listitem", "menuitem"} or "ui-autocomplete" in self._norm(c.get("className")) or "ui-menu-item" in self._norm(c.get("className"))) and real_candidate_bid(c)]
+            suggestions = [c for c in candidates if (self.candidate_role(c) in {"option", "listitem", "menuitem", "generic"} or "ui-autocomplete" in self._norm(c.get("className")) or "ui-menu-item" in self._norm(c.get("className"))) and real_candidate_bid(c)]
             chosen_recently = self._has_mapping(history, "policy_use_autocomplete_pick") or any(self._norm(h.get("selected_candidate_role")) in {"option", "listitem", "menuitem"} for h in history[-3:] if isinstance(h, dict))
             if chosen_recently and submit and real_candidate_bid(submit):
                 return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(submit), action_syntax=action_syntax), selected_candidate=submit, mapping_strategy="policy_use_autocomplete_submit", mapping_diagnostics={"policy_name": "use-autocomplete"})
@@ -90,7 +123,7 @@ class MiniWoBDeterministicPolicy:
                 vals = [self._norm(v) for v in self._candidate_texts(c)]
                 if any(v.startswith(self._norm(prefix)) and (not suffix or v.endswith(self._norm(suffix))) for v in vals):
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_use_autocomplete_pick", mapping_diagnostics={"policy_name": "use-autocomplete"})
-            textbox = next((c for c in candidates if self._norm(c.get("role")) in {"textbox", "combobox", "input"} and ("tags" in " ".join(self._candidate_texts(c)).lower()) and real_candidate_bid(c)), None) or next((c for c in candidates if self._norm(c.get("role")) in {"textbox", "combobox", "input"} and real_candidate_bid(c)), None)
+            textbox = next((c for c in candidates if self.candidate_role(c) in {"textbox", "combobox", "input"} and ("tags" in " ".join(self._candidate_texts(c)).lower()) and real_candidate_bid(c)), None) or next((c for c in candidates if self.candidate_role(c) in {"textbox", "combobox", "input"} and real_candidate_bid(c)), None)
             if textbox and prefix:
                 return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(textbox)}", "{prefix}")', selected_candidate=textbox, mapping_strategy="policy_use_autocomplete_fill_prefix", mapping_diagnostics={"policy_name": "use-autocomplete"})
         if "choose-date" in t:
@@ -116,7 +149,7 @@ class MiniWoBDeterministicPolicy:
                 day_c = self._find_by_text(candidates, day)
                 if day_c and real_candidate_bid(day_c):
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(day_c), action_syntax=action_syntax), selected_candidate=day_c, mapping_strategy="policy_choose_date_day", mapping_diagnostics={"policy_name": "choose-date"})
-            tbs = [c for c in candidates if self._norm(c.get("role")) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
+            tbs = [c for c in candidates if self.candidate_role(c) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
             date_tb = next((c for c in tbs if any("date" in self._norm(v) for v in self._candidate_texts(c))), None) or (tbs[0] if len(tbs) == 1 else None)
             if date_tb:
                 return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(date_tb), action_syntax=action_syntax), selected_candidate=date_tb, mapping_strategy="policy_choose_date_open", mapping_diagnostics={"policy_name": "choose-date"})
@@ -124,7 +157,7 @@ class MiniWoBDeterministicPolicy:
             fm = re.search(r"from:\s*(.*?)\s*to:\s*(.*?)\s*on\s*(\d{1,2}/\d{1,2}/\d{4})", instr, flags=re.I)
             if fm:
                 from_v, to_v, date_v = fm.group(1).strip(), fm.group(2).strip(), fm.group(3).strip()
-                tbs = [c for c in candidates if self._norm(c.get("role")) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
+                tbs = [c for c in candidates if self.candidate_role(c) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
                 from_tb = next((c for c in tbs if "from" in " ".join(self._candidate_texts(c)).lower()), tbs[0] if tbs else None)
                 to_tb = next((c for c in tbs if "to" in " ".join(self._candidate_texts(c)).lower() and c is not from_tb), tbs[1] if len(tbs) > 1 else None)
                 date_tb = next((c for c in tbs if any(k in " ".join(self._candidate_texts(c)).lower() for k in ["date", "depart"] ) and c is not from_tb and c is not to_tb), tbs[2] if len(tbs) > 2 else None)
@@ -148,9 +181,12 @@ class MiniWoBDeterministicPolicy:
                     if final and real_candidate_bid(final):
                         return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(final), action_syntax=action_syntax), selected_candidate=final, mapping_strategy="policy_click_menu_leaf", mapping_diagnostics={"policy_name": "click-menu"})
                     parent = self._find_by_text(candidates, parts[0])
-                    if parent and real_candidate_bid(parent) and any("mouse_move" in a for a in action_syntax):
+                    if parent and real_candidate_bid(parent) and any("hover" in a for a in action_syntax):
+                        return MiniWoBGroundingResult(action=f'hover("{real_candidate_bid(parent)}")', selected_candidate=parent, mapping_strategy="policy_click_menu_hover_parent", mapping_diagnostics={"policy_name": "click-menu"})
+                    if parent and any("mouse_move" in a for a in action_syntax):
                         x = parent.get("browsergym_center_x") or parent.get("center_x")
                         y = parent.get("browsergym_center_y") or parent.get("center_y")
                         if isinstance(x, (int, float)) and isinstance(y, (int, float)):
                             return MiniWoBGroundingResult(action=f"mouse_move({int(x)}, {int(y)})", selected_candidate=parent, mapping_strategy="policy_click_menu_hover_parent", mapping_diagnostics={"policy_name": "click-menu"})
+                    return MiniWoBGroundingResult(action="noop()", selected_candidate=parent, mapping_strategy="policy_click_menu_hover_required", mapping_diagnostics={"policy_name": "click-menu", "menu_requires_hover_no_supported_action": True})
         return None
