@@ -30,7 +30,7 @@ class BrowserGymRunner:
 
     @staticmethod
     def _browsergym_default_action_syntax() -> list[str]:
-        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'fill("bid", "text")', 'select_option("bid", ["option_text"])', 'select_option("bid", "option_text")', 'clear("bid")', 'focus("bid")', 'press("bid", "Enter")', 'keyboard_type("text")', 'keyboard_insert_text("text")', 'noop()']
+        return ['click("bid", "left")', 'click("bid")', 'mouse_click(x, y, "left")', 'mouse_move(x, y)', 'fill("bid", "text")', 'select_option("bid", ["option_text"])', 'select_option("bid", "option_text")', 'clear("bid")', 'focus("bid")', 'press("bid", "Enter")', 'keyboard_type("text")', 'keyboard_insert_text("text")', 'noop()']
 
     @staticmethod
     def _looks_like_action_space_repr(value: str) -> bool:
