@@ -199,13 +199,30 @@ class BrowserGymRunner:
         if not isinstance(obs, dict):
             return obs
         current = browsergym_obs_to_page_context(obs, info if isinstance(info, dict) else {})
-        if current.get("clickable_candidates_count", 0):
-            return obs
         candidates, failed = cls._extract_page_clickable_candidates(env)
         augmented = dict(obs)
-        if candidates:
-            augmented["page_clickable_candidates"] = candidates[:30]
-        if failed or not candidates:
+        ax = list(obs.get("clickable_candidates") or []) if isinstance(obs, dict) else []
+        merged = list(ax)
+        seen = set()
+        def key(c):
+            bid = str(real_candidate_bid(c) or "").strip()
+            backend = str(c.get("backendDOMNodeId") or "").strip() if isinstance(c, dict) else ""
+            href = str((c or {}).get("href") or "").strip().lower()
+            text = str((c or {}).get("text") or (c or {}).get("innerText") or "").strip().lower()
+            return (bid, backend, href, text)
+        for c in merged:
+            seen.add(key(c))
+        for c in candidates or []:
+            k = key(c)
+            if k in seen:
+                continue
+            seen.add(k)
+            merged.append(c)
+        if merged:
+            augmented["clickable_candidates"] = merged[:80]
+            augmented["clickable_candidates_count"] = len(merged)
+            augmented["page_clickable_candidates"] = (candidates or [])[:30]
+        if failed:
             augmented["page_candidate_extraction_failed"] = True
         return augmented
 
@@ -410,7 +427,8 @@ class BrowserGymRunner:
                 history_note = None
                 if self._is_miniwob_config(self.config) and getattr(decision, "mapping_error", None):
                     history_note = f"previous target_text {getattr(decision, 'action_string_before_mapping', '')} had no candidate, choose coordinate fallback or inspect candidates."
-                history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None), "url": (obs or {}).get("url", "") if isinstance(obs, dict) else "", "instruction": getattr(decision, "miniwob_instruction", None), "note": history_note})
+                sc = getattr(decision, "selected_candidate", None) if isinstance(getattr(decision, "selected_candidate", None), dict) else {}
+                history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None), "url": (obs or {}).get("url", "") if isinstance(obs, dict) else "", "instruction": getattr(decision, "miniwob_instruction", None), "note": history_note, "selected_candidate_bid": real_candidate_bid(sc), "selected_candidate_text": str(sc.get("text") or sc.get("name") or "").strip().lower(), "selected_candidate_role": sc.get("role"), "mapping_strategy": getattr(decision, "mapping_strategy", None), "terminated": terminated, "truncated": truncated})
                 steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
                 if terminated or truncated:
                     break

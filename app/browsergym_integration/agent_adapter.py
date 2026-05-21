@@ -8,6 +8,7 @@ from typing import Any
 from app.browsergym_integration.action_mapper import browsergym_finish_action, task_step_to_browsergym_action
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
 from app.browsergym_integration.miniwob_grounding import extract_select_target_from_instruction, extract_textbox_candidates_from_observation, find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
+from app.browsergym_integration.miniwob_policy import MiniWoBDeterministicPolicy
 from app.browsergym_integration.local_extractor import (
     extract_pattern_from_observation,
     extract_structured_items_from_observation,
@@ -72,6 +73,7 @@ class BrowserGymAgentAdapter:
         self.env_id = env_id
         self.benchmark = benchmark
         self.browsergym_action_syntax: list[str] = []
+        self.miniwob_policy = MiniWoBDeterministicPolicy()
 
     def set_browsergym_context(self, *, env_id: str | None = None, benchmark: str | None = None) -> None:
         self.env_id = env_id
@@ -292,12 +294,22 @@ class BrowserGymAgentAdapter:
             "Return exactly: {\"rationale\": \"...\", \"target_text\": \"submit\", \"target_bid\": \"...\", \"action\": \"click(\\\"...\\\", \\\"left\\\")\"}"
         )
         images = [image_base64] if image_base64 is not None else None
+        policy = self.miniwob_policy.try_act(env_id=self.env_id or "", task_name=(self.env_id or "").split(".")[-1], instruction=miniwob_instruction, candidates=candidates_for_state, history=history, action_syntax=self.browsergym_action_syntax)
+        if policy is not None:
+            pname = (policy.mapping_diagnostics or {}).get("policy_name", "unknown")
+            return BrowserGymAgentDecision(action=policy.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy.action, action_string_before_mapping=policy.action, action_string_after_mapping=policy.action, selected_candidate=policy.selected_candidate, selected_candidate_bid=real_candidate_bid(policy.selected_candidate), bid_source=(policy.selected_candidate or {}).get("bid_source") if isinstance(policy.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy.mapping_strategy, mapping_diagnostics=policy.mapping_diagnostics, mapping_error=None)
         mapping_error = None
         try:
             parsed = self._call_direct_action_model(system_prompt, user_prompt, images)
         except Exception as exc:
             parsed = {}
             mapping_error = f"action_mapping_failure: model error: {exc}"
+            policy2 = self.miniwob_policy.try_act(env_id=self.env_id or "", task_name=(self.env_id or "").split(".")[-1], instruction=miniwob_instruction, candidates=candidates_for_state, history=history, action_syntax=self.browsergym_action_syntax)
+            if policy2 is not None:
+                md = dict(policy2.mapping_diagnostics or {})
+                md["llm_failed_policy_fallback"] = True
+                pname = md.get("policy_name", "unknown")
+                return BrowserGymAgentDecision(action=policy2.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy2.action, action_string_before_mapping=policy2.action, action_string_after_mapping=policy2.action, selected_candidate=policy2.selected_candidate, selected_candidate_bid=real_candidate_bid(policy2.selected_candidate), bid_source=(policy2.selected_candidate or {}).get("bid_source") if isinstance(policy2.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy2.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
         if isinstance(parsed, str):
             parsed = self._extract_json_object(parsed)
         elif not isinstance(parsed, dict):
