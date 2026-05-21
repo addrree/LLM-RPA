@@ -171,7 +171,7 @@ class BrowserGymAgentAdapter:
             return "noop()", "action_mapping_failure: empty action"
         if normalized.lower().startswith(("finish(", "agent_finish(")):
             return "noop()", "action_mapping_failure: finish is disabled for MiniWoB; success requires reward > 0"
-        if not re.match(r"^(click|mouse_click|fill|type|select_option|press|focus|clear|keyboard_press|keyboard_type|keyboard_insert_text|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
+        if not re.match(r"^(click|hover|mouse_move|move_to|mouse_click|fill|type|select_option|press|focus|clear|keyboard_press|keyboard_type|keyboard_insert_text|scroll|noop|wait)\s*\(.*\)\s*$", normalized):
             return "noop()", f"action_mapping_failure: unsupported MiniWoB action syntax: {normalized[:120]}"
         return normalized, None
 
@@ -318,6 +318,13 @@ class BrowserGymAgentAdapter:
         rationale = str(parsed.get("rationale") or parsed.get("reason") or "").strip()
         raw_action = str(parsed.get("action") or "").strip()
         action, validation_error = self._validate_direct_action(raw_action)
+        if not raw_action or (isinstance(parsed, dict) and not parsed):
+            policy3 = self.miniwob_policy.try_act(env_id=self.env_id or "", task_name=(self.env_id or "").split(".")[-1], instruction=miniwob_instruction, candidates=candidates_for_state, history=history, action_syntax=self.browsergym_action_syntax)
+            if policy3 is not None:
+                md = dict(policy3.mapping_diagnostics or {})
+                md["llm_empty_or_invalid_policy_fallback"] = True
+                pname = md.get("policy_name", "unknown")
+                return BrowserGymAgentDecision(action=policy3.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy3.action, action_string_before_mapping=policy3.action, action_string_after_mapping=policy3.action, selected_candidate=policy3.selected_candidate, selected_candidate_bid=real_candidate_bid(policy3.selected_candidate), bid_source=(policy3.selected_candidate or {}).get("bid_source") if isinstance(policy3.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy3.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
         mapping_error = mapping_error or validation_error
         before_mapping = action
         selected_candidate = None
