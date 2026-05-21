@@ -50,6 +50,24 @@ def test_use_autocomplete_policy_flow():
     assert r3 and '"s"' in r3.action
 
 
+def test_use_autocomplete_blocks_repeated_fill_and_fails_early():
+    p = MiniWoBDeterministicPolicy()
+    instruction = 'Enter an item that starts with "Fi".'
+    cands = [{"bid": "t", "role": "textbox", "text": "Tags", "value": "Fi"}]
+    r1 = p.try_act(env_id="browsergym/miniwob.use-autocomplete", task_name="use-autocomplete", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r1 and r1.mapping_strategy == "policy_use_autocomplete_wait_suggestions" and r1.action == "noop()"
+    r2 = p.try_act(env_id="browsergym/miniwob.use-autocomplete", task_name="use-autocomplete", instruction=instruction, candidates=cands, history=[{"mapping_strategy": r1.mapping_strategy}], action_syntax=[])
+    assert r2 and r2.mapping_error == "autocomplete_suggestions_not_found"
+
+
+def test_choose_date_month_navigation():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 06/10/2016 as the date and hit submit."
+    cands = [{"bid": "n", "text": "Next", "className": "ui-datepicker-next"}, {"bid": "h", "text": "May 2016", "className": "ui-datepicker-title"}]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r and '"n"' in r.action and r.mapping_strategy == "policy_choose_date_next_month"
+
+
 def test_book_flight_policy_produces_date_after_from_to():
     p = MiniWoBDeterministicPolicy()
     instruction = "Book the cheapest one-way flight from: Napaskiak, AK to: SWD on 11/29/2016."
