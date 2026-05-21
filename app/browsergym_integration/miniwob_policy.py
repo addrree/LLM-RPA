@@ -27,6 +27,9 @@ class MiniWoBDeterministicPolicy:
     def _task(self, env_id: str, task_name: str) -> str:
         return (task_name or env_id or "").lower()
 
+    def _has_mapping(self, history: list[dict], mapping: str) -> bool:
+        return any(str(h.get("mapping_strategy") or "") == mapping for h in history if isinstance(h, dict))
+
     def try_act(self, *, env_id: str, task_name: str, instruction: str, candidates: list[dict], history: list[dict], action_syntax: list[str]) -> MiniWoBGroundingResult | None:
         t = self._task(env_id, task_name)
         instr = str(instruction or "")
@@ -60,13 +63,15 @@ class MiniWoBDeterministicPolicy:
         if "click-link" in t:
             m = re.search(r"['\"]([^'\"]+)['\"]", instr)
             if m:
-                target = self._norm(m.group(1))
-                links = [c for c in candidates if (self._norm(c.get("role")) == "link" or self._norm(c.get("tag")) == "a" or c.get("href")) and real_candidate_bid(c)]
+                raw_target = m.group(1).strip()
+                target = self._norm(raw_target)
+                loose = self._norm(raw_target.rstrip(".,!?;:"))
+                links = [c for c in candidates if (self._norm(c.get("role")) == "link" or self._norm(c.get("tag")) == "a" or c.get("href")) and real_candidate_bid(c) and any(self._norm(v) for v in self._candidate_texts(c))]
                 exact = [c for c in links if any(self._norm(v) == target for v in self._candidate_texts(c))]
                 if len(exact) == 1:
                     c = exact[0]
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link", mapping_diagnostics={"policy_name": "click-link"})
-                fallback = [c for c in candidates if real_candidate_bid(c) and any(self._norm(v) == target for v in self._candidate_texts(c))]
+                fallback = [c for c in links if any(self._norm(v) == loose for v in self._candidate_texts(c))]
                 if len(fallback) == 1:
                     c = fallback[0]
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link_fallback", mapping_diagnostics={"policy_name": "click-link"})
@@ -77,24 +82,37 @@ class MiniWoBDeterministicPolicy:
             prefix = (p.group(1) if p else "").strip()
             suffix = (s.group(1) if s else "").strip()
             submit = self._find_by_text(candidates, "submit")
-            suggestions = [c for c in candidates if self._norm(c.get("role")) in {"option", "listitem", "menuitem"} and real_candidate_bid(c)]
-            chosen_recently = any(self._norm(h.get("selected_candidate_role")) in {"option", "listitem", "menuitem"} for h in history[-2:] if isinstance(h, dict))
+            suggestions = [c for c in candidates if (self._norm(c.get("role")) in {"option", "listitem", "menuitem"} or "ui-autocomplete" in self._norm(c.get("className")) or "ui-menu-item" in self._norm(c.get("className"))) and real_candidate_bid(c)]
+            chosen_recently = self._has_mapping(history, "policy_use_autocomplete_pick") or any(self._norm(h.get("selected_candidate_role")) in {"option", "listitem", "menuitem"} for h in history[-3:] if isinstance(h, dict))
             if chosen_recently and submit and real_candidate_bid(submit):
                 return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(submit), action_syntax=action_syntax), selected_candidate=submit, mapping_strategy="policy_use_autocomplete_submit", mapping_diagnostics={"policy_name": "use-autocomplete"})
             for c in suggestions:
                 vals = [self._norm(v) for v in self._candidate_texts(c)]
                 if any(v.startswith(self._norm(prefix)) and (not suffix or v.endswith(self._norm(suffix))) for v in vals):
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_use_autocomplete_pick", mapping_diagnostics={"policy_name": "use-autocomplete"})
-            textbox = next((c for c in candidates if self._norm(c.get("role")) in {"textbox", "combobox", "input"} and real_candidate_bid(c)), None)
+            textbox = next((c for c in candidates if self._norm(c.get("role")) in {"textbox", "combobox", "input"} and ("tags" in " ".join(self._candidate_texts(c)).lower()) and real_candidate_bid(c)), None) or next((c for c in candidates if self._norm(c.get("role")) in {"textbox", "combobox", "input"} and real_candidate_bid(c)), None)
             if textbox and prefix:
-                return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(textbox)}", "{prefix}")', selected_candidate=textbox, mapping_strategy="policy_use_autocomplete_fill", mapping_diagnostics={"policy_name": "use-autocomplete"})
+                return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(textbox)}", "{prefix}")', selected_candidate=textbox, mapping_strategy="policy_use_autocomplete_fill_prefix", mapping_diagnostics={"policy_name": "use-autocomplete"})
         if "choose-date" in t:
             submit = self._find_by_text(candidates, "submit")
-            if any(str((h.get("selected_candidate_text") or "")).isdigit() for h in history[-2:] if isinstance(h, dict)) and submit and real_candidate_bid(submit):
+            if (self._has_mapping(history, "policy_choose_date_day") or any(str((h.get("selected_candidate_text") or "")).isdigit() for h in history[-2:] if isinstance(h, dict))) and submit and real_candidate_bid(submit):
                 return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(submit), action_syntax=action_syntax), selected_candidate=submit, mapping_strategy="policy_choose_date_submit", mapping_diagnostics={"policy_name": "choose-date"})
             m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", instr)
             if m:
                 day = str(int(m.group(2)))
+                month = int(m.group(1))
+                year = int(m.group(3))
+                header = " ".join(" ".join(self._candidate_texts(c)) for c in candidates).lower()
+                if str(year) in header:
+                    month_words = {1: "january", 2: "february", 3: "march", 4: "april", 5: "may", 6: "june", 7: "july", 8: "august", 9: "september", 10: "october", 11: "november", 12: "december"}
+                    prev_btn = next((c for c in candidates if ("prev" in " ".join(self._candidate_texts(c)).lower() or "ui-datepicker-prev" in self._norm(c.get("className"))) and real_candidate_bid(c)), None)
+                    next_btn = next((c for c in candidates if ("next" in " ".join(self._candidate_texts(c)).lower() or "ui-datepicker-next" in self._norm(c.get("className"))) and real_candidate_bid(c)), None)
+                    current_month = next((mno for mno, mname in month_words.items() if mname in header), None)
+                    if current_month and current_month != month:
+                        btn = next_btn if current_month < month else prev_btn
+                        if btn:
+                            strategy = "policy_choose_date_next_month" if current_month < month else "policy_choose_date_prev_month"
+                            return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(btn), action_syntax=action_syntax), selected_candidate=btn, mapping_strategy=strategy, mapping_diagnostics={"policy_name": "choose-date"})
                 day_c = self._find_by_text(candidates, day)
                 if day_c and real_candidate_bid(day_c):
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(day_c), action_syntax=action_syntax), selected_candidate=day_c, mapping_strategy="policy_choose_date_day", mapping_diagnostics={"policy_name": "choose-date"})
@@ -116,8 +134,10 @@ class MiniWoBDeterministicPolicy:
                     return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(to_tb)}", "{to_v}")', selected_candidate=to_tb, mapping_strategy="policy_book_flight_to", mapping_diagnostics={"policy_name": "book-flight"})
                 if date_tb and not any(date_v.lower() in str(h.get("action") or "").lower() for h in history):
                     return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(date_tb)}", "{date_v}")', selected_candidate=date_tb, mapping_strategy="policy_book_flight_date", mapping_diagnostics={"policy_name": "book-flight"})
+                if not (from_tb and to_tb and date_tb):
+                    return None
                 submit = self._find_by_text(candidates, "search") or self._find_by_text(candidates, "submit")
-                if submit and real_candidate_bid(submit):
+                if submit and real_candidate_bid(submit) and all(any(v.lower() in str(h.get("action") or "").lower() for h in history) for v in (from_v, to_v, date_v)):
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(submit), action_syntax=action_syntax), selected_candidate=submit, mapping_strategy="policy_book_flight_search", mapping_diagnostics={"policy_name": "book-flight"})
         if "click-menu" in t:
             m = re.search(r"select\s+(.+)$", instr, flags=re.I)
@@ -127,4 +147,10 @@ class MiniWoBDeterministicPolicy:
                     final = self._find_by_text(candidates, parts[-1])
                     if final and real_candidate_bid(final):
                         return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(final), action_syntax=action_syntax), selected_candidate=final, mapping_strategy="policy_click_menu_leaf", mapping_diagnostics={"policy_name": "click-menu"})
+                    parent = self._find_by_text(candidates, parts[0])
+                    if parent and real_candidate_bid(parent) and any("mouse_move" in a for a in action_syntax):
+                        x = parent.get("browsergym_center_x") or parent.get("center_x")
+                        y = parent.get("browsergym_center_y") or parent.get("center_y")
+                        if isinstance(x, (int, float)) and isinstance(y, (int, float)):
+                            return MiniWoBGroundingResult(action=f"mouse_move({int(x)}, {int(y)})", selected_candidate=parent, mapping_strategy="policy_click_menu_hover_parent", mapping_diagnostics={"policy_name": "click-menu"})
         return None

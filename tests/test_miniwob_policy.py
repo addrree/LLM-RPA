@@ -19,8 +19,8 @@ def test_click_dialog_prefers_close_button():
 
 def test_click_link_policy():
     p = MiniWoBDeterministicPolicy()
-    cands = [{"bid": "9", "role": "link", "tag": "a", "text": "elit", "href": "/elit"}]
-    r = p.try_act(env_id="browsergym/miniwob.click-link", task_name="click-link", instruction='Click on the link "elit".', candidates=cands, history=[], action_syntax=[])
+    cands = [{"bid": "9", "role": "generic", "tag": "a", "text": "Nulla.", "href": "/elit"}]
+    r = p.try_act(env_id="browsergym/miniwob.click-link", task_name="click-link", instruction='Click on the link "Nulla.".', candidates=cands, history=[], action_syntax=[])
     assert r and '"9"' in r.action
 
 
@@ -61,3 +61,11 @@ def test_book_flight_policy_produces_date_after_from_to():
     h = [{"action": 'fill("f", "Napaskiak, AK")'}, {"action": 'fill("t", "SWD")'}]
     r = p.try_act(env_id="browsergym/miniwob.book-flight", task_name="book-flight", instruction=instruction, candidates=cands, history=h, action_syntax=[])
     assert r and 'fill("d", "11/29/2016")' == r.action
+
+
+def test_book_flight_policy_does_not_search_without_fields():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Book the cheapest one-way flight from: A to: B on 11/29/2016."
+    cands = [{"bid": "s", "role": "button", "text": "Search"}]
+    r = p.try_act(env_id="browsergym/miniwob.book-flight", task_name="book-flight", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r is None

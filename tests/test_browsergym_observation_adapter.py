@@ -149,3 +149,16 @@ def test_observation_adapter_extracts_link_candidates_from_anchor():
     assert first["bid"] == "lnk-1"
     assert first["text"] == "Read news"
     assert first["href"] == "/news"
+
+
+def test_observation_adapter_enriches_ax_candidate_from_dom_backend_node():
+    ctx = browsergym_obs_to_page_context(
+        {
+            "clickable_candidates": [{"bid": "11", "role": {"value": "generic"}, "name": {"value": ""}, "backendDOMNodeId": 33}],
+            "page_clickable_candidates": [{"backendDOMNodeId": 33, "tag": "a", "text": "Nulla.", "href": "#"}],
+        },
+        {},
+    )
+    merged = next(c for c in ctx["clickable_candidates"] if c.get("bid") == "11")
+    assert merged["text"] == "Nulla."
+    assert merged["href"] == "#"

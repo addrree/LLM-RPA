@@ -144,7 +144,7 @@ def _candidate_from_dict(item: dict[str, Any]) -> dict[str, Any] | None:
             out["bid_source"] = existing_bid_source or source
             out[key] = str(value).strip()
             break
-    for key in ("element_id", "node_id", "backend_node_id", "id"):
+    for key in ("element_id", "node_id", "backend_node_id", "backendDOMNodeId", "nodeId", "parentId", "id"):
         value = item.get(key)
         if value is not None and str(value).strip():
             out[key] = str(value).strip()
@@ -395,6 +395,44 @@ def _link_candidate_summary(candidate: dict[str, Any]) -> dict[str, Any]:
         "enabled": candidate.get("enabled"),
     }
 
+def _enrich_ax_with_dom_candidates(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    dom_by_backend: dict[str, dict[str, Any]] = {}
+    dom_by_node: dict[str, dict[str, Any]] = {}
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        backend_id = str(candidate.get("backendDOMNodeId") or candidate.get("backend_node_id") or "").strip()
+        node_id = str(candidate.get("nodeId") or candidate.get("node_id") or "").strip()
+        has_rich_dom_text = bool(str(candidate.get("text") or candidate.get("innerText") or candidate.get("textContent") or candidate.get("href") or "").strip())
+        if backend_id and has_rich_dom_text:
+            dom_by_backend.setdefault(backend_id, candidate)
+        if node_id and has_rich_dom_text:
+            dom_by_node.setdefault(node_id, candidate)
+    copy_fields = ("text", "innerText", "textContent", "href", "title", "ariaLabel", "className", "tag", "browsergym_bbox", "bbox", "browsergym_center_x", "browsergym_center_y", "center_x", "center_y")
+    for candidate in candidates:
+        if not isinstance(candidate, dict):
+            continue
+        if not str(candidate.get("bid") or "").strip():
+            continue
+        role = _role_text(candidate)
+        has_text = any(str(candidate.get(k) or "").strip() for k in ("text", "innerText", "textContent", "name", "label", "value", "ariaLabel", "title"))
+        if has_text and role != "generic":
+            continue
+        backend_id = str(candidate.get("backendDOMNodeId") or candidate.get("backend_node_id") or "").strip()
+        node_id = str(candidate.get("nodeId") or candidate.get("node_id") or "").strip()
+        dom_match = (dom_by_backend.get(backend_id) if backend_id else None) or (dom_by_node.get(node_id) if node_id else None)
+        if not dom_match or dom_match is candidate:
+            continue
+        for field in copy_fields:
+            if candidate.get(field) in (None, "") and dom_match.get(field) not in (None, ""):
+                candidate[field] = dom_match[field]
+        if role == "generic":
+            tag = _candidate_tag(dom_match)
+            if tag in {"a", "button", "input"}:
+                candidate["role"] = "link" if tag == "a" else ("textbox" if tag == "input" else "button")
+    return candidates
+
+
 def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -418,7 +456,7 @@ def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, l
     html_text = _safe_text(get_first_not_none(obs, "pruned_html", "html") or get_first_not_none(info, "pruned_html", "html"), 60000)
     for candidate in _parse_html_clickables(html_text):
         _append_candidate(candidates, candidate, seen)
-    return candidates[:limit]
+    return _enrich_ax_with_dom_candidates(candidates)[:limit]
 
 
 def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
@@ -449,7 +487,7 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     goal_instruction = extract_goal_instruction(obs, info)
     base_count = int(obs.get("clickable_candidates_count") or 0) if isinstance(obs, dict) else 0
     has_page_candidates = bool(obs.get("page_clickable_candidates")) if isinstance(obs, dict) else False
-    limit = 80 if (base_count > 30 or has_page_candidates) else 30
+    limit = 100 if (base_count > 30 or has_page_candidates) else 30
     clickable_candidates = extract_clickable_candidates(obs, info, limit=limit)
     select_control_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_select_control_candidate(candidate)]
     option_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_option_candidate(candidate)]
