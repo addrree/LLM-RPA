@@ -13,6 +13,11 @@ from app.browsergym_integration.report import BrowserGymRunReport, BrowserGymSte
 
 
 class BrowserGymRunner:
+    NON_RECOVERABLE_POLICY_ERRORS = {
+        "menu_requires_hover_no_supported_action",
+        "autocomplete_suggestions_not_found",
+        "datepicker_header_not_found",
+    }
     def __init__(self, agent_factory, config: BrowserGymRunConfig):
         self.agent_factory = agent_factory
         self.config = config
@@ -442,6 +447,11 @@ class BrowserGymRunner:
                 sc = getattr(decision, "selected_candidate", None) if isinstance(getattr(decision, "selected_candidate", None), dict) else {}
                 history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None), "url": (obs or {}).get("url", "") if isinstance(obs, dict) else "", "instruction": getattr(decision, "miniwob_instruction", None), "note": history_note, "selected_candidate_bid": real_candidate_bid(sc), "selected_candidate_text": str(sc.get("text") or sc.get("name") or "").strip().lower(), "selected_candidate_role": sc.get("role"), "mapping_strategy": getattr(decision, "mapping_strategy", None), "terminated": terminated, "truncated": truncated})
                 steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
+                mapping_error = str(getattr(decision, "mapping_error", "") or "").strip()
+                if self._is_miniwob_config(self.config) and mapping_error in self.NON_RECOVERABLE_POLICY_ERRORS:
+                    status = "failed"
+                    terminated = True
+                    break
                 if terminated or truncated:
                     break
         except Exception as exc:
@@ -449,7 +459,7 @@ class BrowserGymRunner:
         finally:
             env.close()
 
-        if status not in {"success_by_agent_finish", "invalid_agent_finish"}:
+        if status not in {"success_by_agent_finish", "invalid_agent_finish", "failed"}:
             reward_value_for_status = float(reward) if reward is not None else None
             if self._is_miniwob_config(self.config):
                 status = "success" if reward_value_for_status is not None and reward_value_for_status > 0 else "partial"
@@ -461,5 +471,12 @@ class BrowserGymRunner:
         success_value = (reward_value is not None and reward_value > 0) if self._is_miniwob_config(self.config) else (status in {"success", "success_by_agent_finish"})
         if self._is_miniwob_config(self.config):
             print(f"[MiniWoB] task done success={success_value} reward={reward_value}", flush=True)
-        report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=reward_value, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=success_value, benchmark=self.config.benchmark, task_name=self.config.task_name)
+        failure_stage = None
+        error_message = None
+        if status == "failed" and steps:
+            last_error = steps[-1].mapping_error
+            if last_error in self.NON_RECOVERABLE_POLICY_ERRORS:
+                failure_stage = "unsupported_action" if last_error == "menu_requires_hover_no_supported_action" else "action_mapping_failure"
+                error_message = f"non-recoverable policy error: {last_error}"
+        report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=reward_value, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=success_value, benchmark=self.config.benchmark, task_name=self.config.task_name, failure_stage=failure_stage, error_message=error_message)
         return self._persist_report(report)
