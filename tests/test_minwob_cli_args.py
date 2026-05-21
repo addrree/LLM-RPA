@@ -15,3 +15,8 @@ def test_parse_minwob_cli_args():
     assert args.limit == 3
     assert args.task_ids == "click-button,enter-text"
     assert args.backend == "ollama_cloud"
+
+
+def test_parse_minwob_subset_arg():
+    args = parse_args(["--subset", "basic"])
+    assert args.subset == "basic"

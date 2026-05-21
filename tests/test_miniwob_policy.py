@@ -1,4 +1,4 @@
-from app.browsergym_integration.miniwob_policy import MiniWoBDeterministicPolicy
+from app.browsergym_integration.miniwob_policy import MiniWoBDeterministicPolicy, unwrap_ax_value
 from app.browsergym_integration.miniwob_grounding import ground_miniwob_action
 
 
@@ -69,3 +69,18 @@ def test_book_flight_policy_does_not_search_without_fields():
     cands = [{"bid": "s", "role": "button", "text": "Search"}]
     r = p.try_act(env_id="browsergym/miniwob.book-flight", task_name="book-flight", instruction=instruction, candidates=cands, history=[], action_syntax=[])
     assert r is None
+
+
+def test_unwrap_ax_value_and_norm():
+    p = MiniWoBDeterministicPolicy()
+    assert unwrap_ax_value({"type": "role", "value": "textbox"}) == "textbox"
+    assert unwrap_ax_value({"type": "computedString", "value": "Submit"}) == "Submit"
+    assert p._norm({"type": "role", "value": "listitem"}) == "listitem"
+
+
+def test_candidate_texts_extract_nested_ax_fields():
+    p = MiniWoBDeterministicPolicy()
+    c = {"name": {"type": "computedString", "value": "Tags:"}, "placeholder": {"type": "string", "value": "From:"}}
+    texts = p._candidate_texts(c)
+    assert "Tags:" in texts
+    assert "From:" in texts
