@@ -33,9 +33,9 @@ def test_choose_date_policy_steps():
     p = MiniWoBDeterministicPolicy()
     r1 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=[{"bid": "d", "role": "textbox", "text": "Date"}], history=[], action_syntax=[])
     assert r1 and '"d"' in r1.action
-    r2 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=[{"bid": "22", "role": "button", "text": "22"}], history=[], action_syntax=[])
+    r2 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=[{"bid": "22", "role": "button", "text": "22", "className": "ui-state-default"}, {"bid": "h", "text": "October 2016", "className": "ui-datepicker-title"}], history=[], action_syntax=[])
     assert r2 and '"22"' in r2.action
-    r3 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=[{"bid": "s", "role": "button", "text": "Submit"}], history=[{"selected_candidate_text": "22"}], action_syntax=[])
+    r3 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=[{"bid": "s", "role": "button", "text": "Submit"}, {"bid": "d", "role": "textbox", "text": "Date", "value": "10/22/2016"}], history=[{"selected_candidate_text": "22", "mapping_strategy": "policy_choose_date_day"}], action_syntax=[])
     assert r3 and '"s"' in r3.action
 
 
@@ -58,6 +58,15 @@ def test_use_autocomplete_blocks_repeated_fill_and_fails_early():
     assert r1 and r1.mapping_strategy == "policy_use_autocomplete_wait_suggestions" and r1.action == "noop()"
     r2 = p.try_act(env_id="browsergym/miniwob.use-autocomplete", task_name="use-autocomplete", instruction=instruction, candidates=cands, history=[{"mapping_strategy": r1.mapping_strategy}], action_syntax=[])
     assert r2 and r2.mapping_error == "autocomplete_suggestions_not_found"
+    assert r2.mapping_strategy == "policy_use_autocomplete_not_found"
+
+
+def test_use_autocomplete_uses_real_text_not_role_value():
+    p = MiniWoBDeterministicPolicy()
+    instruction = 'Enter an item that starts with "De" and ends with "ark".'
+    cands = [{"bid": "l1", "role": {"value": "listitem"}, "text": {"value": "listitem"}, "innerText": "Denmark", "className": "ui-menu-item"}]
+    r = p.try_act(env_id="browsergym/miniwob.use-autocomplete", task_name="use-autocomplete", instruction=instruction, candidates=cands, history=[{"mapping_strategy": "policy_use_autocomplete_fill_prefix"}], action_syntax=[])
+    assert r and r.mapping_strategy == "policy_use_autocomplete_pick" and '"l1"' in r.action
 
 
 def test_choose_date_month_navigation():
@@ -66,6 +75,27 @@ def test_choose_date_month_navigation():
     cands = [{"bid": "n", "text": "Next", "className": "ui-datepicker-next"}, {"bid": "h", "text": "May 2016", "className": "ui-datepicker-title"}]
     r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
     assert r and '"n"' in r.action and r.mapping_strategy == "policy_choose_date_next_month"
+
+
+def test_choose_date_ignores_other_month_days():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 05/27/2016 as the date and hit submit."
+    cands = [{"bid": "x", "role": "button", "text": "27", "className": "ui-state-default other-month"}]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r is None
+
+
+def test_book_flight_repeated_search_no_progress():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Book the cheapest one-way flight from: A to: B on 11/29/2016."
+    cands = [{"bid": "f", "role": "textbox", "text": "From"}, {"bid": "t", "role": "textbox", "text": "To"}, {"bid": "d", "role": "textbox", "text": "Date"}, {"bid": "s", "role": "button", "text": "Search"}]
+    h = [
+        {"action": 'fill("f", "A")'}, {"action": 'fill("t", "B")'}, {"action": 'fill("d", "11/29/2016")'},
+        {"action": 'click("s")', "mapping_strategy": "policy_book_flight_search"},
+        {"action": 'click("s")', "mapping_strategy": "policy_book_flight_search"},
+    ]
+    r = p.try_act(env_id="browsergym/miniwob.book-flight", task_name="book-flight", instruction=instruction, candidates=cands, history=h, action_syntax=[])
+    assert r and r.mapping_strategy == "policy_book_flight_search_no_progress"
 
 
 def test_book_flight_policy_produces_date_after_from_to():

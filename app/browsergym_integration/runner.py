@@ -17,6 +17,20 @@ class BrowserGymRunner:
         "menu_requires_hover_no_supported_action",
         "autocomplete_suggestions_not_found",
         "datepicker_header_not_found",
+        "search_no_progress",
+    }
+    NON_RECOVERABLE_MAPPING_STRATEGIES = {
+        "policy_click_menu_hover_required",
+        "policy_use_autocomplete_not_found",
+        "policy_choose_date_header_not_found",
+        "policy_choose_date_invalid_state",
+        "policy_book_flight_search_no_progress",
+    }
+    NON_RECOVERABLE_DIAGNOSTICS = {
+        "menu_requires_hover_no_supported_action",
+        "autocomplete_suggestions_not_found",
+        "datepicker_header_not_found",
+        "search_no_progress",
     }
     def __init__(self, agent_factory, config: BrowserGymRunConfig):
         self.agent_factory = agent_factory
@@ -448,7 +462,10 @@ class BrowserGymRunner:
                 history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None), "url": (obs or {}).get("url", "") if isinstance(obs, dict) else "", "instruction": getattr(decision, "miniwob_instruction", None), "note": history_note, "selected_candidate_bid": real_candidate_bid(sc), "selected_candidate_text": str(sc.get("text") or sc.get("name") or "").strip().lower(), "selected_candidate_role": sc.get("role"), "mapping_strategy": getattr(decision, "mapping_strategy", None), "terminated": terminated, "truncated": truncated})
                 steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
                 mapping_error = str(getattr(decision, "mapping_error", "") or "").strip()
-                if self._is_miniwob_config(self.config) and mapping_error in self.NON_RECOVERABLE_POLICY_ERRORS:
+                mapping_strategy = str(getattr(decision, "mapping_strategy", "") or "").strip()
+                diagnostics = getattr(decision, "mapping_diagnostics", None) if isinstance(getattr(decision, "mapping_diagnostics", None), dict) else {}
+                diag_nonrecoverable = any(bool(diagnostics.get(k)) for k in self.NON_RECOVERABLE_DIAGNOSTICS)
+                if self._is_miniwob_config(self.config) and (mapping_error in self.NON_RECOVERABLE_POLICY_ERRORS or mapping_strategy in self.NON_RECOVERABLE_MAPPING_STRATEGIES or diag_nonrecoverable):
                     status = "failed"
                     terminated = True
                     break
