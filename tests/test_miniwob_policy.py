@@ -23,6 +23,12 @@ def test_click_link_policy():
     r = p.try_act(env_id="browsergym/miniwob.click-link", task_name="click-link", instruction='Click on the link "Nulla.".', candidates=cands, history=[], action_syntax=[])
     assert r and '"9"' in r.action
 
+def test_click_link_rejects_empty_generic_candidates():
+    p = MiniWoBDeterministicPolicy()
+    cands = [{"bid": "11", "role": "generic", "name": "", "text": ""}]
+    r = p.try_act(env_id="browsergym/miniwob.click-link", task_name="click-link", instruction='Click on the link "fames".', candidates=cands, history=[], action_syntax=[])
+    assert r and r.mapping_error == "link_target_not_found"
+
 
 def test_link_grounding_allows_explicit_bid_when_no_link_candidates():
     res = ground_miniwob_action(action='click("5", "left")', parsed_response={"miniwob_instruction": 'Click on the link "foo".'}, candidates=[{"bid": "5", "role": "button", "text": "foo"}], history=[])
@@ -83,6 +89,16 @@ def test_choose_date_ignores_other_month_days():
     cands = [{"bid": "x", "role": "button", "text": "27", "className": "ui-state-default other-month"}]
     r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
     assert r is None
+
+
+def test_choose_date_fill_stops_after_one_attempt_without_progress():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 06/10/2016 as the date and hit submit."
+    cands = [{"bid": "d", "role": "textbox", "text": "Date"}]
+    r1 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=["fill(bid, value)"])
+    assert r1 and r1.mapping_strategy == "policy_choose_date_fill"
+    r2 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[{"mapping_strategy": "policy_choose_date_fill"}], action_syntax=["fill(bid, value)"])
+    assert r2 and r2.mapping_strategy == "policy_choose_date_fill_no_progress" and r2.mapping_error == "choose_date_fill_no_progress"
 
 
 def test_book_flight_repeated_search_no_progress():

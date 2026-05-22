@@ -433,6 +433,24 @@ def _enrich_ax_with_dom_candidates(candidates: list[dict[str, Any]]) -> list[dic
     return candidates
 
 
+def _append_dom_link_candidates(candidates: list[dict[str, Any]], seen: set[tuple[Any, ...]], obs: dict[str, Any], info: dict[str, Any]) -> None:
+    for source in (obs, info):
+        for key in ("dom_link_candidates", "page_dom_link_candidates", "dom_links"):
+            raw_links = source.get(key)
+            if not isinstance(raw_links, list):
+                continue
+            for item in raw_links:
+                if not isinstance(item, dict):
+                    continue
+                candidate = _candidate_from_dict(item)
+                if not candidate:
+                    continue
+                candidate.setdefault("tag", "a")
+                if not candidate.get("href"):
+                    continue
+                _append_candidate(candidates, candidate, seen)
+
+
 def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, limit: int = 30) -> list[dict[str, Any]]:
     candidates: list[dict[str, Any]] = []
     seen: set[tuple[Any, ...]] = set()
@@ -456,6 +474,7 @@ def extract_clickable_candidates(obs: dict[str, Any], info: dict[str, Any], *, l
     html_text = _safe_text(get_first_not_none(obs, "pruned_html", "html") or get_first_not_none(info, "pruned_html", "html"), 60000)
     for candidate in _parse_html_clickables(html_text):
         _append_candidate(candidates, candidate, seen)
+    _append_dom_link_candidates(candidates, seen, obs, info)
     return _enrich_ax_with_dom_candidates(candidates)[:limit]
 
 
