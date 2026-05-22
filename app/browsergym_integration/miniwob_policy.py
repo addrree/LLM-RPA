@@ -87,6 +87,12 @@ class MiniWoBDeterministicPolicy:
             out.append(c)
         return out
 
+    def _is_empty_generic(self, c: dict[str, Any]) -> bool:
+        role = self.candidate_role(c)
+        if role != "generic":
+            return False
+        return not any(self._norm(v) for v in (c.get("text"), c.get("innerText"), c.get("textContent"), c.get("name"), c.get("title"), c.get("href")))
+
     def try_act(self, *, env_id: str, task_name: str, instruction: str, candidates: list[dict], history: list[dict], action_syntax: list[str]) -> MiniWoBGroundingResult | None:
         t = self._task(env_id, task_name)
         instr = str(instruction or "")
@@ -123,16 +129,24 @@ class MiniWoBDeterministicPolicy:
                 raw_target = m.group(1).strip()
                 target = self._norm(raw_target)
                 loose = self._norm(raw_target.rstrip(".,!?;:"))
-                links = [c for c in candidates if (self.candidate_role(c) == "link" or self.candidate_tag(c) == "a" or c.get("href")) and real_candidate_bid(c) and any(self._norm(v) for v in self._candidate_texts(c))]
+                links = [c for c in candidates if (self.candidate_role(c) == "link" or self.candidate_tag(c) == "a" or c.get("href")) and not self._is_empty_generic(c) and any(self._norm(v) for v in self._candidate_texts(c))]
                 exact = [c for c in links if any(self._norm(v) == target for v in self._candidate_texts(c))]
-                if len(exact) == 1:
+                exact_with_bid = [c for c in exact if real_candidate_bid(c)]
+                if len(exact_with_bid) == 1:
+                    c = exact_with_bid[0]
+                    return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link", mapping_diagnostics={"policy_name": "click-link"})
+                if len(exact) == 1 and real_candidate_bid(exact[0]):
                     c = exact[0]
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link", mapping_diagnostics={"policy_name": "click-link"})
                 fallback = [c for c in links if any(self._norm(v) == loose for v in self._candidate_texts(c))]
-                if len(fallback) == 1:
+                fallback_with_bid = [c for c in fallback if real_candidate_bid(c)]
+                if len(fallback_with_bid) == 1:
+                    c = fallback_with_bid[0]
+                    return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link_fallback", mapping_diagnostics={"policy_name": "click-link"})
+                if len(fallback) == 1 and real_candidate_bid(fallback[0]):
                     c = fallback[0]
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link_fallback", mapping_diagnostics={"policy_name": "click-link"})
-                return None
+                return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_click_link_target_not_found", mapping_error="link_target_not_found", mapping_diagnostics={"policy_name": "click-link", "target": raw_target, "link_candidates_count": len(links)})
         if "use-autocomplete" in t:
             p = re.search(r"starts with\s+['\"]([^'\"]+)['\"]", instr, flags=re.I)
             s = re.search(r"ends with\s+['\"]([^'\"]+)['\"]", instr, flags=re.I)
@@ -194,8 +208,15 @@ class MiniWoBDeterministicPolicy:
             tbs = [c for c in candidates if self.candidate_role(c) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
             date_tb = next((c for c in tbs if any("date" in self._norm(v) for v in self._candidate_texts(c))), None) or (tbs[0] if len(tbs) == 1 else None)
             if date_tb:
+                fill_attempts = sum(1 for h in history if isinstance(h, dict) and str(h.get("mapping_strategy") or "") == "policy_choose_date_fill")
                 if m and self._action_supported(action_syntax, "fill"):
                     target_date = f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{int(m.group(3)):04d}"
+                    current_value = self._norm(date_tb.get("value") or date_tb.get("text") or "")
+                    if target_date.lower() in current_value:
+                        if submit and real_candidate_bid(submit):
+                            return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(submit), action_syntax=action_syntax), selected_candidate=submit, mapping_strategy="policy_choose_date_submit", mapping_diagnostics={"policy_name": "choose-date", "target_date": target_date, "textbox_value_current": current_value, "fill_attempt_count": fill_attempts})
+                    if fill_attempts >= 1:
+                        return MiniWoBGroundingResult(action="noop()", selected_candidate=date_tb, mapping_strategy="policy_choose_date_fill_no_progress", mapping_error="choose_date_fill_no_progress", mapping_diagnostics={"policy_name": "choose-date", "target_date": target_date, "textbox_value_current": current_value, "fill_attempt_count": fill_attempts, "choose_date_fill_no_progress": True})
                     return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(date_tb)}", "{target_date}")', selected_candidate=date_tb, mapping_strategy="policy_choose_date_fill", mapping_diagnostics={"policy_name": "choose-date", "target_date": target_date})
                 return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(date_tb), action_syntax=action_syntax), selected_candidate=date_tb, mapping_strategy="policy_choose_date_open", mapping_diagnostics={"policy_name": "choose-date"})
         if "book-flight" in t:

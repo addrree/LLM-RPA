@@ -162,3 +162,15 @@ def test_observation_adapter_enriches_ax_candidate_from_dom_backend_node():
     merged = next(c for c in ctx["clickable_candidates"] if c.get("bid") == "11")
     assert merged["text"] == "Nulla."
     assert merged["href"] == "#"
+
+
+def test_observation_adapter_includes_explicit_dom_link_candidates():
+    ctx = browsergym_obs_to_page_context(
+        {
+            "clickable_candidates": [{"bid": "12", "role": "generic"}],
+            "dom_link_candidates": [{"tag": "a", "href": "/fames", "innerText": "fames", "backendDOMNodeId": 52}],
+        },
+        {},
+    )
+    links = [c for c in ctx["clickable_candidates"] if c.get("tag") == "a" and c.get("href") == "/fames"]
+    assert links
