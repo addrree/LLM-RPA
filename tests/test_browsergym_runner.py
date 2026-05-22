@@ -56,6 +56,20 @@ class _AgentNoFinish:
         return types.SimpleNamespace(action="noop()", finish=False, answer=None, internal_plan=None, selected_step=None)
 
 
+class _MiniwobFailFastAgent:
+    def act(self, goal, obs, info, history):
+        return types.SimpleNamespace(
+            action="noop()",
+            finish=False,
+            answer=None,
+            internal_plan=None,
+            selected_step=None,
+            mapping_error="menu_requires_hover_no_supported_action",
+            mapping_strategy="policy_click_menu_hover_required",
+            mapping_diagnostics={"menu_requires_hover_no_supported_action": True},
+        )
+
+
 class _ArrayEnv(_Env):
     def reset(self):
         return {"url": "https://example.com", "screenshot": _FakeArray((10, 10, 3), "uint8")}, {"k": 1}
@@ -70,6 +84,7 @@ def _patch_env(monkeypatch, env):
     monkeypatch.setitem(__import__("sys").modules, "gymnasium", gym_mod)
     monkeypatch.setitem(__import__("sys").modules, "browsergym", types.SimpleNamespace(core=types.SimpleNamespace()))
     monkeypatch.setitem(__import__("sys").modules, "browsergym.core", types.SimpleNamespace())
+    monkeypatch.setitem(__import__("sys").modules, "browsergym.miniwob", types.SimpleNamespace())
 
 
 def test_finish_decision_does_not_call_env_step(monkeypatch, tmp_path):
@@ -119,3 +134,12 @@ def test_miniwob_context_keeps_page_link_candidates():
     bids = {str(c.get("bid")) for c in ctx["clickable_candidates"]}
     assert "99" in bids
     assert any(str(c.get("bid")) == "99" for c in ctx["link_candidates"])
+
+
+def test_miniwob_nonrecoverable_mapping_stops_immediately(monkeypatch):
+    env = _Env()
+    _patch_env(monkeypatch, env)
+    runner = BrowserGymRunner(agent_factory=lambda: _MiniwobFailFastAgent(), config=BrowserGymRunConfig(env_id="browsergym/miniwob.click-menu", goal="g", max_steps=25))
+    report = runner.run_one()
+    assert report.status == "failed"
+    assert report.steps_count == 1
