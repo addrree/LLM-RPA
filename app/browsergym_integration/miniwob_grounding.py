@@ -1258,7 +1258,13 @@ def ground_miniwob_action(
             text = str(parsed_response.get("text") or parsed_response.get("value") or "")
             task_hint = _norm(parsed_response.get("task_name") or parsed_response.get("env_id") or parsed_response.get("task_id") or "")
             is_choose_date = "choose-date" in task_hint
-            if _is_textbox(selected) and candidate_id and not is_choose_date:
+            cls = _norm(selected.get("className") or "")
+            sid = _norm(selected.get("id") or "")
+            ptxt = _norm(selected.get("parent_text") or "")
+            is_datepicker_input = ("hasdatepicker" in cls) or ("datepicker" in sid) or (_norm(selected.get("tag") or "") == "input" and "date" in ptxt)
+            if parsed and parsed[0] == "click" and is_choose_date and is_datepicker_input and candidate_id:
+                return MiniWoBGroundingResult(action=browsergym_click_action(candidate_id, action_syntax=action_syntax), selected_candidate=selected, mapping_strategy="datepicker_input_click")
+            if _is_textbox(selected) and candidate_id and not is_choose_date and not is_datepicker_input:
                 if not text and parsed_response.get("target_text") and str(parsed_response.get("target_text")).strip() != candidate_id:
                     text = str(parsed_response.get("target_text") or "")
                 if not text and _instruction_requires_text_entry(instruction):

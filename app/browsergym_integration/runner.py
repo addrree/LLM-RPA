@@ -163,6 +163,10 @@ class BrowserGymRunner:
         current = browsergym_obs_to_page_context(obs, info if isinstance(info, dict) else {})
         candidates, failed = cls._extract_page_clickable_candidates(env)
         augmented = dict(obs)
+        existing_page = list(obs.get("page_clickable_candidates") or []) if isinstance(obs, dict) else []
+        if (not candidates) and existing_page:
+            candidates = existing_page
+            failed = False
         ax = list(obs.get("clickable_candidates") or []) if isinstance(obs, dict) else []
         merged = merge_dom_candidates_with_ax(ax, candidates or [])
         seen = set()
@@ -188,12 +192,13 @@ class BrowserGymRunner:
                 continue
             seen.add(k)
             merged.append(c)
-        if merged:
-            augmented["clickable_candidates"] = merged[:200]
-            augmented["clickable_candidates_count"] = len(merged)
-            augmented["page_clickable_candidates"] = (candidates or [])[:200]
+        augmented["page_clickable_candidates"] = (candidates or [])[:300]
+        augmented["page_clickable_candidates_count"] = len(candidates or [])
+        augmented["page_candidate_extraction_failed"] = bool(failed)
+        augmented["clickable_candidates"] = merged[:300]
+        augmented["clickable_candidates_count"] = len(merged)
         if failed:
-            augmented["page_candidate_extraction_failed"] = True
+            augmented["page_candidate_extraction_error"] = "dom_candidate_extraction_failed"
         return augmented
 
     def _persist_report(self, report: BrowserGymRunReport) -> BrowserGymRunReport:
