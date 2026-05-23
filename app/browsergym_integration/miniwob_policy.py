@@ -239,9 +239,17 @@ class MiniWoBDeterministicPolicy:
                             if action:
                                 return MiniWoBGroundingResult(action=action, selected_candidate=btn, mapping_strategy=strategy, mapping_diagnostics={"policy_name": "choose-date", "chosen_stage": ("next" if current_month < month else "prev"), "target_date": f"{month:02d}/{int(day):02d}/{year}", "datepicker_header_text": header, "current_month": current_month, "current_year": year, "click_strategy": click_strategy})
                 header_candidates = [c for c in candidates if "ui-datepicker-title" in self._norm(c.get("className")) or "ui-datepicker-month" in self._norm(c.get("className")) or "ui-datepicker-year" in self._norm(c.get("className"))]
-                if header_candidates and str(year) not in header:
+                day_candidates = [
+                    c
+                    for c in candidates
+                    if day in {self._norm(t).lstrip("0") for t in self._candidate_texts(c) if self._norm(t).isdigit()}
+                    and ("ui-state-default" in self._norm(c.get("className")) or self.candidate_tag(c) in {"a", "button"})
+                    and "ui-priority-secondary" not in self._norm(c.get("className"))
+                    and "other-month" not in self._norm(c.get("className"))
+                    and c.get("visible") is not False
+                ]
+                if not day_candidates and header_candidates and str(year) not in header:
                     return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_choose_date_header_not_found", mapping_error="datepicker_header_not_found", mapping_diagnostics={"policy_name": "choose-date", "target_date": f"{month:02d}/{int(day):02d}/{year}", "datepicker_header_text": header, "datepicker_header_not_found": True})
-                day_candidates = [c for c in candidates if self.candidate_text(c) == day and ("ui-state-default" in self._norm(c.get("className")) or self.candidate_tag(c) in {"a", "button"}) and "ui-priority-secondary" not in self._norm(c.get("className")) and "other-month" not in self._norm(c.get("className")) and c.get("visible") is not False]
                 day_c = day_candidates[0] if day_candidates else None
                 if day_c:
                     action, click_strategy = make_click_action(day_c, action_syntax)

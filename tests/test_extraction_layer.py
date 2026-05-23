@@ -1,0 +1,46 @@
+from app.extraction.intent_parser import parse_extraction_intent
+from app.extraction.page_extractor import build_extraction_context
+from app.extraction.extraction_controller import solve_extraction_task
+
+
+def test_numbers_extracted():
+    ctx = build_extraction_context({"visible_text": "price 10 and 25"}, {"axtree_excerpt": ""}, [])
+    assert any(n["value"] == 10 for n in ctx["numeric_values"])
+
+
+def test_list_email_calendar_tree_extractors():
+    candidates = [
+        {"text": "item 1", "role": "listitem", "bid": "l1"},
+        {"text": "From: Alice Subject: Hi", "role": "row", "bid": "e1"},
+        {"text": "10:30 AM Meeting", "className": "calendar-event", "bid": "cal1"},
+        {"text": "Node A", "role": "treeitem", "bid": "t1"},
+    ]
+    ctx = build_extraction_context({"visible_text": ""}, {"axtree_excerpt": ""}, candidates)
+    assert ctx["list_like_items"]
+    assert ctx["email_like_items"]
+    assert ctx["calendar_like_items"]
+    assert ctx["tree_like_items"]
+
+
+def test_intent_parser_examples():
+    assert parse_extraction_intent("Find the product with the highest rating")["intent"] == "find_max_numeric"
+    assert parse_extraction_intent("Count visible product cards")["intent"] == "count_objects"
+    assert parse_extraction_intent("Find the email marked important")["intent"] == "find_important_email"
+
+
+def test_solver_max_count_parity_email_grid_find_text():
+    candidates = [
+        {"text": "12", "role": "button", "bid": "b12"},
+        {"text": "87", "role": "button", "bid": "b87"},
+        {"text": "odd", "role": "button", "bid": "bo"},
+        {"text": "even", "role": "button", "bid": "be"},
+        {"text": "From: Bob Subject: Important", "role": "row", "bid": "mail1"},
+        {"text": "R1C1", "role": "gridcell", "bid": "g1"},
+    ]
+    ctx = build_extraction_context({"visible_text": "12 87"}, {"axtree_excerpt": "Find word apple\napple"}, candidates)
+    assert solve_extraction_task({"intent": "find_max_numeric"}, ctx, candidates, []).answer == "87"
+    assert solve_extraction_task({"intent": "count_objects"}, ctx, candidates, []).answer is not None
+    assert solve_extraction_task({"intent": "parity_check"}, ctx, candidates, []).answer in {"odd", "even"}
+    assert solve_extraction_task({"intent": "find_email"}, ctx, candidates, []) is not None
+    assert solve_extraction_task({"intent": "grid_lookup"}, ctx, candidates, []) is not None
+    assert solve_extraction_task({"intent": "find_text"}, ctx, candidates, []) is not None

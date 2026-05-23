@@ -20,3 +20,5 @@ def test_parse_minwob_cli_args():
 def test_parse_minwob_subset_arg():
     args = parse_args(["--subset", "basic"])
     assert args.subset == "basic"
+    args2 = parse_args(["--subset", "extraction"])
+    assert args2.subset == "extraction"

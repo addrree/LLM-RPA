@@ -58,6 +58,17 @@ def test_choose_date_day_dom_only_uses_mouse_click():
     r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=cands, history=[], action_syntax=[])
     assert r and r.mapping_strategy == "policy_choose_date_day" and r.action.startswith("mouse_click(")
 
+def test_choose_date_day_works_when_header_year_missing_if_day_present():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 06/28/2016 as the date and hit submit."
+    cands = [
+        {"bid": "h", "text": "June", "className": "ui-datepicker-title"},
+        {"bid": "d28", "role": "button", "name": "28", "className": "ui-state-default"},
+    ]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r and r.mapping_strategy == "policy_choose_date_day"
+    assert '"d28"' in r.action
+
 
 def test_use_autocomplete_policy_flow():
     p = MiniWoBDeterministicPolicy()
