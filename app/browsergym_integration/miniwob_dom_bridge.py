@@ -66,7 +66,7 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
     script = """
     () => {
       const selectors = [
-        'a[href]','a','button','input','textarea','select','option','label','[role]','[onclick]',
+        'a[href]','a','button','input','textarea','select','option','label','[role]','[onclick]','[role="link"]','span','div','p','td','li',
         '.ui-menu-item','.ui-autocomplete li','.ui-menu li','.ui-datepicker','.ui-datepicker-title',
         '.ui-datepicker-month','.ui-datepicker-year','.ui-datepicker-prev','.ui-datepicker-next',
         '.ui-datepicker-calendar td a','.ui-datepicker-calendar td','.ui-state-default','.ui-state-active','.ui-priority-secondary'
@@ -101,7 +101,31 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
           parent_tag: parent ? (parent.tagName || '').toLowerCase() : ''
         });
       }
-      return out;
+
+      let outFiltered = out.filter(c => c.visible && ((c.text||c.innerText||c.textContent||'').trim() || c.href || (c.className||'').toLowerCase().includes('ui-datepicker') || (c.className||'').toLowerCase().includes('ui-autocomplete') || c.role || c.tag==='input' || c.tag==='button'));
+      if (!outFiltered.length) {
+        const all = Array.from(document.querySelectorAll('*'));
+        for (const el of all) {
+          const rect = el.getBoundingClientRect();
+          const style = window.getComputedStyle(el);
+          const txt = (el.innerText || el.textContent || '').trim();
+          const visible = !!(rect.width || rect.height) && style.display !== 'none' && style.visibility !== 'hidden';
+          const clickable = !!el.getAttribute('href') || !!el.getAttribute('onclick') || style.cursor === 'pointer';
+          if (!visible || (!(txt && txt.length) && !clickable)) continue;
+          outFiltered.push({
+            source: 'dom', tag: (el.tagName||'').toLowerCase(), role: el.getAttribute('role') || '', type: el.getAttribute('type') || '',
+            id: el.id || '', name: el.getAttribute('name') || '', value: el.value || '',
+            text: txt, innerText: (el.innerText||'').trim(), textContent: (el.textContent||'').trim(),
+            href: el.getAttribute('href') || '', title: el.getAttribute('title') || '', ariaLabel: el.getAttribute('aria-label') || '',
+            className: typeof el.className === 'string' ? el.className : '', placeholder: el.getAttribute('placeholder') || '',
+            visible, bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom},
+            page_center_x: rect.x + rect.width/2, page_center_y: rect.y + rect.height/2, center_x: rect.x + rect.width/2, center_y: rect.y + rect.height/2
+          });
+          if (outFiltered.length >= 300) break;
+        }
+      }
+      return outFiltered.slice(0,300);
+
     }
     """
     try:

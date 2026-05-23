@@ -508,6 +508,13 @@ def browsergym_obs_to_page_context(obs: dict, info: dict | None = None) -> dict:
     has_page_candidates = bool(obs.get("page_clickable_candidates")) if isinstance(obs, dict) else False
     limit = 100 if (base_count > 30 or has_page_candidates) else 30
     clickable_candidates = extract_clickable_candidates(obs, info, limit=limit)
+    page_candidates = obs.get("page_clickable_candidates") if isinstance(obs, dict) else None
+    if isinstance(page_candidates, list):
+        for c in page_candidates:
+            if isinstance(c, dict):
+                clickable_candidates.append(dict(c))
+    if not clickable_candidates and isinstance(page_candidates, list):
+        clickable_candidates = [dict(c) for c in page_candidates if isinstance(c, dict)]
     select_control_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_select_control_candidate(candidate)]
     option_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_option_candidate(candidate)]
     submit_candidates = [_candidate_public_summary(candidate) for candidate in clickable_candidates if _is_submit_candidate(candidate)]
