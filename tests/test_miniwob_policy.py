@@ -123,6 +123,16 @@ def test_choose_date_prefers_hasdatepicker_input():
     assert r and r.mapping_strategy == "policy_choose_date_open" and '"17"' in r.action
 
 
+def test_choose_date_detects_date_input_without_role():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 06/28/2016 as the date and hit submit."
+    cands = [{"bid": "17", "tag": "input", "type": "text", "id": "datepicker", "className": "hasDatepicker", "role": ""}]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r and r.mapping_strategy == "policy_choose_date_open"
+    assert r.action == 'click("17", "left")'
+    assert (r.mapping_diagnostics or {}).get("date_input_bid") == "17"
+
+
 def test_choose_date_stops_if_datepicker_not_opened_after_two_clicks():
     p = MiniWoBDeterministicPolicy()
     instruction = "Select 06/19/2016 as the date and hit submit."

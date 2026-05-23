@@ -215,6 +215,38 @@ def test_miniwob_grounding_blocks_repeated_ineffective_action():
     assert "repeated ineffective action" in result.mapping_error
 
 
+def test_choose_date_policy_runs_pre_llm_and_skips_llm_call():
+    planner = _Planner({"rationale": "fallback", "action": 'fill("17", "06/28/2016")'})
+    adapter = BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.choose-date")
+    obs = {
+        "goal": "Select 06/28/2016 as the date and hit submit.",
+        "url": "http://miniwob/",
+        "page_clickable_candidates": [
+            {"bid": "17", "tag": "input", "type": "text", "id": "datepicker", "className": "hasDatepicker", "role": "", "source": "dom"}
+        ],
+    }
+
+    decision = adapter.act("goal", obs, {}, [])
+
+    assert decision.action == 'click("17", "left")'
+    assert decision.mapping_strategy == "policy_choose_date_open"
+    assert (decision.mapping_diagnostics or {}).get("policy_pre_llm_used") is True
+    assert (decision.mapping_diagnostics or {}).get("policy_name") == "choose-date"
+    assert (decision.mapping_diagnostics or {}).get("chosen_stage") == "open"
+    assert (decision.mapping_diagnostics or {}).get("date_input_bid") == "17"
+    assert planner.llm_client.calls == []
+
+
+def test_grounding_keeps_click_on_datepicker_input():
+    result = ground_miniwob_action(
+        action='click("17", "left")',
+        parsed_response={"instruction": "Select 06/28/2016 as the date and hit submit.", "env_id": "browsergym/miniwob.choose-date"},
+        candidates=[{"bid": "17", "tag": "input", "type": "text", "id": "datepicker", "className": "hasDatepicker", "parent_text": "Date field"}],
+    )
+    assert result.action == 'click("17", "left")'
+    assert result.mapping_strategy == "datepicker_input_click"
+
+
 def test_action_space_unicode_repr_not_in_action_syntax_examples():
     class _UnicodeSpace:
         def __repr__(self):
