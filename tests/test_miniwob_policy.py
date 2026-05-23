@@ -23,6 +23,13 @@ def test_click_link_policy():
     r = p.try_act(env_id="browsergym/miniwob.click-link", task_name="click-link", instruction='Click on the link "Nulla.".', candidates=cands, history=[], action_syntax=[])
     assert r and '"9"' in r.action
 
+
+def test_click_link_policy_dom_only_uses_mouse_click():
+    p = MiniWoBDeterministicPolicy()
+    cands = [{"source": "dom", "role": "generic", "tag": "a", "text": "sed.", "href": "/elit", "visible": True, "bbox": {"x": 1}, "browsergym_center_x": 20, "browsergym_center_y": 30}]
+    r = p.try_act(env_id="browsergym/miniwob.click-link", task_name="click-link", instruction='Click on the link "sed.".', candidates=cands, history=[], action_syntax=[])
+    assert r and r.action.startswith("mouse_click(")
+
 def test_click_link_rejects_empty_generic_candidates():
     p = MiniWoBDeterministicPolicy()
     cands = [{"bid": "11", "role": "generic", "name": "", "text": ""}]
@@ -43,6 +50,13 @@ def test_choose_date_policy_steps():
     assert r2 and '"22"' in r2.action
     r3 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=[{"bid": "s", "role": "button", "text": "Submit"}, {"bid": "d", "role": "textbox", "text": "Date", "value": "10/22/2016"}], history=[{"selected_candidate_text": "22", "mapping_strategy": "policy_choose_date_day"}], action_syntax=[])
     assert r3 and '"s"' in r3.action
+
+
+def test_choose_date_day_dom_only_uses_mouse_click():
+    p = MiniWoBDeterministicPolicy()
+    cands = [{"source": "dom", "role": "generic", "tag": "a", "text": "22", "className": "ui-state-default", "visible": True, "bbox": {"x": 1}, "browsergym_center_x": 21, "browsergym_center_y": 22}, {"text": "October 2016", "className": "ui-datepicker-title"}]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction="Select 10/22/2016 as the date and hit submit.", candidates=cands, history=[], action_syntax=[])
+    assert r and r.mapping_strategy == "policy_choose_date_day" and r.action.startswith("mouse_click(")
 
 
 def test_use_autocomplete_policy_flow():

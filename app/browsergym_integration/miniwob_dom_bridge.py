@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import math
 
 
 def _norm_text(v: Any) -> str:
@@ -10,6 +11,51 @@ def _norm_text(v: Any) -> str:
 def _is_meaningful_text(v: Any) -> bool:
     t = _norm_text(v).lower()
     return bool(t and t not in {"generic", "listitem", "option", "menuitem"})
+
+
+def _bbox_parts(raw: Any) -> tuple[float, float, float, float] | None:
+    if not isinstance(raw, dict):
+        return None
+    x = raw.get("x", raw.get("left"))
+    y = raw.get("y", raw.get("top"))
+    w = raw.get("width")
+    h = raw.get("height")
+    if w is None and raw.get("right") is not None and x is not None:
+        w = float(raw.get("right")) - float(x)
+    if h is None and raw.get("bottom") is not None and y is not None:
+        h = float(raw.get("bottom")) - float(y)
+    if not all(isinstance(v, (int, float)) for v in (x, y, w, h)):
+        return None
+    if float(w) <= 0 or float(h) <= 0:
+        return None
+    return float(x), float(y), float(w), float(h)
+
+
+def bbox_iou_or_center_distance(ax_bbox: Any, dom_bbox: Any) -> bool:
+    a = _bbox_parts(ax_bbox)
+    d = _bbox_parts(dom_bbox)
+    if not a or not d:
+        return False
+    ax, ay, aw, ah = a
+    dx, dy, dw, dh = d
+    ax2, ay2 = ax + aw, ay + ah
+    dx2, dy2 = dx + dw, dy + dh
+    inter_w = max(0.0, min(ax2, dx2) - max(ax, dx))
+    inter_h = max(0.0, min(ay2, dy2) - max(ay, dy))
+    inter = inter_w * inter_h
+    union = aw * ah + dw * dh - inter
+    iou = (inter / union) if union > 0 else 0.0
+    if iou > 0.5:
+        return True
+    acx, acy = ax + aw / 2, ay + ah / 2
+    dcx, dcy = dx + dw / 2, dy + dh / 2
+    dist = math.hypot(acx - dcx, acy - dcy)
+    sim = (min(aw, dw) / max(aw, dw) >= 0.5) and (min(ah, dh) / max(ah, dh) >= 0.5)
+    if dist < 5.0 and sim:
+        return True
+    a_contains_d_center = ax <= dcx <= ax2 and ay <= dcy <= ay2
+    d_contains_a_center = dx <= acx <= dx2 and dy <= acy <= dy2
+    return a_contains_d_center or d_contains_a_center
 
 
 def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
@@ -78,7 +124,12 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
 def merge_dom_candidates_with_ax(ax_candidates: list[dict[str, Any]], dom_candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     merged = [dict(c) for c in (ax_candidates or []) if isinstance(c, dict)]
     used_dom: set[int] = set()
+    merged_by_node_count = 0
+    merged_by_bbox_count = 0
+    kept_dom_only_count = 0
     for i, a in enumerate(merged):
+        ax_text = a.get("text") or a.get("innerText") or a.get("textContent") or a.get("name")
+        needs_enrichment = bool(str(a.get("bid") or "").strip()) and not _is_meaningful_text(ax_text)
         ax_node = str(a.get("backendDOMNodeId") or a.get("nodeId") or "")
         hit = None
         for j, d in enumerate(dom_candidates or []):
@@ -87,11 +138,22 @@ def merge_dom_candidates_with_ax(ax_candidates: list[dict[str, Any]], dom_candid
             dom_node = str(d.get("backendDOMNodeId") or d.get("nodeId") or "")
             if ax_node and dom_node and ax_node == dom_node:
                 hit = (j, d)
+                merged_by_node_count += 1
                 break
+        if hit is None and needs_enrichment:
+            ax_bbox = a.get("bbox") or a.get("browsergym_bbox")
+            for j, d in enumerate(dom_candidates or []):
+                if j in used_dom or not isinstance(d, dict):
+                    continue
+                dom_bbox = d.get("bbox") or d.get("browsergym_bbox")
+                if bbox_iou_or_center_distance(ax_bbox, dom_bbox):
+                    hit = (j, d)
+                    merged_by_bbox_count += 1
+                    break
         if hit:
             j, d = hit
             used_dom.add(j)
-            for k in ("text", "innerText", "textContent", "href", "className", "bbox", "page_center_x", "page_center_y", "browsergym_center_x", "browsergym_center_y", "tag", "source"):
+            for k in ("tag", "text", "innerText", "textContent", "href", "title", "ariaLabel", "className", "placeholder", "bbox", "browsergym_center_x", "browsergym_center_y", "page_center_x", "page_center_y", "source"):
                 if (not a.get(k)) and d.get(k):
                     a[k] = d.get(k)
             merged[i] = a
@@ -100,8 +162,26 @@ def merge_dom_candidates_with_ax(ax_candidates: list[dict[str, Any]], dom_candid
             continue
         if not isinstance(d, dict):
             continue
-        if d.get("href") or _is_meaningful_text(d.get("text") or d.get("innerText") or d.get("textContent")):
+        cls = _norm_text(d.get("className")).lower()
+        keep_dom = bool(
+            d.get("href")
+            or _is_meaningful_text(d.get("text") or d.get("innerText") or d.get("textContent"))
+            or "ui-datepicker" in cls
+            or "ui-autocomplete" in cls
+        )
+        if keep_dom:
             merged.append(dict(d))
+            kept_dom_only_count += 1
+
+    diagnostics = {
+        "dom_candidates_count": len([c for c in (dom_candidates or []) if isinstance(c, dict)]),
+        "merged_by_node_count": merged_by_node_count,
+        "merged_by_bbox_count": merged_by_bbox_count,
+        "kept_dom_only_count": kept_dom_only_count,
+    }
+    for c in merged:
+        if isinstance(c, dict):
+            c.setdefault("merge_diagnostics", diagnostics)
 
     def score(c: dict[str, Any]) -> tuple[int, int, int]:
         bid = 1 if str(c.get("bid") or "").strip() else 0
