@@ -100,22 +100,13 @@ class LLMClient:
             response_mode = self.last_chat_diagnostics.get("content_source", "unknown")
             if response_mode == "empty_content_with_thinking":
                 response_mode = "non_json_thinking_response"
-            if response_mode in {"non_json_thinking_response", "message.thinking_json_block"}:
-                logger.warning(
-                    "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s)",
-                    stage,
-                    len(system_prompt or ""),
-                    len(user_prompt or ""),
-                    response_mode,
-                )
-            else:
-                logger.exception(
-                    "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s)",
-                    stage,
-                    len(system_prompt or ""),
-                    len(user_prompt or ""),
-                    response_mode,
-                )
+            logger.exception(
+                "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s)",
+                stage,
+                len(system_prompt or ""),
+                len(user_prompt or ""),
+                response_mode,
+            )
             raise
         fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
         return LLMArtifact(
@@ -292,15 +283,9 @@ class LLMClient:
             if not cleaned_content and thinking_content:
                 extracted_thinking = self._extract_first_json_block(thinking_content)
                 if extracted_thinking:
-                    extracted_candidate = extracted_thinking.strip()
-                    try:
-                        json.loads(extracted_candidate)
-                    except json.JSONDecodeError:
-                        extracted_candidate = ""
-                    if extracted_candidate:
-                        cleaned_content = extracted_candidate
-                        content_source = "message.thinking_json_block"
-                        used_thinking_fallback = True
+                    cleaned_content = extracted_thinking.strip()
+                    content_source = "message.thinking_json_block"
+                    used_thinking_fallback = True
 
             self.last_chat_diagnostics = {
                 "content_source": content_source,
