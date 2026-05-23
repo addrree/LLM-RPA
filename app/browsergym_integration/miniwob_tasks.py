@@ -23,6 +23,20 @@ RECOMMENDED_MINIWOB_TASK_NAMES = [
     "use-autocomplete",
     "book-flight",
 ]
+EXTRACTION_MINIWOB_TASK_NAMES = [
+    "find-word",
+    "find-greatest",
+    "find-midpoint",
+    "count-shape",
+    "count-sides",
+    "identify-shape",
+    "grid-coordinate",
+    "odd-or-even",
+    "email-inbox",
+    "email-inbox-important",
+    "daily-calendar",
+    "navigate-tree",
+]
 
 
 def _ensure_miniwob_registered() -> None:

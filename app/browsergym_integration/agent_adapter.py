@@ -18,6 +18,9 @@ from app.browsergym_integration.local_extractor import (
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context, page_context_to_snapshot_like
 from app.browsergym_integration.plan_normalizer import normalize_plan_for_browsergym
 from app.browsergym_integration.vision import extract_browsergym_image_base64
+from app.extraction.extraction_controller import solve_extraction_task
+from app.extraction.intent_parser import parse_extraction_intent
+from app.extraction.page_extractor import build_extraction_context
 from app.schemas.task_spec import TaskSpec
 
 
@@ -298,6 +301,31 @@ class BrowserGymAgentAdapter:
             "Return exactly: {\"rationale\": \"...\", \"target_text\": \"submit\", \"target_bid\": \"...\", \"action\": \"click(\\\"...\\\", \\\"left\\\")\"}"
         )
         images = [image_base64] if image_base64 is not None else None
+        extraction_context = build_extraction_context(obs, context, candidates_for_state)
+        extraction_intent = parse_extraction_intent(miniwob_instruction)
+        if extraction_intent.get("intent") != "unknown":
+            extraction_decision = solve_extraction_task(extraction_intent, extraction_context, candidates_for_state, self.browsergym_action_syntax)
+            if extraction_decision is not None and extraction_decision.action:
+                return BrowserGymAgentDecision(
+                    action=extraction_decision.action,
+                    rationale=f"extraction controller: {extraction_decision.strategy}",
+                    finish=False,
+                    answer=extraction_decision.answer,
+                    extracted_value=extraction_decision.answer,
+                    vision_used=self.use_vision,
+                    vision_image_present=vision_image_present,
+                    miniwob_instruction=miniwob_instruction,
+                    action_string=extraction_decision.action,
+                    action_string_before_mapping=extraction_decision.action,
+                    action_string_after_mapping=extraction_decision.action,
+                    selected_candidate=extraction_decision.selected_candidate,
+                    selected_candidate_bid=real_candidate_bid(extraction_decision.selected_candidate),
+                    bid_source=(extraction_decision.selected_candidate or {}).get("bid_source") if isinstance(extraction_decision.selected_candidate, dict) else None,
+                    clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0),
+                    page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
+                    mapping_strategy=f"extraction_{extraction_decision.strategy}",
+                    mapping_diagnostics={"extraction_intent": extraction_intent.get("intent"), "confidence": extraction_decision.confidence, "extracted_data": extraction_decision.extracted_data, **(extraction_decision.diagnostics or {})},
+                )
         task_name = (self.env_id or "").lower()
         is_choose_date = "choose-date" in task_name
         policy = self.miniwob_policy.try_act(env_id=self.env_id or "", task_name=(self.env_id or "").split(".")[-1], instruction=miniwob_instruction, candidates=candidates_for_state, history=history, action_syntax=self.browsergym_action_syntax)
