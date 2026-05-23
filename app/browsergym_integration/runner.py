@@ -9,6 +9,7 @@ from datetime import datetime
 from app.browsergym_integration.config import BrowserGymRunConfig
 from app.browsergym_integration.miniwob_grounding import real_candidate_bid
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context
+from app.browsergym_integration.miniwob_dom_bridge import extract_miniwob_dom_candidates, merge_dom_candidates_with_ax
 from app.browsergym_integration.report import BrowserGymRunReport, BrowserGymStepRecord
 
 
@@ -25,6 +26,8 @@ class BrowserGymRunner:
         "policy_choose_date_header_not_found",
         "policy_choose_date_invalid_state",
         "policy_book_flight_search_no_progress",
+        "policy_click_link_target_not_found",
+        "policy_choose_date_fill_no_progress",
     }
     NON_RECOVERABLE_DIAGNOSTICS = {
         "menu_requires_hover_no_supported_action",
@@ -148,74 +151,10 @@ class BrowserGymRunner:
         if page is None:
             return [], True
         try:
-            scale_factor = float(getattr(page, "_bgym_scale_factor", 1.0) or 1.0)
-        except (TypeError, ValueError):
-            scale_factor = 1.0
-        script = """
-        () => {
-          const selectors = [
-            'button','input[type=button]','input[type=submit]','input[type=checkbox]','input[type=radio]',
-            'a','select','select option','textarea','[role=button]','[role=link]','[role=option]','[onclick]','label'
-          ];
-          const seen = new Set();
-          return Array.from(document.querySelectorAll(selectors.join(','))).map((el) => {
-            if (seen.has(el)) return null;
-            seen.add(el);
-            const rect = el.getBoundingClientRect();
-            const style = window.getComputedStyle(el);
-            const visible = !!(rect.width || rect.height) && style.visibility !== 'hidden' && style.display !== 'none';
-            const isOption = el.tagName.toLowerCase() === 'option';
-            const parentSelect = isOption ? el.closest('select') : null;
-            const text = (el.innerText || el.label || el.value || el.getAttribute('aria-label') || el.title || el.name || el.id || '').trim();
-            const bid = el.getAttribute('bid');
-            const dataTestId = el.getAttribute('data-testid');
-            const browsergymId = el.getAttribute('browsergym_id');
-            const dataBid = el.getAttribute('data-bid');
-            const ref = el.getAttribute('ref');
-            const realBid = bid || dataTestId || browsergymId || dataBid || ref || '';
-            const bidSource = bid ? 'bid' : (dataTestId ? 'data-testid' : (browsergymId ? 'browsergym_id' : (dataBid ? 'data-bid' : (ref ? 'ref' : ''))));
-            return {
-              tag: el.tagName.toLowerCase(),
-              type: el.getAttribute('type') || '',
-              role: el.getAttribute('role') || (el.tagName.toLowerCase() === 'select' ? 'combobox' : (el.tagName.toLowerCase() === 'option' ? 'option' : '')),
-              kind: el.tagName.toLowerCase() === 'select' ? 'select' : (el.tagName.toLowerCase() === 'option' ? 'option' : ''),
-              text,
-              value: el.value || '',
-              href: el.href || el.getAttribute('href') || '',
-              textContent: el.textContent || '',
-              innerText: el.innerText || '',
-              className: typeof el.className === "string" ? el.className : '',
-              ariaLabel: el.getAttribute('aria-label') || '',
-              id: el.id || '',
-              name: el.getAttribute('name') || '',
-              bid: realBid,
-              bid_source: bidSource,
-              dataTestId: dataTestId || '',
-              browsergymId: browsergymId || '',
-              dataBid: dataBid || '',
-              ref: ref || '',
-              parent_bid: parentSelect ? (parentSelect.getAttribute('bid') || parentSelect.getAttribute('data-testid') || parentSelect.getAttribute('browsergym_id') || parentSelect.getAttribute('data-bid') || parentSelect.getAttribute('ref') || '') : '',
-              owner_bid: parentSelect ? (parentSelect.getAttribute('bid') || parentSelect.getAttribute('data-testid') || parentSelect.getAttribute('browsergym_id') || parentSelect.getAttribute('data-bid') || parentSelect.getAttribute('ref') || '') : '',
-              parent_name: parentSelect ? (parentSelect.getAttribute('name') || parentSelect.id || parentSelect.getAttribute('aria-label') || '') : '',
-              selected: !!el.selected,
-              disabled: !!el.disabled,
-              enabled: !el.disabled,
-              visible,
-              clickable: true,
-              bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom},
-              center_x: rect.x + rect.width / 2,
-              center_y: rect.y + rect.height / 2
-            };
-          }).filter(Boolean);
-        }
-        """
-        try:
-            candidates = page.evaluate(script)
+            dom = extract_miniwob_dom_candidates(page)
+            return dom, False
         except Exception:
             return [], True
-        if not isinstance(candidates, list):
-            return [], False
-        return cls._augment_page_candidate_coordinates(candidates, scale_factor), False
 
     @classmethod
     def _augment_miniwob_observation_with_page_candidates(cls, env, obs, info):
@@ -225,7 +164,7 @@ class BrowserGymRunner:
         candidates, failed = cls._extract_page_clickable_candidates(env)
         augmented = dict(obs)
         ax = list(obs.get("clickable_candidates") or []) if isinstance(obs, dict) else []
-        merged = list(ax)
+        merged = merge_dom_candidates_with_ax(ax, candidates or [])
         seen = set()
         def key(c):
             if not isinstance(c, dict):
@@ -250,9 +189,9 @@ class BrowserGymRunner:
             seen.add(k)
             merged.append(c)
         if merged:
-            augmented["clickable_candidates"] = merged[:80]
+            augmented["clickable_candidates"] = merged[:200]
             augmented["clickable_candidates_count"] = len(merged)
-            augmented["page_clickable_candidates"] = (candidates or [])[:80]
+            augmented["page_clickable_candidates"] = (candidates or [])[:200]
         if failed:
             augmented["page_candidate_extraction_failed"] = True
         return augmented

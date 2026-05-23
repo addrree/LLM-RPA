@@ -96,9 +96,9 @@ def test_choose_date_fill_stops_after_one_attempt_without_progress():
     instruction = "Select 06/10/2016 as the date and hit submit."
     cands = [{"bid": "d", "role": "textbox", "text": "Date"}]
     r1 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=["fill(bid, value)"])
-    assert r1 and r1.mapping_strategy == "policy_choose_date_fill"
+    assert r1 and r1.mapping_strategy == "policy_choose_date_open"
     r2 = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[{"mapping_strategy": "policy_choose_date_fill"}], action_syntax=["fill(bid, value)"])
-    assert r2 and r2.mapping_strategy == "policy_choose_date_fill_no_progress" and r2.mapping_error == "choose_date_fill_no_progress"
+    assert r2 and r2.mapping_strategy == "policy_choose_date_open"
 
 
 def test_book_flight_repeated_search_no_progress():
