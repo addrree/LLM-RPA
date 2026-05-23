@@ -16,7 +16,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.browsergym_integration import BrowserGymAgentAdapter, BrowserGymRunConfig, BrowserGymRunner
-from app.browsergym_integration.miniwob_tasks import EXTRACTION_MINIWOB_TASK_NAMES, list_minwob_env_ids, select_minwob_subset, task_name_from_env_id
+from app.browsergym_integration.miniwob_tasks import EXTRACTION_MINIWOB_TASK_NAMES, VISUAL_SPATIAL_MINIWOB_TASK_NAMES, list_minwob_env_ids, select_minwob_subset, task_name_from_env_id
 from app.main import build_llm_client
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
@@ -38,7 +38,7 @@ def parse_args(argv=None):
     parser.add_argument("--max-steps", type=int, default=10)
     parser.add_argument("--limit", type=int, default=10)
     parser.add_argument("--task-ids", default=None, help="Comma-separated full env IDs or MiniWoB task names")
-    parser.add_argument("--subset", choices=["action", "extraction", "basic", "complex", "all"], default=None, help="action/basic excludes book-flight; extraction uses extraction tasks; complex includes only book-flight; all includes every selected task")
+    parser.add_argument("--subset", choices=["action", "extraction", "visual", "basic", "complex", "all"], default=None, help="action/basic excludes book-flight; extraction uses extraction tasks; visual uses visual-spatial tasks; complex includes only book-flight; all includes every selected task")
     parser.add_argument("--include", default=None, help="Comma-separated regex patterns to include")
     parser.add_argument("--exclude", default=None, help="Comma-separated regex patterns to exclude")
     parser.add_argument("--use-vision", action="store_true", help="Send BrowserGym screenshot to the planner LLM payload")
@@ -198,6 +198,13 @@ def skipped_result(env_id: str, message: str, *, use_vision: bool) -> dict[str, 
         "output_path": None,
     }
 
+def _suite_type(subset: str | None) -> str:
+    if subset == "extraction":
+        return "miniwob_extraction"
+    if subset == "visual":
+        return "miniwob_visual_spatial"
+    return "miniwob_action"
+
 
 def main(argv=None) -> int:
     args = parse_args(argv)
@@ -213,6 +220,8 @@ def main(argv=None) -> int:
         task_ids = ",".join(EXTRACTION_MINIWOB_TASK_NAMES)
     if args.subset == "complex" and not task_ids:
         task_ids = "book-flight"
+    if args.subset == "visual" and not task_ids:
+        task_ids = ",".join(VISUAL_SPATIAL_MINIWOB_TASK_NAMES)
     if args.subset == "all" and not task_ids:
         task_ids = None
     if task_ids:
@@ -241,7 +250,7 @@ def main(argv=None) -> int:
         message = "MINIWOB_URL is not set. Start MiniWoB++ HTTP server and set MINIWOB_URL=http://127.0.0.1:8765 before running tasks."
         placeholder_ids = selected or ["browsergym/miniwob.unavailable"]
         aggregate = build_aggregate([skipped_result(env_id, message, use_vision=args.use_vision) for env_id in placeholder_ids], use_vision=args.use_vision)
-        aggregate.update({"subset": args.subset or "default", "suite_type": "miniwob_extraction" if args.subset == "extraction" else "miniwob_action", "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "total_tasks": len(selected)})
+        aggregate.update({"subset": args.subset or "default", "suite_type": _suite_type(args.subset), "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "total_tasks": len(selected)})
         json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
         print(message)
         print(json.dumps({"status": "skipped", "json": str(json_path), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
@@ -250,7 +259,7 @@ def main(argv=None) -> int:
     if not selected:
         message = "No BrowserGym MiniWoB env IDs were registered. Install browsergym-miniwob and verify the package imports."
         aggregate = build_aggregate([skipped_result("browsergym/miniwob.unavailable", message, use_vision=args.use_vision)], use_vision=args.use_vision)
-        aggregate.update({"subset": args.subset or "default", "suite_type": "miniwob_extraction" if args.subset == "extraction" else "miniwob_action", "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "total_tasks": len(selected)})
+        aggregate.update({"subset": args.subset or "default", "suite_type": _suite_type(args.subset), "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "total_tasks": len(selected)})
         json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
         print(message)
         print(json.dumps({"status": "skipped", "json": str(json_path), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
@@ -312,7 +321,7 @@ def main(argv=None) -> int:
     aggregate = build_aggregate(results, use_vision=args.use_vision)
     aggregate.update({
         "subset": args.subset or "default",
-        "suite_type": "miniwob_extraction" if args.subset == "extraction" else "miniwob_action",
+        "suite_type": _suite_type(args.subset),
         "requested_task_ids": requested_envs,
         "excluded_tasks": excluded_tasks,
         "effective_task_ids": list(selected),

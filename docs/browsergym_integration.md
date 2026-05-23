@@ -30,6 +30,14 @@ python scripts/run_minwob_subset.py \
 
 Outputs are written to `artifacts/browsergym/` as JSON and CSV aggregate reports. The runner stores per-step action mapping diagnostics, selected MiniWoB candidates, rewards, termination flags, and failure buckets.
 
+## Benchmark subsets
+
+- `--subset action` / `--subset basic`: UI action grounding.
+- `--subset extraction`: text/data extraction tasks (word/number/list/grid/email/calendar/tree style tasks).
+- `--subset visual`: visual-spatial canvas tasks such as `find-midpoint`.
+
+`find-midpoint` is not part of the extraction subset because it requires visual/canvas coordinate reasoning rather than DOM/text extraction.
+
 ## Action mapping
 
 The MiniWoB mapper prefers BrowserGym-native action strings when reliable element identifiers are available:

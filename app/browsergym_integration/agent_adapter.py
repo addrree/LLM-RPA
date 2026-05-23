@@ -22,6 +22,7 @@ from app.extraction.extraction_controller import solve_extraction_task
 from app.extraction.intent_parser import parse_extraction_intent
 from app.extraction.page_extractor import build_extraction_context
 from app.schemas.task_spec import TaskSpec
+from app.utils.llm_client import LLMClientError
 
 
 @dataclass
@@ -203,6 +204,21 @@ class BrowserGymAgentAdapter:
         image_base64 = extract_browsergym_image_base64(obs, info) if self.use_vision else None
         vision_image_present = image_base64 is not None
         miniwob_instruction = context.get("goal_instruction") or goal or "Complete the MiniWoB task according to the page instruction"
+        if (self.env_id or "").lower().endswith("find-midpoint"):
+            return BrowserGymAgentDecision(
+                action="noop()",
+                rationale="find-midpoint requires visual/canvas coordinate selection",
+                finish=False,
+                vision_used=self.use_vision,
+                vision_image_present=vision_image_present,
+                miniwob_instruction=miniwob_instruction,
+                action_string="noop()",
+                action_string_before_mapping="noop()",
+                action_string_after_mapping="noop()",
+                mapping_error="action_mapping_failure: visual_spatial_controller_required",
+                mapping_strategy="visual_spatial_controller_required",
+                mapping_diagnostics={"failure_reason": "find-midpoint requires visual/canvas coordinate selection"},
+            )
         action_examples = self._default_action_syntax_examples()
         candidates_for_state = list(context.get("clickable_candidates") or [])
         page_candidates = list((obs or {}).get("page_clickable_candidates") or []) if isinstance(obs, dict) else []
@@ -337,6 +353,33 @@ class BrowserGymAgentAdapter:
         mapping_error = None
         try:
             parsed = self._call_direct_action_model(system_prompt, user_prompt, images)
+        except LLMClientError as exc:
+            parsed = {}
+            mapping_error = "action_mapping_failure: llm_non_json_response"
+            policy2 = self.miniwob_policy.try_act(env_id=self.env_id or "", task_name=(self.env_id or "").split(".")[-1], instruction=miniwob_instruction, candidates=candidates_for_state, history=history, action_syntax=self.browsergym_action_syntax)
+            if policy2 is not None:
+                md = dict(policy2.mapping_diagnostics or {})
+                md["llm_failed_policy_fallback"] = True
+                md["llm_error"] = str(exc)
+                pname = md.get("policy_name", "unknown")
+                return BrowserGymAgentDecision(action=policy2.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy2.action, action_string_before_mapping=policy2.action, action_string_after_mapping=policy2.action, selected_candidate=policy2.selected_candidate, selected_candidate_bid=real_candidate_bid(policy2.selected_candidate), bid_source=(policy2.selected_candidate or {}).get("bid_source") if isinstance(policy2.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy2.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
+            llm_diag = dict(getattr(getattr(self.planner, "llm_client", None), "last_chat_diagnostics", {}) or {})
+            return BrowserGymAgentDecision(
+                action="noop()",
+                rationale=str(exc),
+                finish=False,
+                vision_used=self.use_vision,
+                vision_image_present=vision_image_present,
+                miniwob_instruction=miniwob_instruction,
+                action_string="noop()",
+                action_string_before_mapping="noop()",
+                action_string_after_mapping="noop()",
+                clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0),
+                page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
+                mapping_error=mapping_error,
+                mapping_strategy="llm_non_json_response",
+                mapping_diagnostics={"llm_error": str(exc), "content_source": llm_diag.get("content_source"), "response_mode": llm_diag.get("content_source")},
+            )
         except Exception as exc:
             parsed = {}
             mapping_error = f"action_mapping_failure: model error: {exc}"
