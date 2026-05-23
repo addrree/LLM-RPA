@@ -21,6 +21,19 @@ def unwrap_ax_value(x: Any) -> Any:
     return ""
 
 
+def make_click_action(candidate: dict[str, Any], action_syntax: list[str] | None = None) -> tuple[str, str] | tuple[None, None]:
+    bid = real_candidate_bid(candidate)
+    if bid:
+        return browsergym_click_action(bid, action_syntax=action_syntax or []), "bid_click"
+    visible = candidate.get("visible") is not False
+    x = candidate.get("browsergym_center_x")
+    y = candidate.get("browsergym_center_y")
+    bbox = candidate.get("bbox") or candidate.get("browsergym_bbox")
+    if visible and isinstance(bbox, dict) and isinstance(x, (int, float)) and isinstance(y, (int, float)):
+        return f'mouse_click({int(x)}, {int(y)}, "left")', "dom_center_mouse_click"
+    return None, None
+
+
 class MiniWoBDeterministicPolicy:
     NON_RECOVERABLE_ERRORS = {
         "menu_requires_hover_no_supported_action",
@@ -131,22 +144,14 @@ class MiniWoBDeterministicPolicy:
                 loose = self._norm(raw_target.rstrip(".,!?;:"))
                 links = [c for c in candidates if (self.candidate_role(c) == "link" or self.candidate_tag(c) == "a" or c.get("href")) and not self._is_empty_generic(c) and any(self._norm(v) for v in self._candidate_texts(c))]
                 exact = [c for c in links if any(self._norm(v) == target for v in self._candidate_texts(c))]
-                exact_with_bid = [c for c in exact if real_candidate_bid(c)]
-                if len(exact_with_bid) == 1:
-                    c = exact_with_bid[0]
-                    return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link", mapping_diagnostics={"policy_name": "click-link"})
-                if len(exact) == 1 and real_candidate_bid(exact[0]):
-                    c = exact[0]
-                    return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link", mapping_diagnostics={"policy_name": "click-link"})
-                fallback = [c for c in links if any(self._norm(v) == loose for v in self._candidate_texts(c))]
-                fallback_with_bid = [c for c in fallback if real_candidate_bid(c)]
-                if len(fallback_with_bid) == 1:
-                    c = fallback_with_bid[0]
-                    return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link_fallback", mapping_diagnostics={"policy_name": "click-link"})
-                if len(fallback) == 1 and real_candidate_bid(fallback[0]):
-                    c = fallback[0]
-                    return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(c), action_syntax=action_syntax), selected_candidate=c, mapping_strategy="policy_click_link_fallback", mapping_diagnostics={"policy_name": "click-link"})
-                return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_click_link_target_not_found", mapping_error="link_target_not_found", mapping_diagnostics={"policy_name": "click-link", "target": raw_target, "link_candidates_count": len(links)})
+                pools = [exact, [c for c in links if any(self._norm(v) == loose for v in self._candidate_texts(c))], [c for c in links if target in self._norm(self.candidate_text(c)) or self._norm(self.candidate_text(c)) in target]]
+                for pool in pools:
+                    if len(pool) == 1:
+                        c = pool[0]
+                        action, click_strategy = make_click_action(c, action_syntax)
+                        if action:
+                            return MiniWoBGroundingResult(action=action, selected_candidate=c, mapping_strategy="policy_click_link", mapping_diagnostics={"policy_name": "click-link", "click_strategy": click_strategy})
+                return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_click_link_target_not_found", mapping_error="link_target_not_found", mapping_diagnostics={"policy_name": "click-link", "target": raw_target, "link_candidates_count": len(links), "link_candidate_texts": [self.candidate_text(c) for c in links], "dom_candidates_count": len([c for c in candidates if c.get("source") == "dom"]), "ax_candidates_count": len([c for c in candidates if c.get("source") != "dom"])})
         if "use-autocomplete" in t:
             p = re.search(r"starts with\s+['\"]([^'\"]+)['\"]", instr, flags=re.I)
             s = re.search(r"ends with\s+['\"]([^'\"]+)['\"]", instr, flags=re.I)
@@ -209,7 +214,7 @@ class MiniWoBDeterministicPolicy:
             date_tb = next((c for c in tbs if any("date" in self._norm(v) for v in self._candidate_texts(c))), None) or (tbs[0] if len(tbs) == 1 else None)
             if date_tb:
                 fill_attempts = sum(1 for h in history if isinstance(h, dict) and str(h.get("mapping_strategy") or "") == "policy_choose_date_fill")
-                if m and self._action_supported(action_syntax, "fill"):
+                if False and m and self._action_supported(action_syntax, "fill"):
                     target_date = f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{int(m.group(3)):04d}"
                     current_value = self._norm(date_tb.get("value") or date_tb.get("text") or "")
                     if target_date.lower() in current_value:
@@ -236,6 +241,12 @@ class MiniWoBDeterministicPolicy:
                 if not (from_tb and to_tb and date_tb):
                     return None
                 submit = self._find_by_text(candidates, "search") or self._find_by_text(candidates, "submit")
+                if any(h.get("mapping_strategy") == "policy_book_flight_search" for h in history if isinstance(h, dict)):
+                    picks = [c for c in candidates if any(k in self._norm(self.candidate_text(c)) for k in ["select", "book"]) ]
+                    if len(picks) == 1:
+                        action, click_strategy = make_click_action(picks[0], action_syntax)
+                        if action:
+                            return MiniWoBGroundingResult(action=action, selected_candidate=picks[0], mapping_strategy="policy_book_flight_result_pick", mapping_diagnostics={"policy_name": "book-flight", "click_strategy": click_strategy})
                 if submit and real_candidate_bid(submit) and all(any(v.lower() in str(h.get("action") or "").lower() for h in history) for v in (from_v, to_v, date_v)):
                     search_bid = real_candidate_bid(submit)
                     recent_search = [h for h in history if isinstance(h, dict) and str(h.get("mapping_strategy") or "") == "policy_book_flight_search" and f'"{search_bid}"' in str(h.get("action") or "")]
