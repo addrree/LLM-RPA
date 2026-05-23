@@ -26,7 +26,6 @@ RECOMMENDED_MINIWOB_TASK_NAMES = [
 EXTRACTION_MINIWOB_TASK_NAMES = [
     "find-word",
     "find-greatest",
-    "find-midpoint",
     "count-shape",
     "count-sides",
     "identify-shape",
@@ -36,6 +35,9 @@ EXTRACTION_MINIWOB_TASK_NAMES = [
     "email-inbox-important",
     "daily-calendar",
     "navigate-tree",
+]
+VISUAL_SPATIAL_MINIWOB_TASK_NAMES = [
+    "find-midpoint",
 ]
 
 

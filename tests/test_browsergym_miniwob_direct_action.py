@@ -4,6 +4,7 @@ import types
 from app.browsergym_integration.agent_adapter import BrowserGymAgentAdapter
 from app.browsergym_integration.config import BrowserGymRunConfig
 from app.browsergym_integration.runner import BrowserGymRunner
+from app.utils.llm_client import LLMClientError
 from scripts.run_minwob_subset import result_from_report
 
 
@@ -15,6 +16,11 @@ class _DirectLLM:
     def generate_planner_json(self, system_prompt, user_prompt, **kwargs):
         self.calls.append({"system_prompt": system_prompt, "user_prompt": user_prompt, "kwargs": kwargs})
         return self.payload
+
+
+class _FailingDirectLLM(_DirectLLM):
+    def generate_planner_json(self, system_prompt, user_prompt, **kwargs):
+        raise LLMClientError("LLM returned reasoning/thinking but no JSON content")
 
 
 class _Planner:
@@ -163,6 +169,16 @@ def test_invalid_model_action_noops_and_batch_report_contains_step(monkeypatch):
     assert result["steps"][0]["action_rationale"] == "bad action"
     assert result["steps"][0]["reward"] == 0.0
     assert result["steps"][0]["mapping_error"] == "action_mapping_failure: unsupported MiniWoB action syntax"
+
+
+def test_miniwob_direct_non_json_llm_response_returns_noop():
+    planner = _Planner({"rationale": "unused", "action": "noop()"})
+    planner.llm_client = _FailingDirectLLM({})
+    adapter = BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.click-button")
+    decision = adapter.act("goal", {"goal": "Click the button", "url": "http://miniwob/", "text": "OK"}, {}, [])
+    assert decision.action == "noop()"
+    assert decision.mapping_error == "action_mapping_failure: llm_non_json_response"
+    assert decision.mapping_strategy == "llm_non_json_response"
 
 from app.browsergym_integration.miniwob_grounding import ground_miniwob_action
 
