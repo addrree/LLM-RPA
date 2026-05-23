@@ -76,6 +76,11 @@ python scripts/run_minwob_subset.py \
 
 The MiniWoB runner writes aggregate JSON/CSV results under `artifacts/browsergym/` by default.
 
+MiniWoB subset split:
+- `--subset action` / `--subset basic`: UI action grounding tasks.
+- `--subset extraction`: text/data/list/grid/email/calendar/tree extraction tasks (no canvas geometry).
+- `--subset visual`: visual-spatial canvas tasks (currently `find-midpoint`), reported separately.
+
 ## Artifacts
 
 Main pipeline artifacts are written under `artifacts/`, including:

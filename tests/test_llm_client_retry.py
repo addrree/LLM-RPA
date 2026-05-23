@@ -1,6 +1,7 @@
+import pytest
 import requests
 
-from app.utils.llm_client import LLMClient
+from app.utils.llm_client import LLMClient, LLMClientError
 
 
 class _FakeResponse:
@@ -53,3 +54,19 @@ def test_ollama_chat_retries_once_on_timeout_and_records_retry_diagnostics():
     assert calls["count"] == 2
     assert client.last_chat_diagnostics["transport_retry_used"] is True
     assert client.last_chat_diagnostics["transport_retry_reason"] == "timeout"
+
+
+def test_ollama_chat_uses_thinking_json_block_when_content_empty():
+    client = LLMClient(backend="ollama", planner_model="qwen3-vl:4b", verifier_model="qwen3-vl:4b", timeout_sec=1)
+    client.session.post = lambda *args, **kwargs: _FakeResponse(200, {"message": {"content": "", "thinking": 'reason\n{"ok": true}\n'}, "response": ""})
+    content = client._ollama_chat(model="qwen3-vl:4b", system_prompt="s", user_prompt="u", image_path=None)
+    assert content == '{"ok": true}'
+    assert client.last_chat_diagnostics["content_source"] == "message.thinking_json_block"
+
+
+def test_ollama_chat_raises_clear_error_for_thinking_without_json():
+    client = LLMClient(backend="ollama", planner_model="qwen3-vl:4b", verifier_model="qwen3-vl:4b", timeout_sec=1)
+    client.session.post = lambda *args, **kwargs: _FakeResponse(200, {"message": {"content": "", "thinking": "plain reasoning prose"}, "response": ""})
+    with pytest.raises(LLMClientError, match="reasoning/thinking but no JSON content"):
+        client._ollama_chat(model="qwen3-vl:4b", system_prompt="s", user_prompt="u", image_path=None)
+    assert client.last_chat_diagnostics["content_source"] == "empty_content_with_thinking"
