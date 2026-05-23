@@ -20,7 +20,7 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
     script = """
     () => {
       const selectors = [
-        'a[href]','button','input','textarea','select','option','label','[role]','[onclick]',
+        'a[href]','a','button','input','textarea','select','option','label','[role]','[onclick]',
         '.ui-menu-item','.ui-autocomplete li','.ui-menu li','.ui-datepicker','.ui-datepicker-title',
         '.ui-datepicker-month','.ui-datepicker-year','.ui-datepicker-prev','.ui-datepicker-next',
         '.ui-datepicker-calendar td a','.ui-datepicker-calendar td','.ui-state-default','.ui-state-active','.ui-priority-secondary'

@@ -106,6 +106,19 @@ class MiniWoBDeterministicPolicy:
             return False
         return not any(self._norm(v) for v in (c.get("text"), c.get("innerText"), c.get("textContent"), c.get("name"), c.get("title"), c.get("href")))
 
+    def _is_date_input(self, c: dict[str, Any]) -> bool:
+        cls = self._norm(c.get("className"))
+        cid = self._norm(c.get("id"))
+        tag = self.candidate_tag(c)
+        role = self.candidate_role(c)
+        typ = self.candidate_type(c)
+        texts = " ".join(self._candidate_texts(c)).lower()
+        return (
+            "hasdatepicker" in cls
+            or "datepicker" in cid
+            or ("date" in texts and (role in {"textbox", "input", "combobox"} or tag == "input" or typ in {"text", "date"}))
+        )
+
     def try_act(self, *, env_id: str, task_name: str, instruction: str, candidates: list[dict], history: list[dict], action_syntax: list[str]) -> MiniWoBGroundingResult | None:
         t = self._task(env_id, task_name)
         instr = str(instruction or "")
@@ -180,6 +193,9 @@ class MiniWoBDeterministicPolicy:
         if "choose-date" in t:
             submit = self._find_by_text(candidates, "submit")
             m = re.search(r"(\d{1,2})/(\d{1,2})/(\d{4})", instr)
+            open_attempts = sum(1 for h in history if isinstance(h, dict) and str(h.get("mapping_strategy") or "") == "policy_choose_date_open")
+            if open_attempts >= 2 and not any("ui-datepicker" in self._norm(" ".join(self._candidate_texts(c)) + " " + str(c.get("className") or "")) for c in candidates):
+                return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_choose_date_no_datepicker", mapping_error="datepicker_not_opened", mapping_diagnostics={"policy_name": "choose-date", "datepicker_visible": False, "strategy": "policy_choose_date_no_datepicker"})
             if (self._has_mapping(history, "policy_choose_date_day") or any(str((h.get("selected_candidate_text") or "")).isdigit() for h in history[-2:] if isinstance(h, dict))) and submit and real_candidate_bid(submit) and m:
                 target_date = f"{int(m.group(1)):02d}/{int(m.group(2)):02d}/{int(m.group(3)):04d}"
                 tbs = [c for c in candidates if self.candidate_role(c) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
@@ -206,12 +222,14 @@ class MiniWoBDeterministicPolicy:
                 header_candidates = [c for c in candidates if "ui-datepicker-title" in self._norm(c.get("className")) or "ui-datepicker-month" in self._norm(c.get("className")) or "ui-datepicker-year" in self._norm(c.get("className"))]
                 if header_candidates and str(year) not in header:
                     return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_choose_date_header_not_found", mapping_error="datepicker_header_not_found", mapping_diagnostics={"policy_name": "choose-date", "target_date": f"{month:02d}/{int(day):02d}/{year}", "datepicker_header_text": header, "datepicker_header_not_found": True})
-                day_candidates = [c for c in candidates if real_candidate_bid(c) and self.candidate_text(c) == day and ("ui-state-default" in self._norm(c.get("className")) or self.candidate_tag(c) in {"a", "button"}) and "ui-priority-secondary" not in self._norm(c.get("className")) and "other-month" not in self._norm(c.get("className"))]
+                day_candidates = [c for c in candidates if real_candidate_bid(c) and self.candidate_text(c) == day and ("ui-state-default" in self._norm(c.get("className")) or self.candidate_tag(c) in {"a", "button"}) and "ui-priority-secondary" not in self._norm(c.get("className")) and "other-month" not in self._norm(c.get("className")) and c.get("visible") is not False]
                 day_c = day_candidates[0] if day_candidates else None
                 if day_c and real_candidate_bid(day_c):
                     return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(day_c), action_syntax=action_syntax), selected_candidate=day_c, mapping_strategy="policy_choose_date_day", mapping_diagnostics={"policy_name": "choose-date", "target_date": f"{month:02d}/{int(day):02d}/{year}", "datepicker_header_text": header})
+                if m and any("ui-datepicker" in self._norm(" ".join(self._candidate_texts(c)) + " " + str(c.get("className") or "")) for c in candidates):
+                    return MiniWoBGroundingResult(action="noop()", mapping_strategy="policy_choose_date_day_not_found", mapping_error="datepicker_day_not_found", mapping_diagnostics={"policy_name": "choose-date", "target_date": f"{month:02d}/{int(day):02d}/{year}", "day_candidates": [self.candidate_text(c) for c in day_candidates], "chosen_day": day, "datepicker_visible": True})
             tbs = [c for c in candidates if self.candidate_role(c) in {"textbox", "input", "combobox"} and real_candidate_bid(c)]
-            date_tb = next((c for c in tbs if any("date" in self._norm(v) for v in self._candidate_texts(c))), None) or (tbs[0] if len(tbs) == 1 else None)
+            date_tb = next((c for c in tbs if self._is_date_input(c)), None) or (tbs[0] if len(tbs) == 1 else None)
             if date_tb:
                 fill_attempts = sum(1 for h in history if isinstance(h, dict) and str(h.get("mapping_strategy") or "") == "policy_choose_date_fill")
                 if False and m and self._action_supported(action_syntax, "fill"):
@@ -223,7 +241,7 @@ class MiniWoBDeterministicPolicy:
                     if fill_attempts >= 1:
                         return MiniWoBGroundingResult(action="noop()", selected_candidate=date_tb, mapping_strategy="policy_choose_date_fill_no_progress", mapping_error="choose_date_fill_no_progress", mapping_diagnostics={"policy_name": "choose-date", "target_date": target_date, "textbox_value_current": current_value, "fill_attempt_count": fill_attempts, "choose_date_fill_no_progress": True})
                     return MiniWoBGroundingResult(action=f'fill("{real_candidate_bid(date_tb)}", "{target_date}")', selected_candidate=date_tb, mapping_strategy="policy_choose_date_fill", mapping_diagnostics={"policy_name": "choose-date", "target_date": target_date})
-                return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(date_tb), action_syntax=action_syntax), selected_candidate=date_tb, mapping_strategy="policy_choose_date_open", mapping_diagnostics={"policy_name": "choose-date"})
+                return MiniWoBGroundingResult(action=browsergym_click_action(real_candidate_bid(date_tb), action_syntax=action_syntax), selected_candidate=date_tb, mapping_strategy="policy_choose_date_open", mapping_diagnostics={"policy_name": "choose-date", "datepicker_visible": any("ui-datepicker" in self._norm(" ".join(self._candidate_texts(c)) + " " + str(c.get("className") or "")) for c in candidates), "strategy": "policy_choose_date_open"})
         if "book-flight" in t:
             fm = re.search(r"from:\s*(.*?)\s*to:\s*(.*?)\s*on\s*(\d{1,2}/\d{1,2}/\d{4})", instr, flags=re.I)
             if fm:

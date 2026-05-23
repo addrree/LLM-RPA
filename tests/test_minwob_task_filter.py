@@ -36,3 +36,8 @@ def test_include_exclude_and_limit():
 def test_recommended_subset_ignores_missing_envs():
     envs = ["browsergym/miniwob.click-button", "browsergym/miniwob.some-new-task"]
     assert select_minwob_subset(envs, limit=10) == ["browsergym/miniwob.click-button"]
+
+
+def test_exclude_book_flight():
+    envs = ["browsergym/miniwob.click-button", "browsergym/miniwob.book-flight"]
+    assert select_minwob_subset(envs, exclude_patterns="book-flight") == ["browsergym/miniwob.click-button"]

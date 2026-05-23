@@ -73,6 +73,7 @@ SELECT_CONTAINER_WORDS = {"list", "dropdown", "drop-down", "combo", "combobox", 
 LINK_INTENT_WORDS = {"link", "follow", "open", "visit"}
 
 _DATE_PATTERN = re.compile(r"\b(?:\d{1,2}[/-]\d{1,2}[/-]\d{2,4}|\d{4}-\d{2}-\d{2})\b")
+BLOCKED_FILL_LITERALS = {"date field", "departure date field", "from:", "to:", "search"}
 
 
 def classify_miniwob_interaction(
@@ -538,6 +539,10 @@ def _text_from_instruction_for_fill(instruction: str, selected: dict[str, Any] |
 def _instruction_requires_text_entry(instruction: str) -> bool:
     text = _norm(instruction)
     return bool(parse_quoted_strings(instruction)) and any(word in text for word in ("enter", "type", "input", "text field", "password", "username"))
+
+
+def _blocked_fill_text(text: str) -> bool:
+    return _norm(text) in BLOCKED_FILL_LITERALS
 
 
 
@@ -1208,6 +1213,8 @@ def ground_miniwob_action(
     if parsed and parsed[0] in {"fill", "type"}:
         selected = _select_textbox_for_fill(parsed, parsed_response, candidates)
         text = _first_text_arg(parsed) or str(parsed_response.get("text") or parsed_response.get("value") or "")
+        if _blocked_fill_text(text):
+            return MiniWoBGroundingResult(action="noop()", mapping_error=f"action_mapping_failure: blocked_fill_literal text={text!r}", selected_candidate=selected, mapping_strategy="none")
         if selected is not None:
             bid = real_candidate_bid(selected)
             if bid:
@@ -1231,6 +1238,8 @@ def ground_miniwob_action(
         selected = _find_by_real_bid(candidates, target_bid)
         if _is_textbox(selected):
             text = str(parsed_response.get("target_text") or parsed_response.get("text") or parsed_response.get("value") or "")
+            if _blocked_fill_text(text):
+                return MiniWoBGroundingResult(action="noop()", mapping_error=f"action_mapping_failure: blocked_fill_literal text={text!r}", selected_candidate=selected, mapping_strategy="none")
             return MiniWoBGroundingResult(action=browsergym_fill_action(target_bid, text), selected_candidate=selected, mapping_strategy="bid_fill")
 
     if before.lower().startswith("click") or before.lower().startswith("mouse_click") or target or target_bid:
@@ -1247,12 +1256,14 @@ def ground_miniwob_action(
             candidate_id = real_candidate_bid(selected)
             instruction = str(parsed_response.get("instruction") or parsed_response.get("miniwob_instruction") or parsed_response.get("task_instruction") or "")
             text = str(parsed_response.get("text") or parsed_response.get("value") or "")
-            if _is_textbox(selected) and candidate_id:
+            task_hint = _norm(parsed_response.get("task_name") or parsed_response.get("env_id") or parsed_response.get("task_id") or "")
+            is_choose_date = "choose-date" in task_hint
+            if _is_textbox(selected) and candidate_id and not is_choose_date:
                 if not text and parsed_response.get("target_text") and str(parsed_response.get("target_text")).strip() != candidate_id:
                     text = str(parsed_response.get("target_text") or "")
                 if not text and _instruction_requires_text_entry(instruction):
                     text = _text_from_instruction_for_fill(instruction, selected)
-                if text:
+                if text and not _blocked_fill_text(text):
                     return MiniWoBGroundingResult(action=browsergym_fill_action(candidate_id, text), selected_candidate=selected, mapping_strategy="bid_fill")
             if candidate_id:
                 role = _norm(selected.get("role"))

@@ -195,6 +195,7 @@ def main(argv=None) -> int:
     args = parse_args(argv)
     env_ids = list_minwob_env_ids()
     task_ids = args.task_ids
+    excluded_tasks = [part.strip() for part in str(args.exclude or "").split(",") if part.strip()]
     if args.subset == "basic" and not task_ids:
         task_ids = ",".join(t for t in [
             "click-button","click-button-sequence","click-checkboxes","click-dialog","click-link","click-menu","click-option","click-test","enter-text","focus-text","login-user","choose-list","choose-date","use-autocomplete"
@@ -224,6 +225,7 @@ def main(argv=None) -> int:
         message = "MINIWOB_URL is not set. Start MiniWoB++ HTTP server and set MINIWOB_URL=http://127.0.0.1:8765 before running tasks."
         placeholder_ids = selected or ["browsergym/miniwob.unavailable"]
         aggregate = build_aggregate([skipped_result(env_id, message, use_vision=args.use_vision) for env_id in placeholder_ids], use_vision=args.use_vision)
+        aggregate.update({"subset": args.subset or "default", "excluded_tasks": excluded_tasks, "effective_task_ids": list(selected), "total_tasks": len(selected)})
         json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
         print(message)
         print(json.dumps({"status": "skipped", "json": str(json_path), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
@@ -232,6 +234,7 @@ def main(argv=None) -> int:
     if not selected:
         message = "No BrowserGym MiniWoB env IDs were registered. Install browsergym-miniwob and verify the package imports."
         aggregate = build_aggregate([skipped_result("browsergym/miniwob.unavailable", message, use_vision=args.use_vision)], use_vision=args.use_vision)
+        aggregate.update({"subset": args.subset or "default", "excluded_tasks": excluded_tasks, "effective_task_ids": list(selected), "total_tasks": len(selected)})
         json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
         print(message)
         print(json.dumps({"status": "skipped", "json": str(json_path), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
@@ -291,6 +294,12 @@ def main(argv=None) -> int:
             results.append(result)
 
     aggregate = build_aggregate(results, use_vision=args.use_vision)
+    aggregate.update({
+        "subset": args.subset or "default",
+        "excluded_tasks": excluded_tasks,
+        "effective_task_ids": list(selected),
+        "total_tasks": len(selected),
+    })
     json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
     print(json.dumps({"json": str(json_path), "csv": str(csv_path), "summary": {k: aggregate[k] for k in ["total_tasks", "success_count", "success_rate", "mean_reward", "mean_steps", "mean_runtime_sec", "failure_buckets"]}}, ensure_ascii=False, indent=2))
     return 0

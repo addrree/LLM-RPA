@@ -101,6 +101,23 @@ def test_choose_date_fill_stops_after_one_attempt_without_progress():
     assert r2 and r2.mapping_strategy == "policy_choose_date_open"
 
 
+def test_choose_date_prefers_hasdatepicker_input():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 06/19/2016 as the date and hit submit."
+    cands = [{"bid": "17", "role": "textbox", "className": "hasDatepicker", "text": "Date field"}]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=[], action_syntax=[])
+    assert r and r.mapping_strategy == "policy_choose_date_open" and '"17"' in r.action
+
+
+def test_choose_date_stops_if_datepicker_not_opened_after_two_clicks():
+    p = MiniWoBDeterministicPolicy()
+    instruction = "Select 06/19/2016 as the date and hit submit."
+    cands = [{"bid": "17", "role": "textbox", "className": "hasDatepicker", "text": "Date field"}]
+    history = [{"mapping_strategy": "policy_choose_date_open"}, {"mapping_strategy": "policy_choose_date_open"}]
+    r = p.try_act(env_id="browsergym/miniwob.choose-date", task_name="choose-date", instruction=instruction, candidates=cands, history=history, action_syntax=[])
+    assert r and r.mapping_strategy == "policy_choose_date_no_datepicker" and r.action == "noop()"
+
+
 def test_book_flight_repeated_search_no_progress():
     p = MiniWoBDeterministicPolicy()
     instruction = "Book the cheapest one-way flight from: A to: B on 11/29/2016."
