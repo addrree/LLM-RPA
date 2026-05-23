@@ -15,6 +15,15 @@ def test_dom_link_without_bid_remains():
     assert any(c.get("tag") == "a" for c in out)
 
 
+def test_merge_dom_ax_by_bbox_overlap_enriches():
+    ax = [{"bid": "15", "role": "generic", "text": "", "bbox": {"x": 10, "y": 10, "width": 100, "height": 20}}]
+    dom = [{"source": "dom", "tag": "a", "text": "sed.", "className": "ui-state-default", "bbox": {"x": 12, "y": 10, "width": 100, "height": 20}}]
+    out = merge_dom_candidates_with_ax(ax, dom)
+    c = next(x for x in out if x.get("bid") == "15")
+    assert c["text"] == "sed."
+    assert c["className"] == "ui-state-default"
+
+
 def test_make_click_action_bid_and_dom_center():
     a, s = make_click_action({"bid": "x"}, [])
     assert a.startswith("click(") and s == "bid_click"
