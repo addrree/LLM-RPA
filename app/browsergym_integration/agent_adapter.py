@@ -349,6 +349,11 @@ class BrowserGymAgentAdapter:
         images = [image_base64] if image_base64 is not None else None
         extraction_context = build_extraction_context(obs, context, candidates_for_state)
         extraction_intent = parse_extraction_intent(miniwob_instruction)
+        if isinstance(extraction_intent, dict):
+            constraints = extraction_intent.setdefault("constraints", {})
+            if isinstance(constraints, dict):
+                constraints["history"] = list(history or [])
+                constraints["normalized_instruction"] = extraction_intent.get("normalized_instruction")
         env_task_name = task_name_from_env_id(self.env_id or "").lower()
         is_extraction_subset_task = env_task_name in set(EXTRACTION_MINIWOB_TASK_NAMES)
         extraction_known = extraction_intent.get("intent") != "unknown"

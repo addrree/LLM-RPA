@@ -70,6 +70,11 @@ class _MiniwobFailFastAgent:
         )
 
 
+class _RepeatActionAgent:
+    def act(self, goal, obs, info, history):
+        return types.SimpleNamespace(action='click("9", "left")', finish=False, answer=None, internal_plan=None, selected_step=None, mapping_error=None, mapping_strategy="extraction_max_numeric_from_visible_text", mapping_diagnostics={})
+
+
 class _ArrayEnv(_Env):
     def reset(self):
         return {"url": "https://example.com", "screenshot": _FakeArray((10, 10, 3), "uint8")}, {"k": 1}
@@ -143,3 +148,13 @@ def test_miniwob_nonrecoverable_mapping_stops_immediately(monkeypatch):
     report = runner.run_one()
     assert report.status == "failed"
     assert report.steps_count == 1
+
+
+def test_miniwob_repeated_action_no_progress_stops(monkeypatch):
+    env = _Env()
+    _patch_env(monkeypatch, env)
+    runner = BrowserGymRunner(agent_factory=lambda: _RepeatActionAgent(), config=BrowserGymRunConfig(env_id="browsergym/miniwob.find-greatest", goal="g", max_steps=8))
+    report = runner.run_one()
+    assert report.status == "failed"
+    assert report.failure_stage == "no_progress_repeated_action"
+    assert report.steps_count == 2

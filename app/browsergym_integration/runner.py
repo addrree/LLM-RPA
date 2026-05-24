@@ -414,6 +414,21 @@ class BrowserGymRunner:
                 sc = getattr(decision, "selected_candidate", None) if isinstance(getattr(decision, "selected_candidate", None), dict) else {}
                 history.append({"action": action, "reward": reward, "error": getattr(decision, "mapping_error", None), "rationale": getattr(decision, "rationale", None), "url": (obs or {}).get("url", "") if isinstance(obs, dict) else "", "instruction": getattr(decision, "miniwob_instruction", None), "note": history_note, "selected_candidate_bid": real_candidate_bid(sc), "selected_candidate_text": str(sc.get("text") or sc.get("name") or "").strip().lower(), "selected_candidate_role": sc.get("role"), "mapping_strategy": getattr(decision, "mapping_strategy", None), "terminated": terminated, "truncated": truncated})
                 steps.append(self._make_step_record(idx, obs, info, action, reward, terminated, truncated, decision))
+                if self._is_miniwob_config(self.config) and len(history) >= 2 and not terminated and float(reward or 0) <= 0:
+                    last = history[-1]
+                    prev = history[-2]
+                    same_strategy = str(last.get("mapping_strategy") or "") == str(prev.get("mapping_strategy") or "")
+                    same_action = str(last.get("action") or "") == str(prev.get("action") or "")
+                    if same_strategy and same_action and last.get("action"):
+                        status = "failed"
+                        terminated = True
+                        report_reason = f"repeated action without progress: strategy={last.get('mapping_strategy')} action={last.get('action')}"
+                        if steps:
+                            steps[-1].mapping_error = report_reason
+                            md = dict(steps[-1].mapping_diagnostics or {})
+                            md["repeated_action"] = last.get("action")
+                            steps[-1].mapping_diagnostics = md
+                        break
                 mapping_error = str(getattr(decision, "mapping_error", "") or "").strip()
                 mapping_strategy = str(getattr(decision, "mapping_strategy", "") or "").strip()
                 diagnostics = getattr(decision, "mapping_diagnostics", None) if isinstance(getattr(decision, "mapping_diagnostics", None), dict) else {}
@@ -453,6 +468,9 @@ class BrowserGymRunner:
             elif last_strategy == "extraction_no_decision":
                 failure_stage = "extraction_no_decision"
                 error_message = str(last_diag.get("reason") or last_error or "extraction_no_decision")
+            elif "repeated action without progress" in str(last_error or "").lower():
+                failure_stage = "no_progress_repeated_action"
+                error_message = str(last_error)
         if status == "failed" and not failure_stage and self.config.task_timeout_sec and (time.time() - started) > float(self.config.task_timeout_sec):
             failure_stage = "task_timeout"
             error_message = "MiniWoB task exceeded task_timeout_sec"
