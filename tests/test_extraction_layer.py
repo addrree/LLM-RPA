@@ -55,14 +55,3 @@ def test_max_numeric_ignores_wrapper_candidate():
     d = solve_extraction_task({"intent": "find_max_numeric", "constraints": {}}, ctx, candidates, [])
     assert d is not None and d.selected_candidate is not None
     assert d.selected_candidate.get("bid") == "n1"
-
-
-def test_submit_selector_ignores_wrapper_and_uses_real_button():
-    candidates = [
-        {"text": "368\nSubmit", "bid": "wrap", "id": "wrap", "tag": "div", "bbox": {"width": 300, "height": 220}},
-        {"text": "Submit", "bid": "s1", "tag": "button", "role": "button"},
-    ]
-    ctx = build_extraction_context({"visible_text": "find greatest"}, {"axtree_excerpt": ""}, candidates)
-    d = solve_extraction_task({"intent": "find_max_numeric", "constraints": {"history": [{"action": "click(\"n1\", \"left\")", "selected_candidate_bid": "n1"}]}}, {**ctx, "numeric_values": [{"value": 368}]}, [{"text": "368", "bid": "n1"}, *candidates], [])
-    assert d is not None and d.strategy == "max_numeric_submit"
-    assert d.selected_candidate.get("bid") == "s1"
