@@ -26,13 +26,52 @@ class ExtractionDecision:
     diagnostics: dict[str, Any] | None = None
 
 
-def _find_click_candidate_by_text(candidates: list[dict[str, Any]], target: str) -> dict[str, Any] | None:
-    t = str(target or "").strip().lower()
+def _candidate_text(c: dict[str, Any]) -> str:
+    return str(c.get("text") or c.get("innerText") or c.get("name") or c.get("ariaLabel") or c.get("title") or "").strip()
+
+
+def find_action_candidate(candidates: list[dict[str, Any]], target_text: str, preferred_roles: set[str] | None = None) -> dict[str, Any] | None:
+    t = str(target_text or "").strip().lower()
+    preferred_roles = preferred_roles or {"button", "link", "menuitem", "option"}
+    exact: list[dict[str, Any]] = []
+    contains: list[dict[str, Any]] = []
+    rejected = []
     for c in candidates:
-        txt = str(c.get("text") or c.get("innerText") or c.get("name") or "").strip().lower()
-        if txt == t or (t and t in txt):
-            return c
-    return None
+        txt = _candidate_text(c)
+        low = txt.lower()
+        if not t or t not in low:
+            continue
+        lines = [ln for ln in txt.splitlines() if ln.strip()]
+        if _is_wrapper_candidate(c) or len(lines) > 3:
+            rejected.append(c)
+            continue
+        if low == t:
+            exact.append(c)
+        elif len(txt) <= 40:
+            contains.append(c)
+    def score(c: dict[str, Any]) -> tuple[int, int, int]:
+        tag = str(c.get("tag") or "").lower()
+        role = str(c.get("role") or "").lower()
+        cid_cls = f"{str(c.get('id') or '').lower()} {str(c.get('className') or '').lower()}"
+        txt = _candidate_text(c)
+        return (
+            int(tag in {"button", "input"}),
+            int(role in preferred_roles or any(k in cid_cls for k in ["button", "action", "submit"])),
+            -len(txt),
+        )
+    pool = sorted(exact or contains, key=score, reverse=True)
+    return pool[0] if pool else None
+
+
+def _is_wrapper_candidate(c: dict[str, Any]) -> bool:
+    cid = str(c.get("id") or "").lower()
+    tag = str(c.get("tag") or "").lower()
+    cls = str(c.get("className") or "").lower()
+    text = str(c.get("text") or c.get("innerText") or "").lower()
+    bbox = c.get("bbox") if isinstance(c.get("bbox"), dict) else {}
+    w = float(bbox.get("width") or 0)
+    h = float(bbox.get("height") or 0)
+    return cid in {"wrap", "area"} or tag in {"body", "html", "main"} or "wrapper" in cls or (w > 140 and h > 180) or ("submit" in text and len(text.splitlines()) >= 3)
 
 
 def _is_wrapper_candidate(c: dict[str, Any]) -> bool:
@@ -86,8 +125,10 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
         if cand is None:
             return ExtractionDecision(answer=ans, strategy="no_decision", diagnostics={"reason": "precise_numeric_candidate_not_found", "max_value": mx.get("value"), "numeric_candidates_count": len(num_cands), "wrapper_numeric_ignored_count": len([c for c in num_cands if _is_wrapper_candidate(c)])})
         action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
-        if any("click(" in str(h.get("action") or "") and ans in str(h.get("selected_candidate_text") or "") for h in history if isinstance(h, dict)):
-            submit = _find_click_candidate_by_text(candidates, "submit")
+        max_action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else ""
+        max_clicked = any(str(h.get("selected_candidate_bid") or "") == _real_candidate_bid(cand) or str(h.get("action") or "").strip() == max_action for h in history if isinstance(h, dict))
+        if max_clicked:
+            submit = find_action_candidate(candidates, "submit")
             if submit and _real_candidate_bid(submit):
                 return ExtractionDecision(answer=ans, action=_browsergym_click_action(_real_candidate_bid(submit)), selected_candidate=submit, confidence=0.85, strategy="max_numeric_submit")
         return ExtractionDecision(answer=ans, extracted_data={"max_numeric": mx}, action=action, selected_candidate=cand, confidence=0.9, strategy="max_numeric_from_visible_text", diagnostics={"numeric_candidates_count": len(num_cands), "max_value": mx.get("value"), "selected_precise_candidate": _real_candidate_bid(cand), "submit_needed": False})
@@ -95,7 +136,7 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
     if intent_name == "count_objects":
         count = len(extraction_context.get("list_like_items") or extraction_context.get("raw_candidates_summary") or [])
         ans = str(count)
-        cand = _find_click_candidate_by_text(candidates, ans)
+        cand = find_action_candidate(candidates, ans)
         action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
         return ExtractionDecision(answer=ans, extracted_data={"count": count}, action=action, selected_candidate=cand, confidence=0.7, strategy="count_visible_objects")
 
@@ -155,7 +196,7 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
         quoted = [str(q).strip().lower() for q in (constraints.get("quoted_targets") or []) if str(q).strip()]
         if quoted:
             for q in quoted:
-                cand = _find_click_candidate_by_text(candidates, q)
+                cand = find_action_candidate(candidates, q, preferred_roles={"button", "link", "option", "menuitem", "treeitem"})
                 if cand:
                     action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if _real_candidate_bid(cand) else None
                     return ExtractionDecision(answer=q, extracted_data={"text": q}, action=action, selected_candidate=cand, confidence=0.85, strategy="quoted_text_match")
@@ -164,7 +205,7 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
                         return ExtractionDecision(answer=str(ln), extracted_data={"text": str(ln)}, action=None, selected_candidate=None, confidence=0.7, strategy="quoted_text_in_lines")
         if lines:
             ans = str(lines[0])
-            cand = _find_click_candidate_by_text(candidates, ans)
+            cand = find_action_candidate(candidates, ans)
             action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
             return ExtractionDecision(answer=ans, extracted_data={"text": ans}, action=action, selected_candidate=cand, confidence=0.5, strategy="first_text_line")
 
