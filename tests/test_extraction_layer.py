@@ -44,3 +44,14 @@ def test_solver_max_count_parity_email_grid_find_text():
     assert solve_extraction_task({"intent": "find_email"}, ctx, candidates, []) is not None
     assert solve_extraction_task({"intent": "grid_lookup"}, ctx, candidates, []) is not None
     assert solve_extraction_task({"intent": "find_text"}, ctx, candidates, []) is not None
+
+
+def test_max_numeric_ignores_wrapper_candidate():
+    candidates = [
+        {"text": "4610\nSubmit", "bid": "wrapbid", "id": "wrap", "tag": "div", "bbox": {"width": 400, "height": 400}},
+        {"text": "4610", "bid": "n1", "tag": "button", "bbox": {"width": 30, "height": 20}},
+    ]
+    ctx = build_extraction_context({"visible_text": "4610"}, {"axtree_excerpt": ""}, candidates)
+    d = solve_extraction_task({"intent": "find_max_numeric", "constraints": {}}, ctx, candidates, [])
+    assert d is not None and d.selected_candidate is not None
+    assert d.selected_candidate.get("bid") == "n1"
