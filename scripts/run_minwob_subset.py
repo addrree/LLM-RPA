@@ -16,7 +16,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.browsergym_integration import BrowserGymAgentAdapter, BrowserGymRunConfig, BrowserGymRunner
-from app.browsergym_integration.miniwob_tasks import EXTRACTION_MINIWOB_TASK_NAMES, VISUAL_SPATIAL_MINIWOB_TASK_NAMES, list_minwob_env_ids, select_minwob_subset, task_name_from_env_id
+from app.browsergym_integration.miniwob_tasks import ACTION_COMPLEX_MINIWOB_TASK_NAMES, EXTRACTION_TEXT_MINIWOB_TASK_NAMES, EXTRACTION_MINIWOB_TASK_NAMES, VISUAL_SPATIAL_MINIWOB_TASK_NAMES, list_minwob_env_ids, select_minwob_subset, task_name_from_env_id
 from app.main import build_llm_client
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
@@ -36,9 +36,9 @@ def parse_args(argv=None):
     parser = argparse.ArgumentParser(description="Run a BrowserGym MiniWoB++ subset")
     parser.add_argument("--backend", default=os.getenv("LLM_BACKEND", "ollama_cloud"))
     parser.add_argument("--max-steps", type=int, default=10)
-    parser.add_argument("--limit", type=int, default=10)
+    parser.add_argument("--limit", type=int, default=None)
     parser.add_argument("--task-ids", default=None, help="Comma-separated full env IDs or MiniWoB task names")
-    parser.add_argument("--subset", choices=["action", "extraction", "visual", "basic", "complex", "all"], default=None, help="action/basic excludes book-flight; extraction uses extraction tasks; visual uses visual-spatial tasks; complex includes only book-flight; all includes every selected task")
+    parser.add_argument("--subset", choices=["action", "extraction", "visual", "action-complex", "basic", "complex", "all"], default=None, help="action/basic excludes book-flight; extraction uses extraction tasks; visual uses visual-spatial tasks; complex includes only book-flight; all includes every selected task")
     parser.add_argument("--include", default=None, help="Comma-separated regex patterns to include")
     parser.add_argument("--exclude", default=None, help="Comma-separated regex patterns to exclude")
     parser.add_argument("--use-vision", action="store_true", help="Send BrowserGym screenshot to the planner LLM payload")
@@ -210,6 +210,13 @@ def _suite_type(subset: str | None) -> str:
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    if args.task_timeout_sec is None:
+        if args.subset == "extraction":
+            args.task_timeout_sec = 90
+        elif args.subset in {"complex", "action-complex"}:
+            args.task_timeout_sec = 300
+        else:
+            args.task_timeout_sec = 180
     env_ids = list_minwob_env_ids()
     task_ids = args.task_ids
     excluded_tasks = [part.strip() for part in str(args.exclude or "").split(",") if part.strip()]
@@ -219,7 +226,9 @@ def main(argv=None) -> int:
             "click-button","click-button-sequence","click-checkboxes","click-dialog","click-link","click-menu","click-option","click-test","enter-text","focus-text","login-user","choose-list","choose-date","use-autocomplete"
         ])
     if args.subset == "extraction" and not task_ids:
-        task_ids = ",".join(EXTRACTION_MINIWOB_TASK_NAMES)
+        task_ids = ",".join(EXTRACTION_TEXT_MINIWOB_TASK_NAMES)
+    if args.subset == "action-complex" and not task_ids:
+        task_ids = ",".join(ACTION_COMPLEX_MINIWOB_TASK_NAMES)
     if args.subset == "complex" and not task_ids:
         task_ids = "book-flight"
     if args.subset == "visual" and not task_ids:
@@ -228,9 +237,12 @@ def main(argv=None) -> int:
         task_ids = None
     if task_ids:
         requested_task_ids = [part.strip() for part in str(task_ids).split(",") if part.strip()]
+    effective_limit = args.limit
+    if effective_limit is None and args.subset != "extraction":
+        effective_limit = 10
     selected = select_minwob_subset(
         env_ids,
-        limit=args.limit,
+        limit=effective_limit,
         task_ids=task_ids,
         include_patterns=args.include,
         exclude_patterns=args.exclude,
@@ -238,6 +250,7 @@ def main(argv=None) -> int:
     available_envs = set(env_ids)
     requested_envs = [rid if rid.startswith("browsergym/miniwob.") else f"browsergym/miniwob.{rid}" for rid in requested_task_ids]
     missing_task_ids = [rid for rid in requested_envs if rid not in available_envs]
+    dropped_by_limit_task_ids = [rid for rid in requested_envs if rid in available_envs and rid not in selected]
     if any(task_name_from_env_id(env_id) == "book-flight" for env_id in selected) and args.max_steps < 20:
         print("[MiniWoB] warning: book-flight is complex and should be run with max_steps >= 20 or --subset complex.", flush=True)
         args.max_steps = 25
@@ -252,7 +265,7 @@ def main(argv=None) -> int:
         message = "MINIWOB_URL is not set. Start MiniWoB++ HTTP server and set MINIWOB_URL=http://127.0.0.1:8765 before running tasks."
         placeholder_ids = selected or ["browsergym/miniwob.unavailable"]
         aggregate = build_aggregate([skipped_result(env_id, message, use_vision=args.use_vision) for env_id in placeholder_ids], use_vision=args.use_vision)
-        aggregate.update({"subset": args.subset or "default", "suite_type": _suite_type(args.subset), "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "total_tasks": len(selected)})
+        aggregate.update({"subset": args.subset or "default", "suite_type": _suite_type(args.subset), "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "dropped_by_limit_task_ids": dropped_by_limit_task_ids, "total_tasks": len(selected)})
         json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
         print(message)
         print(json.dumps({"status": "skipped", "json": str(json_path), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
@@ -261,7 +274,7 @@ def main(argv=None) -> int:
     if not selected:
         message = "No BrowserGym MiniWoB env IDs were registered. Install browsergym-miniwob and verify the package imports."
         aggregate = build_aggregate([skipped_result("browsergym/miniwob.unavailable", message, use_vision=args.use_vision)], use_vision=args.use_vision)
-        aggregate.update({"subset": args.subset or "default", "suite_type": _suite_type(args.subset), "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "total_tasks": len(selected)})
+        aggregate.update({"subset": args.subset or "default", "suite_type": _suite_type(args.subset), "excluded_tasks": excluded_tasks, "requested_task_ids": requested_envs, "effective_task_ids": list(selected), "missing_task_ids": missing_task_ids, "dropped_by_limit_task_ids": dropped_by_limit_task_ids, "total_tasks": len(selected)})
         json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
         print(message)
         print(json.dumps({"status": "skipped", "json": str(json_path), "csv": str(csv_path)}, ensure_ascii=False, indent=2))
@@ -332,6 +345,7 @@ def main(argv=None) -> int:
         "excluded_tasks": excluded_tasks,
         "effective_task_ids": list(selected),
         "missing_task_ids": missing_task_ids,
+        "dropped_by_limit_task_ids": dropped_by_limit_task_ids,
         "total_tasks": len(selected),
     })
     json_path, csv_path = write_outputs(aggregate, args.output_json, args.output_csv)
@@ -341,12 +355,3 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
-    if args.task_timeout_sec is None:
-        if args.subset == "extraction":
-            args.task_timeout_sec = 90
-        elif args.subset in {"complex"}:
-            args.task_timeout_sec = 300
-        else:
-            args.task_timeout_sec = 180
-    if args.subset == "extraction" and any(task_name_from_env_id(env_id) == "find-midpoint" for env_id in selected):
-        raise RuntimeError("Invalid extraction subset: find-midpoint must not be present in extraction effective_task_ids")

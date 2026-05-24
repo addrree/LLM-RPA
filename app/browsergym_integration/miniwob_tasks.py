@@ -23,21 +23,25 @@ RECOMMENDED_MINIWOB_TASK_NAMES = [
     "use-autocomplete",
     "book-flight",
 ]
-EXTRACTION_MINIWOB_TASK_NAMES = [
+EXTRACTION_TEXT_MINIWOB_TASK_NAMES = [
     "find-word",
     "find-greatest",
+    "odd-or-even",
+    "email-inbox",
+    "email-inbox-important",
+    "navigate-tree",
+]
+EXTRACTION_MINIWOB_TASK_NAMES = EXTRACTION_TEXT_MINIWOB_TASK_NAMES
+VISUAL_SPATIAL_MINIWOB_TASK_NAMES = [
     "count-shape",
     "count-sides",
     "identify-shape",
     "grid-coordinate",
-    "odd-or-even",
-    "email-inbox",
-    "email-inbox-important",
-    "daily-calendar",
-    "navigate-tree",
-]
-VISUAL_SPATIAL_MINIWOB_TASK_NAMES = [
     "find-midpoint",
+]
+ACTION_COMPLEX_MINIWOB_TASK_NAMES = [
+    "daily-calendar",
+    "book-flight",
 ]
 
 
