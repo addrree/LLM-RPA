@@ -14,6 +14,18 @@ def _candidate_text(c: dict[str, Any]) -> str:
     return ""
 
 
+def _is_wrapper_candidate(c: dict[str, Any]) -> bool:
+    cid = str(c.get("id") or "").lower()
+    tag = str(c.get("tag") or "").lower()
+    cls = str(c.get("className") or "").lower()
+    txt = _candidate_text(c)
+    lines = [ln for ln in txt.splitlines() if ln.strip()]
+    bbox = c.get("bbox") if isinstance(c.get("bbox"), dict) else {}
+    w = float(bbox.get("width") or 0)
+    h = float(bbox.get("height") or 0)
+    return cid in {"wrap", "area"} or tag in {"body", "html", "main"} or "wrapper" in cls or (w > 140 and h > 180) or len(lines) > 3
+
+
 def _candidate_all_text(c: dict[str, Any]) -> dict[str, str]:
     fields = ("text", "innerText", "textContent", "value", "name", "ariaLabel", "title", "parent_text")
     out: dict[str, str] = {}
@@ -92,6 +104,8 @@ def extract_email_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]
         is_thread = "email-thread" in cls or "mail" in cls or "thread" in cls or "inbox" in cls or (2 <= len(lines) <= 4 and str(c.get("tag") or "").lower() == "div" and any(k in cls for k in ["mail", "inbox", "thread"]))
         if (len(lines) > 8 and "email-thread" not in cls) or (len(txt) > 600 and "email-thread" not in cls):
             continue
+        if any(k in cls for k in ["email-body", "email-header", "email-left"]):
+            continue
         if is_thread or any(k in low for k in ["subject", "from", "inbox", "email", "message"]):
             sender = lines[0] if len(lines) >= 1 else c.get("sender")
             subject = lines[1] if len(lines) >= 2 else (c.get("subject") or _candidate_text(c))
@@ -130,9 +144,15 @@ def extract_tree_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
     out = []
     for c in candidates or []:
         role = str(c.get("role") or "").lower()
+        tag = str(c.get("tag") or "").lower()
         cls = str(c.get("className") or "").lower()
-        if role in {"treeitem", "node"} or any(k in cls for k in ["tree", "node"]):
-            txt = _candidate_text(c)
+        txt = _candidate_text(c)
+        if not txt or len(txt) > 80 or _is_wrapper_candidate(c):
+            continue
+        clickable = bool(str(c.get("bid") or "").strip()) or c.get("browsergym_center_x") is not None or c.get("center_x") is not None
+        if not clickable:
+            continue
+        if role in {"treeitem", "node", "link", "button"} or tag in {"div", "span", "li", "a", "button"} or any(k in cls for k in ["tree", "node", "folder", "file"]):
             out.append({"node_text": txt, "depth": c.get("depth"), "parent": c.get("parent"), "expanded": c.get("expanded"), "candidate": c})
     return out
 

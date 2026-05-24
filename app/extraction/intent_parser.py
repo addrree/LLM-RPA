@@ -39,6 +39,15 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
         quoted = [q for q in quoted if q.lower() not in {"submit", "ok", "confirm"}]
     ord_match = re.search(r"\b(\d+)(st|nd|rd|th)\s+word\b", text)
     numbers = [int(n) for n in re.findall(r"\b\d+\b", text)]
+    requested_email_action = "open"
+    if re.search(r"\breply\b", text):
+        requested_email_action = "reply"
+    elif re.search(r"\bforward\b", text):
+        requested_email_action = "forward"
+    elif re.search(r"\b(trash|delete)\b", text):
+        requested_email_action = "trash"
+    elif re.search(r"\b(star|important|mark as important)\b", text):
+        requested_email_action = "star"
     target_keywords = [w for w in re.findall(r"[a-z]{3,}", text) if w not in {"find", "click", "extract", "open", "with", "from", "that", "this", "there", "visible", "item", "page"}][:8]
     confidence = 0.9 if intent != "unknown" else 0.2
     return {
@@ -51,5 +60,7 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
             "numbers": numbers,
             "keywords": target_keywords,
             "ordinal_index": int(ord_match.group(1)) if ord_match else None,
+            "requested_email_action": requested_email_action,
+            "reply_text": quoted[0] if quoted and requested_email_action == "reply" else None,
         },
     }
