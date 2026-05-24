@@ -15,6 +15,8 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
         intent = "find_email"; signals.append("email")
     elif re.search(r"\b(calendar|meeting|event|slot|appointment)\b", text):
         intent = "find_calendar_event"; signals.append("calendar")
+    elif re.search(r"\b(\d+(?:st|nd|rd|th))\s+word\b", text):
+        intent = "ordinal_word_extraction"; signals.append("ordinal_word")
     elif re.search(r"\b(tree|node|parent|child|expand|collapse)\b", text):
         intent = "find_tree_node"; signals.append("tree")
     elif re.search(r"\b(odd|even|parity)\b", text):
@@ -33,6 +35,9 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
         intent = "find_text"; signals.append("find_text")
 
     quoted = re.findall(r'"([^"]+)"', str(instruction or ""))
+    if re.search(r"\b(press|click)\b[^.]*\"[^\"]+\"", str(instruction or "").lower()):
+        quoted = [q for q in quoted if q.lower() not in {"submit", "ok", "confirm"}]
+    ord_match = re.search(r"\b(\d+)(st|nd|rd|th)\s+word\b", text)
     numbers = [int(n) for n in re.findall(r"\b\d+\b", text)]
     target_keywords = [w for w in re.findall(r"[a-z]{3,}", text) if w not in {"find", "click", "extract", "open", "with", "from", "that", "this", "there", "visible", "item", "page"}][:8]
     confidence = 0.9 if intent != "unknown" else 0.2
@@ -45,5 +50,6 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
             "quoted_targets": quoted,
             "numbers": numbers,
             "keywords": target_keywords,
+            "ordinal_index": int(ord_match.group(1)) if ord_match else None,
         },
     }

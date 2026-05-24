@@ -28,6 +28,7 @@ class BrowserGymRunner:
         "policy_book_flight_search_no_progress",
         "policy_click_link_target_not_found",
         "policy_choose_date_fill_no_progress",
+        "extraction_no_decision",
     }
     NON_RECOVERABLE_DIAGNOSTICS = {
         "menu_requires_hover_no_supported_action",
@@ -444,9 +445,14 @@ class BrowserGymRunner:
         error_message = None
         if status == "failed" and steps:
             last_error = steps[-1].mapping_error
+            last_strategy = steps[-1].mapping_strategy
+            last_diag = steps[-1].mapping_diagnostics if isinstance(steps[-1].mapping_diagnostics, dict) else {}
             if last_error in self.NON_RECOVERABLE_POLICY_ERRORS:
                 failure_stage = "unsupported_action" if last_error == "menu_requires_hover_no_supported_action" else "action_mapping_failure"
                 error_message = f"non-recoverable policy error: {last_error}"
+            elif last_strategy == "extraction_no_decision":
+                failure_stage = "extraction_no_decision"
+                error_message = str(last_diag.get("reason") or last_error or "extraction_no_decision")
         if status == "failed" and not failure_stage and self.config.task_timeout_sec and (time.time() - started) > float(self.config.task_timeout_sec):
             failure_stage = "task_timeout"
             error_message = "MiniWoB task exceeded task_timeout_sec"

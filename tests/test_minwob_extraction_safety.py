@@ -31,7 +31,7 @@ def test_compact_candidates_for_llm_limits_and_truncates():
 
 def test_known_extraction_no_decision_skips_llm_call():
     planner = _Planner()
-    adapter = BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.daily-calendar")
+    adapter = BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.navigate-tree")
     adapter.allow_extraction_llm_fallback = False
     obs = {"goal": "Find calendar event", "url": "http://miniwob/", "page_clickable_candidates": []}
     decision = adapter.act("goal", obs, {}, [])

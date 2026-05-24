@@ -41,12 +41,38 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
     candidates = list(candidates or [])
     nums = [n for n in extraction_context.get("numeric_values", []) if isinstance(n, dict) and n.get("value") is not None]
 
+    history = constraints.get("history") or []
+    if intent_name == "ordinal_word_extraction":
+        ord_idx = constraints.get("ordinal_index")
+        if not ord_idx:
+            return ExtractionDecision(strategy="no_decision", diagnostics={"reason": "ordinal_not_found"})
+        words = []
+        for ln in extraction_context.get("text_lines") or []:
+            if any(k in ln.lower() for k in ["submit", "textbox", "press"]):
+                continue
+            words.extend([w for w in __import__("re").findall(r"[A-Za-z0-9]+", ln)])
+        if len(words) < int(ord_idx):
+            return ExtractionDecision(strategy="no_decision", diagnostics={"reason": "ordinal_out_of_range"})
+        ans = words[int(ord_idx)-1].lower()
+        textbox = next((c for c in candidates if str(c.get("role") or "").lower() in {"textbox", "input"} or str(c.get("tag") or "").lower() in {"input", "textarea"}), None)
+        submitted = any("fill(" in str(h.get("action") or "") and ans in str(h.get("action") or "").lower() for h in history if isinstance(h, dict))
+        if not submitted and textbox and _real_candidate_bid(textbox):
+            return ExtractionDecision(answer=ans, action=f'fill("{_real_candidate_bid(textbox)}", "{ans}")', selected_candidate=textbox, confidence=0.9, strategy="ordinal_word_fill")
+        submit = _find_click_candidate_by_text(candidates, "submit")
+        if submit and _real_candidate_bid(submit):
+            return ExtractionDecision(answer=ans, action=_browsergym_click_action(_real_candidate_bid(submit)), selected_candidate=submit, confidence=0.85, strategy="ordinal_word_submit")
+        return ExtractionDecision(answer=ans, strategy="no_decision", diagnostics={"reason": "submit_not_found"})
+
     if intent_name == "find_max_numeric" and nums:
         mx = max(nums, key=lambda n: float(n.get("value", 0)))
         ans = str(int(mx["value"])) if float(mx["value"]).is_integer() else str(mx["value"])
         cand = _find_click_candidate_by_text(candidates, ans)
         action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
-        return ExtractionDecision(answer=ans, extracted_data={"max_numeric": mx}, action=action, selected_candidate=cand, confidence=0.9, strategy="max_numeric_from_visible_text", diagnostics={"numeric_count": len(nums)})
+        if any("click(" in str(h.get("action") or "") and ans in str(h.get("selected_candidate_text") or "") for h in history if isinstance(h, dict)):
+            submit = _find_click_candidate_by_text(candidates, "submit")
+            if submit and _real_candidate_bid(submit):
+                return ExtractionDecision(answer=ans, action=_browsergym_click_action(_real_candidate_bid(submit)), selected_candidate=submit, confidence=0.85, strategy="max_numeric_submit")
+        return ExtractionDecision(answer=ans, extracted_data={"max_numeric": mx}, action=action, selected_candidate=cand, confidence=0.9, strategy="max_numeric_from_visible_text", diagnostics={"numeric_count": len(nums), "max_value": mx.get("value")})
 
     if intent_name == "count_objects":
         count = len(extraction_context.get("list_like_items") or extraction_context.get("raw_candidates_summary") or [])
@@ -78,6 +104,11 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
         if emails:
             e = emails[0]
             cand = e.get("candidate") if isinstance(e.get("candidate"), dict) else None
+            if intent_name == "find_important_email":
+                sender = " ".join(constraints.get("keywords") or [])
+                row_text = str(e.get("text") or "").lower()
+                if sender and sender not in row_text:
+                    return ExtractionDecision(strategy="no_decision", diagnostics={"reason": "sender_not_found"})
             action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
             return ExtractionDecision(answer=e.get("subject") or e.get("text"), extracted_data=e, action=action, selected_candidate=cand, confidence=0.75, strategy="email_item_match")
 
@@ -112,6 +143,13 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
             action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
             return ExtractionDecision(answer=ans, extracted_data={"text": ans}, action=action, selected_candidate=cand, confidence=0.5, strategy="first_text_line")
 
-    if intent_name in {"find_calendar_event", "find_tree_node", "classify_object", "find_midpoint_or_middle_value"}:
+    if intent_name == "find_tree_node":
+        trees = extraction_context.get("tree_like_items") or []
+        if trees:
+            cand = trees[0].get("candidate")
+            if isinstance(cand, dict) and _real_candidate_bid(cand):
+                return ExtractionDecision(answer=trees[0].get("node_text"), action=_browsergym_click_action(_real_candidate_bid(cand)), selected_candidate=cand, strategy="tree_node_click", confidence=0.6)
+        return ExtractionDecision(strategy="no_decision", diagnostics={"reason": "tree_structure_not_found"})
+    if intent_name in {"find_calendar_event", "classify_object", "find_midpoint_or_middle_value"}:
         return ExtractionDecision(answer=None, extracted_data=None, action=None, selected_candidate=None, confidence=0.0, strategy="no_decision", diagnostics={"reason": "no generic extraction decision"})
     return None
