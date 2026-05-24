@@ -73,10 +73,19 @@ def extract_grid_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
 def extract_email_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for c in candidates or []:
-        txt = " ".join(str(c.get(k) or "") for k in ["text", "innerText", "name", "label", "ariaLabel"])
+        txt = " ".join(str(c.get(k) or "") for k in ["text", "innerText", "textContent", "name", "label", "ariaLabel"]).strip()
         low = txt.lower()
-        if any(k in low for k in ["subject", "from", "inbox", "email", "message", "@"]):
-            out.append({"sender": c.get("sender"), "subject": c.get("subject") or _candidate_text(c), "snippet": c.get("snippet"), "important": any(k in low for k in ["important", "starred", "★", "!"]), "candidate": c, "text": txt.strip()})
+        cls = str(c.get("className") or "").lower()
+        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+        is_thread = "email-thread" in cls or "mail" in cls or (2 <= len(lines) <= 4 and str(c.get("tag") or "").lower() == "div")
+        if (len(lines) > 8 and "email-thread" not in cls) or (len(txt) > 600 and "email-thread" not in cls):
+            continue
+        if is_thread or any(k in low for k in ["subject", "from", "inbox", "email", "message", "@"]):
+            sender = lines[0] if len(lines) >= 1 else c.get("sender")
+            subject = lines[1] if len(lines) >= 2 else (c.get("subject") or _candidate_text(c))
+            snippet = lines[2] if len(lines) >= 3 else c.get("snippet")
+            important = any(k in (low + " " + cls + " " + str(c.get("title") or "").lower()) for k in ["important", "starred", "★"])
+            out.append({"sender": sender, "subject": subject, "snippet": snippet, "important": important, "candidate": c, "text": txt.strip()})
     return out
 
 
