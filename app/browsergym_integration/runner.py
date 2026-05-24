@@ -343,9 +343,14 @@ class BrowserGymRunner:
         try:
             obs, info = env.reset()
             history = []
+            task_started = time.time()
             if self._is_miniwob_config(self.config):
                 print(f"[MiniWoB] task {self.config.env_id} env reset", flush=True)
             for idx in range(self.config.max_steps):
+                if self.config.task_timeout_sec and (time.time() - task_started) > float(self.config.task_timeout_sec):
+                    status = "failed"
+                    terminated = True
+                    break
                 if self._is_miniwob_config(self.config):
                     obs = self._augment_miniwob_observation_with_page_candidates(env, obs, info)
                     miniwob_ctx = browsergym_obs_to_page_context(obs, info if isinstance(info, dict) else {})
@@ -376,6 +381,9 @@ class BrowserGymRunner:
                     break
 
                 obs, reward, terminated, truncated, info = env.step(action)
+                if self.config.task_timeout_sec and (time.time() - task_started) > float(self.config.task_timeout_sec):
+                    status = "failed"
+                    terminated = True
                 if self._is_miniwob_config(self.config):
                     obs, reward, terminated, truncated, info = self._try_miniwob_playwright_fallback(env, decision, obs, reward, terminated, truncated, info)
                     if getattr(decision, "mapping_strategy", None) == "select_option_control":
@@ -439,5 +447,8 @@ class BrowserGymRunner:
             if last_error in self.NON_RECOVERABLE_POLICY_ERRORS:
                 failure_stage = "unsupported_action" if last_error == "menu_requires_hover_no_supported_action" else "action_mapping_failure"
                 error_message = f"non-recoverable policy error: {last_error}"
+        if status == "failed" and not failure_stage and self.config.task_timeout_sec and (time.time() - started) > float(self.config.task_timeout_sec):
+            failure_stage = "task_timeout"
+            error_message = "MiniWoB task exceeded task_timeout_sec"
         report = BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status=status, reward=reward_value, terminated=terminated, truncated=truncated, steps=steps, runtime_sec=time.time() - started, final_answer=final_answer, steps_count=len(steps), success=success_value, benchmark=self.config.benchmark, task_name=self.config.task_name, failure_stage=failure_stage, error_message=error_message)
         return self._persist_report(report)

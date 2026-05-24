@@ -47,6 +47,8 @@ def parse_args(argv=None):
     parser.add_argument("--headless", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--verbose", action=argparse.BooleanOptionalAction, default=True, help="Print per-task and per-step MiniWoB progress")
     parser.add_argument("--allow-playwright-fallback", action="store_true", help="MiniWoB-only fallback: try direct Playwright page.mouse.click(page_center) after failed scaled mouse_click")
+    parser.add_argument("--allow-extraction-llm-fallback", action="store_true", help="Allow MiniWoB extraction tasks to fallback to LLM when extraction controller has no decision")
+    parser.add_argument("--task-timeout-sec", type=float, default=None, help="Per-task max runtime in seconds")
     return parser.parse_args(argv)
 
 
@@ -268,7 +270,7 @@ def main(argv=None) -> int:
     llm = build_llm_client(backend=args.backend)
 
     def agent_factory():
-        return BrowserGymAgentAdapter(
+        agent = BrowserGymAgentAdapter(
             planner=Planner(llm),
             replanner=Replanner(llm),
             validator=PlanValidator(),
@@ -276,6 +278,8 @@ def main(argv=None) -> int:
             max_steps=args.max_steps,
             use_vision=args.use_vision,
         )
+        agent.allow_extraction_llm_fallback = bool(args.allow_extraction_llm_fallback)
+        return agent
 
     results = []
     total_selected = len(selected)
@@ -296,6 +300,8 @@ def main(argv=None) -> int:
                     benchmark="miniwob",
                     task_name=task_name_from_env_id(env_id),
                     allow_playwright_fallback=args.allow_playwright_fallback,
+                    task_timeout_sec=args.task_timeout_sec,
+                    allow_extraction_llm_fallback=args.allow_extraction_llm_fallback,
                 ),
             ).run_one()
             result = result_from_report(report, env_id=env_id, use_vision=args.use_vision)
@@ -335,3 +341,12 @@ def main(argv=None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+    if args.task_timeout_sec is None:
+        if args.subset == "extraction":
+            args.task_timeout_sec = 90
+        elif args.subset in {"complex"}:
+            args.task_timeout_sec = 300
+        else:
+            args.task_timeout_sec = 180
+    if args.subset == "extraction" and any(task_name_from_env_id(env_id) == "find-midpoint" for env_id in selected):
+        raise RuntimeError("Invalid extraction subset: find-midpoint must not be present in extraction effective_task_ids")

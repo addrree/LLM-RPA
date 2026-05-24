@@ -9,6 +9,7 @@ from app.browsergym_integration.action_mapper import browsergym_finish_action, t
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
 from app.browsergym_integration.miniwob_grounding import extract_select_target_from_instruction, extract_textbox_candidates_from_observation, find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
 from app.browsergym_integration.miniwob_policy import MiniWoBDeterministicPolicy
+from app.browsergym_integration.miniwob_tasks import EXTRACTION_MINIWOB_TASK_NAMES, task_name_from_env_id
 from app.browsergym_integration.local_extractor import (
     extract_pattern_from_observation,
     extract_structured_items_from_observation,
@@ -78,6 +79,35 @@ class BrowserGymAgentAdapter:
         self.benchmark = benchmark
         self.browsergym_action_syntax: list[str] = []
         self.miniwob_policy = MiniWoBDeterministicPolicy()
+        self.allow_extraction_llm_fallback = False
+
+    @staticmethod
+    def compact_candidates_for_llm(candidates: list[dict[str, Any]], limit: int = 20) -> list[dict[str, Any]]:
+        def _score(c: dict[str, Any]) -> tuple[int, int]:
+            txt = str(c.get("text") or c.get("innerText") or c.get("name") or "").strip()
+            cls = str(c.get("className") or "").lower()
+            role = str(c.get("role") or "").lower()
+            high = int(any(k in cls for k in ["email-thread", "button", "link", "item", "row", "mail"]) or role in {"button", "link", "listitem", "row"})
+            wrapper_penalty = int("wrap" in cls or "container" in cls or len(txt) > 300)
+            return (high, -wrapper_penalty)
+        ordered = sorted([c for c in candidates if isinstance(c, dict)], key=_score, reverse=True)
+        out: list[dict[str, Any]] = []
+        for c in ordered:
+            txt = str(c.get("text") or c.get("innerText") or c.get("name") or "").strip()
+            if len(txt) > 300 and len(out) < limit // 2:
+                continue
+            out.append({
+                "bid": c.get("bid"),
+                "text": txt[:120],
+                "tag": c.get("tag"),
+                "role": c.get("role"),
+                "className": c.get("className"),
+                "source": c.get("source"),
+                "center": {"x": c.get("browsergym_center_x") or c.get("center_x"), "y": c.get("browsergym_center_y") or c.get("center_y")},
+            })
+            if len(out) >= limit:
+                break
+        return out
 
     def set_browsergym_context(self, *, env_id: str | None = None, benchmark: str | None = None) -> None:
         self.env_id = env_id
@@ -248,7 +278,7 @@ class BrowserGymAgentAdapter:
             "axtree_excerpt": str(context.get("axtree_excerpt", ""))[:1200],
             "buttons": snapshot_like.get("buttons", [])[:10],
             "links": snapshot_like.get("links", [])[:10],
-            "clickable_candidates": snapshot_like.get("clickable_candidates", [])[:30],
+            "clickable_candidates": self.compact_candidates_for_llm(snapshot_like.get("clickable_candidates", [])[:120], limit=20),
             "clickable_candidates_count": context.get("clickable_candidates_count", 0),
             "page_candidate_extraction_failed": bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
             "obs_keys": context.get("obs_keys", []),
@@ -319,7 +349,10 @@ class BrowserGymAgentAdapter:
         images = [image_base64] if image_base64 is not None else None
         extraction_context = build_extraction_context(obs, context, candidates_for_state)
         extraction_intent = parse_extraction_intent(miniwob_instruction)
-        if extraction_intent.get("intent") != "unknown":
+        env_task_name = task_name_from_env_id(self.env_id or "").lower()
+        is_extraction_subset_task = env_task_name in set(EXTRACTION_MINIWOB_TASK_NAMES)
+        extraction_known = extraction_intent.get("intent") != "unknown"
+        if extraction_known:
             extraction_decision = solve_extraction_task(extraction_intent, extraction_context, candidates_for_state, self.browsergym_action_syntax)
             if extraction_decision is not None and extraction_decision.action:
                 return BrowserGymAgentDecision(
@@ -341,6 +374,29 @@ class BrowserGymAgentAdapter:
                     page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
                     mapping_strategy=f"extraction_{extraction_decision.strategy}",
                     mapping_diagnostics={"extraction_intent": extraction_intent.get("intent"), "confidence": extraction_decision.confidence, "extracted_data": extraction_decision.extracted_data, **(extraction_decision.diagnostics or {})},
+                )
+            if is_extraction_subset_task and not bool(self.allow_extraction_llm_fallback):
+                return BrowserGymAgentDecision(
+                    action="noop()",
+                    rationale="no generic extraction decision",
+                    finish=False,
+                    vision_used=self.use_vision,
+                    vision_image_present=vision_image_present,
+                    miniwob_instruction=miniwob_instruction,
+                    action_string="noop()",
+                    action_string_before_mapping="noop()",
+                    action_string_after_mapping="noop()",
+                    mapping_strategy="extraction_no_decision",
+                    mapping_error="action_mapping_failure: extraction controller returned no decision",
+                    mapping_diagnostics={
+                        "reason": "no generic extraction decision",
+                        "extraction_intent": extraction_intent.get("intent"),
+                        "available_context_counts": {
+                            "numeric_values": len(extraction_context.get("numeric_values") or []),
+                            "email_like_items": len(extraction_context.get("email_like_items") or []),
+                            "grid_like_items": len(extraction_context.get("tables_or_grid_like_blocks") or []),
+                        },
+                    },
                 )
         task_name = (self.env_id or "").lower()
         is_choose_date = "choose-date" in task_name

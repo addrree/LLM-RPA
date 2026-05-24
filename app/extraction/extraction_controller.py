@@ -56,12 +56,13 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
         return ExtractionDecision(answer=ans, extracted_data={"count": count}, action=action, selected_candidate=cand, confidence=0.7, strategy="count_visible_objects")
 
     if intent_name == "parity_check" and nums:
+        answered = {str(h.get("selected_candidate_text") or "").strip().lower() for h in (constraints.get("history") or []) if isinstance(h, dict)}
         target_num = next((n for n in nums if int(float(n["value"])) in set(constraints.get("numbers") or [])), None)
         n = int(float((target_num or nums[0])["value"]))
         ans = "even" if (n % 2 == 0) else "odd"
-        cand = _find_click_candidate_by_text(candidates, ans)
+        cand = next((c for c in candidates if str(c.get("text") or c.get("name") or "").strip().lower() == ans and ans not in answered), None) or _find_click_candidate_by_text(candidates, ans)
         action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
-        return ExtractionDecision(answer=ans, extracted_data={"number": n, "parity": ans}, action=action, selected_candidate=cand, confidence=0.8, strategy="parity_from_first_number")
+        return ExtractionDecision(answer=ans, extracted_data={"number": n, "parity": ans}, action=action, selected_candidate=cand, confidence=0.8, strategy="parity_rowwise")
 
     if intent_name in {"find_email", "find_important_email"}:
         emails = extraction_context.get("email_like_items") or []
@@ -91,11 +92,7 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
                     cand = g["candidate"]
                     action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if _real_candidate_bid(cand) else None
                     return ExtractionDecision(answer=g.get("text"), extracted_data=g, action=action, selected_candidate=cand, confidence=0.75, strategy="grid_coordinate_match")
-        if grids:
-            g = grids[0]
-            cand = g.get("candidate") if isinstance(g.get("candidate"), dict) else None
-            action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
-            return ExtractionDecision(answer=g.get("text"), extracted_data=g, action=action, selected_candidate=cand, confidence=0.6, strategy="grid_first_match")
+        return ExtractionDecision(answer=None, extracted_data={"reason": "no_grid_coordinate_mapping"}, action=None, selected_candidate=None, confidence=0.0, strategy="grid_no_decision", diagnostics={"reason": "no_grid_coordinate_mapping"})
 
     if intent_name == "find_text":
         lines = extraction_context.get("text_lines") or extraction_context.get("candidate_texts") or []
@@ -115,4 +112,6 @@ def solve_extraction_task(intent: dict[str, Any] | str, extraction_context: dict
             action = _browsergym_click_action(_real_candidate_bid(cand), action_syntax=action_syntax or []) if cand and _real_candidate_bid(cand) else None
             return ExtractionDecision(answer=ans, extracted_data={"text": ans}, action=action, selected_candidate=cand, confidence=0.5, strategy="first_text_line")
 
+    if intent_name in {"find_calendar_event", "find_tree_node", "classify_object", "find_midpoint_or_middle_value"}:
+        return ExtractionDecision(answer=None, extracted_data=None, action=None, selected_candidate=None, confidence=0.0, strategy="no_decision", diagnostics={"reason": "no generic extraction decision"})
     return None

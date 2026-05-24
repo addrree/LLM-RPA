@@ -23,3 +23,5 @@ class BrowserGymRunConfig:
     benchmark: str | None = None
     task_name: str | None = None
     allow_playwright_fallback: bool = False
+    task_timeout_sec: float | None = None
+    allow_extraction_llm_fallback: bool = False
