@@ -47,10 +47,12 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
         requested_email_action = "forward"
     elif re.search(r"\b(trash|delete)\b", text):
         requested_email_action = "trash"
-    elif re.search(r"\b(star|important|mark as important)\b|click the star|star icon|mark (it )?as important", text):
+    elif re.search(r"\bstar\b|click the star|star icon|mark (it )?as important", text):
         requested_email_action = "star"
     sender_match = re.search(r"(?:email by|from)\s+([a-zA-Z]+)", text, flags=re.I)
     target_sender = sender_match.group(1).strip() if sender_match else None
+    forward_match = re.search(r"\bforward\b.*?\bto\s+([a-zA-Z]+)", str(instruction or ""), flags=re.I)
+    forward_to = forward_match.group(1).strip() if forward_match else None
     target_keywords = [w for w in re.findall(r"[a-z]{3,}", text) if w not in {"find", "click", "extract", "open", "with", "from", "that", "this", "there", "visible", "item", "page"}][:8]
     confidence = 0.9 if intent != "unknown" else 0.2
     return {
@@ -65,6 +67,7 @@ def parse_extraction_intent(instruction: str) -> dict[str, Any]:
             "ordinal_index": int(ord_match.group(1)) if ord_match else None,
             "requested_email_action": requested_email_action,
             "reply_text": quoted[0] if quoted and requested_email_action == "reply" else None,
+            "forward_to": forward_to if requested_email_action == "forward" else None,
             "target_sender": target_sender,
         },
     }

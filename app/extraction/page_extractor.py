@@ -38,6 +38,16 @@ def _candidate_all_text(c: dict[str, Any]) -> dict[str, str]:
     return out
 
 
+def _email_zone(c: dict[str, Any]) -> str:
+    return " ".join([
+        str(c.get("className") or ""),
+        str(c.get("id") or ""),
+        str(c.get("role") or ""),
+        str(c.get("parent_class") or ""),
+        str(c.get("parent_tag") or ""),
+    ]).lower()
+
+
 def extract_numbers(text: str) -> list[dict[str, Any]]:
     out = []
     for m in re.finditer(r"[-+]?\d+(?:[\.,]\d+)?", text or ""):
@@ -97,14 +107,22 @@ def extract_grid_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]
 def extract_email_items(candidates: list[dict[str, Any]]) -> list[dict[str, Any]]:
     out = []
     for c in candidates or []:
-        txt = " ".join(str(c.get(k) or "") for k in ["text", "innerText", "textContent", "name", "label", "ariaLabel"]).strip()
+        parts = []
+        for k in ["text", "innerText", "textContent", "name", "label", "ariaLabel"]:
+            v = c.get(k)
+            if isinstance(v, dict):
+                v = v.get("value")
+            if isinstance(v, str) and v.strip():
+                parts.append(v.strip())
+        txt = " ".join(parts).strip()
         low = txt.lower()
         cls = str(c.get("className") or "").lower()
+        zone = _email_zone(c)
         lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
         is_thread = "email-thread" in cls or "mail" in cls or "thread" in cls or "inbox" in cls or (2 <= len(lines) <= 4 and str(c.get("tag") or "").lower() == "div" and any(k in cls for k in ["mail", "inbox", "thread"]))
         if (len(lines) > 8 and "email-thread" not in cls) or (len(txt) > 600 and "email-thread" not in cls):
             continue
-        if any(k in cls for k in ["email-body", "email-header", "email-left"]):
+        if any(k in zone for k in ["email-body", "email-header", "email-left", "email-right", "email-content", "email-sender"]):
             continue
         if is_thread or any(k in low for k in ["subject", "from", "inbox", "email", "message"]):
             sender = lines[0] if len(lines) >= 1 else c.get("sender")

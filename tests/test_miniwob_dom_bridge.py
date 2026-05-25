@@ -15,6 +15,18 @@ def test_dom_link_without_bid_remains():
     assert any(c.get("tag") == "a" for c in out)
 
 
+def test_dom_empty_email_controls_remain():
+    dom = [
+        {"source": "dom", "tag": "textarea", "id": "reply-text", "text": "", "visible": True},
+        {"source": "dom", "tag": "span", "id": "send-reply", "text": "", "visible": True},
+        {"source": "dom", "tag": "span", "className": "star", "text": "", "visible": True},
+    ]
+    out = merge_dom_candidates_with_ax([], dom)
+    assert any(c.get("tag") == "textarea" and c.get("id") == "reply-text" for c in out)
+    assert any(c.get("id") == "send-reply" for c in out)
+    assert any(c.get("className") == "star" for c in out)
+
+
 def test_merge_dom_ax_by_bbox_overlap_enriches():
     ax = [{"bid": "15", "role": "generic", "text": "", "bbox": {"x": 10, "y": 10, "width": 100, "height": 20}}]
     dom = [{"source": "dom", "tag": "a", "text": "sed.", "className": "ui-state-default", "bbox": {"x": 12, "y": 10, "width": 100, "height": 20}}]

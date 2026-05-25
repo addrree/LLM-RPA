@@ -1,0 +1,18 @@
+@"
+.env
+.vscode/
+
+__pycache__/
+*.pyc
+.pytest_cache/
+
+artifacts/
+external/
+
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.zip
+*.trace
+"@ | Set-Content .gitignore -Encoding UTF8

@@ -13,6 +13,38 @@ def _is_meaningful_text(v: Any) -> bool:
     return bool(t and t not in {"generic", "listitem", "option", "menuitem"})
 
 
+def _is_actionish_candidate(c: dict[str, Any]) -> bool:
+    tag = _norm_text(c.get("tag")).lower()
+    role = _norm_text(c.get("role")).lower()
+    hay = " ".join(
+        _norm_text(c.get(field)).lower()
+        for field in ("id", "className", "parent_class", "title", "ariaLabel", "name")
+    )
+    return (
+        tag in {"input", "textarea", "button", "select"}
+        or role in {"button", "link", "textbox", "menuitem"}
+        or any(
+            key in hay
+            for key in (
+                "button",
+                "action",
+                "icon",
+                "toolbar",
+                "star",
+                "important",
+                "trash",
+                "delete",
+                "reply",
+                "send",
+                "forward",
+                "email-actions",
+                "email-reply",
+                "email-forward",
+            )
+        )
+    )
+
+
 def _bbox_parts(raw: Any) -> tuple[float, float, float, float] | None:
     if not isinstance(raw, dict):
         return None
@@ -102,16 +134,38 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
         });
       }
 
-      let outFiltered = out.filter(c => c.visible && ((c.text||c.innerText||c.textContent||'').trim() || c.href || (c.className||'').toLowerCase().includes('ui-datepicker') || (c.className||'').toLowerCase().includes('ui-autocomplete') || c.role || c.tag==='input' || c.tag==='button'));
+      const isActionish = (c) => {
+        const hay = [
+          c.id || '', c.className || '', c.parent_class || '', c.title || '',
+          c.ariaLabel || '', c.name || '', c.role || ''
+        ].join(' ').toLowerCase();
+        return ['input','textarea','button','select'].includes(c.tag)
+          || ['button','link','textbox','menuitem'].includes((c.role || '').toLowerCase())
+          || ['button','action','icon','toolbar','star','important','trash','delete','reply','send','forward','email-actions','email-reply','email-forward'].some(k => hay.includes(k));
+      };
+      let outFiltered = out.filter(c => c.visible && ((c.text||c.innerText||c.textContent||'').trim() || c.href || (c.className||'').toLowerCase().includes('ui-datepicker') || (c.className||'').toLowerCase().includes('ui-autocomplete') || c.role || isActionish(c)));
       if (!outFiltered.length) {
         const all = Array.from(document.querySelectorAll('*'));
         for (const el of all) {
           const rect = el.getBoundingClientRect();
           const style = window.getComputedStyle(el);
           const txt = (el.innerText || el.textContent || '').trim();
+          const parent = el.parentElement;
           const visible = !!(rect.width || rect.height) && style.display !== 'none' && style.visibility !== 'hidden';
           const clickable = !!el.getAttribute('href') || !!el.getAttribute('onclick') || style.cursor === 'pointer';
-          if (!visible || (!(txt && txt.length) && !clickable)) continue;
+          const hay = [
+            el.id || '',
+            typeof el.className === 'string' ? el.className : '',
+            parent ? (typeof parent.className === 'string' ? parent.className : '') : '',
+            el.getAttribute('title') || '',
+            el.getAttribute('aria-label') || '',
+            el.getAttribute('name') || '',
+            el.getAttribute('role') || ''
+          ].join(' ').toLowerCase();
+          const actionish = ['input','textarea','button','select'].includes((el.tagName || '').toLowerCase())
+            || ['button','link','textbox','menuitem'].includes((el.getAttribute('role') || '').toLowerCase())
+            || ['button','action','icon','toolbar','star','important','trash','delete','reply','send','forward','email-actions','email-reply','email-forward'].some(k => hay.includes(k));
+          if (!visible || (!(txt && txt.length) && !clickable && !actionish)) continue;
           outFiltered.push({
             source: 'dom', tag: (el.tagName||'').toLowerCase(), role: el.getAttribute('role') || '', type: el.getAttribute('type') || '',
             id: el.id || '', name: el.getAttribute('name') || '', value: el.value || '',
@@ -119,7 +173,10 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
             href: el.getAttribute('href') || '', title: el.getAttribute('title') || '', ariaLabel: el.getAttribute('aria-label') || '',
             className: typeof el.className === 'string' ? el.className : '', placeholder: el.getAttribute('placeholder') || '',
             visible, bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom},
-            page_center_x: rect.x + rect.width/2, page_center_y: rect.y + rect.height/2, center_x: rect.x + rect.width/2, center_y: rect.y + rect.height/2
+            page_center_x: rect.x + rect.width/2, page_center_y: rect.y + rect.height/2, center_x: rect.x + rect.width/2, center_y: rect.y + rect.height/2,
+            parent_text: parent ? ((parent.innerText || parent.textContent || '').trim().slice(0,200)) : '',
+            parent_class: parent ? (typeof parent.className === 'string' ? parent.className : '') : '',
+            parent_tag: parent ? (parent.tagName || '').toLowerCase() : ''
           });
           if (outFiltered.length >= 300) break;
         }
@@ -177,7 +234,7 @@ def merge_dom_candidates_with_ax(ax_candidates: list[dict[str, Any]], dom_candid
         if hit:
             j, d = hit
             used_dom.add(j)
-            for k in ("tag", "text", "innerText", "textContent", "href", "title", "ariaLabel", "className", "placeholder", "bbox", "browsergym_center_x", "browsergym_center_y", "page_center_x", "page_center_y", "source"):
+            for k in ("tag", "role", "type", "id", "name", "value", "text", "innerText", "textContent", "href", "title", "ariaLabel", "className", "placeholder", "parent_text", "parent_class", "parent_tag", "bbox", "browsergym_center_x", "browsergym_center_y", "page_center_x", "page_center_y", "source"):
                 if (not a.get(k)) and d.get(k):
                     a[k] = d.get(k)
             merged[i] = a
@@ -192,6 +249,7 @@ def merge_dom_candidates_with_ax(ax_candidates: list[dict[str, Any]], dom_candid
             or _is_meaningful_text(d.get("text") or d.get("innerText") or d.get("textContent"))
             or "ui-datepicker" in cls
             or "ui-autocomplete" in cls
+            or _is_actionish_candidate(d)
         )
         if keep_dom:
             merged.append(dict(d))
