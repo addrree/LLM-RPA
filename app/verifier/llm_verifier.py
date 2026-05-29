@@ -29,8 +29,11 @@ VERIFIER_SYSTEM_PROMPT = """
 TECHNICAL_REQUIRED_FIELDS = {"screenshot_path", "screenshot", "artifact_screenshot"}
 NEGATIVE_PROBE_ACTIONS = {
     "extract_text",
+    "extract_by_intent",
+    "extract_visible_links",
     "extract_pattern_from_page_text",
     "extract_value_near_anchor",
+    "find_row_by_condition",
     "extract_structured_items",
     "extract_section_lines",
     "extract_value_from_section",

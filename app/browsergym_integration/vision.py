@@ -131,7 +131,7 @@ def _coerce_array_bytes(value: Any, *, height: int, width: int, channels: int) -
             else:
                 mode = "RGB"
         else:
-            return None, None
+            raise ValueError("unsupported numpy array shape")
         if np.issubdtype(arr.dtype, np.floating):
             arr = np.clip(arr, 0.0, 1.0) * 255.0
             arr = arr.astype(np.uint8)

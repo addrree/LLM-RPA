@@ -20,7 +20,7 @@ PLANNER_SYSTEM_PROMPT = """
   "steps": [
     {
       "step_id": 1,
-      "action": "open_url|click|navigate_to_relevant_section|type|wait_for|extract_text|extract_html|extract_items|extract_structured_items|extract_section_lines|extract_value_from_section|extract_structured_items_from_region|compare_structured_values|assert_page_contains|screenshot|observe_page|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|finish",
+      "action": "open_url|click|click_by_semantic_target|navigate_to_relevant_section|type|fill|fill_by_semantic_target|focus|clear|press|hover|select_option|select_by_semantic_target|check|uncheck|select_autocomplete|choose_autocomplete_suggestion|choose_date|wait_for|extract_text|extract_html|extract_items|extract_structured_items|extract_section_lines|extract_value_from_section|extract_structured_items_from_region|compare_structured_values|assert_page_contains|screenshot|observe_page|extract_by_intent|extract_visible_links|extract_pattern_from_page_text|extract_text_near_text|extract_value_near_anchor|find_row_by_condition|click_row_action|visual_observe|visual_extract_object_count|visual_click_by_geometry|finish",
       "args": {},
       "save_as": "optional_string"
     }
@@ -29,6 +29,8 @@ PLANNER_SYSTEM_PROMPT = """
 
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
+0.2) Prefer semantic/extraction actions over fragile CSS/XPath: observe_page before extraction, extract_visible_links for visible links, extract_value_near_anchor for values near anchors, extract_by_intent for reusable extraction intents, click_by_semantic_target for visible buttons/links, fill_by_semantic_target for form fields, select_by_semantic_target or choose_autocomplete_suggestion for lists/autocomplete.
+0.3) Do not invent site-specific selectors when a semantic action can express the same intent. Use generic selectors only when observe_page evidence makes them stable.
 1. Последний шаг всегда finish.
 2. step_id строго подряд: 1,2,3,...
 3. Для extract_* шагов с save_as в required_fields должны быть соответствующие поля.
@@ -94,6 +96,24 @@ Correct action:
 
 def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[str]) -> str:
     allowed = "|".join(allowed_actions)
+    if task_family == "real_web_user_request":
+        return f"""
+Ты planner агентной web-automation системы. Верни только JSON TaskSpec.
+Пользовательский запрос находится в user message; не добавляй значения, которых не извлекал со страницы.
+Разрешённые actions: {allowed}
+Правила:
+1) JSON only.
+2) Используй только разрешённые actions.
+3) Если в запросе есть URL, начни с open_url.
+4) Для чтения страницы используй observe_page или generic extract_* actions.
+5) Для кликов/форм предпочитай semantic actions вместо CSS/XPath.
+6) Для табличных/строчных данных используй find_row_by_condition или extract_structured_items.
+7) expected_result.required_fields должны быть top-level ключами, которые реально создаются через save_as/output_key.
+8) Не hardcode-ь итоговые значения; извлекай их во время выполнения.
+9) Если пользователь просит найти, поискать, извлечь, выгрузить, вернуть данные, список, результаты, товары, новости, статьи или ссылки, план open_url -> finish запрещен.
+10) Для search/form задач используй open_url -> fill_by_semantic_target(query) -> click_by_semantic_target(search/submit) -> observe_page или extract_visible_links/extract_structured_items -> finish.
+11) Каждый extraction/output шаг обязан иметь save_as или args.output_key; expected_result.required_fields должен ссылаться на эти output ключи, а не на внутренние поля вроде title/link.
+"""
     family_rules = {
         "single_value_extraction": (
             "Path hint: open_url -> extract_text(save_as='value') -> finish. If selector unknown, use h1."
@@ -216,6 +236,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
+0.2) Prefer semantic/extraction actions over fragile selectors: extract_visible_links for visible links, extract_by_intent for reusable extraction intents, click_by_semantic_target/fill_by_semantic_target/select_by_semantic_target for UI controls.
 0) Never invent action names. Use only TaskSpec allowed actions exactly. Invalid examples: Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
 2) Если требовался список, возвращай массив объектов:

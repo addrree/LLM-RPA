@@ -80,6 +80,9 @@ class ActionGrounder:
         wanted = self._target_tokens(payload)
         preferred = ["date"] if intent == "choose_date" else ["textbox", "date"]
         selected, rejected, confidence = self._select_candidate(candidates, wanted, preferred_kinds=preferred)
+        if not selected and self._looks_like_search_target(wanted):
+            selected, search_rejected, confidence = self._select_search_field(candidates, preferred_kinds=preferred)
+            rejected.extend(search_rejected)
         if not selected:
             raise ValueError(f"Unable to ground {intent}: no textbox/date candidate matched target={wanted!r}")
         action = "fill"
@@ -127,6 +130,10 @@ class ActionGrounder:
         selected, rejected, confidence = self._select_candidate(candidates, self._target_tokens(payload), preferred_kinds=["select"])
         if selected:
             return GroundingResult(actions=[GroundedAction("select_option", {"selector": selected["selector"], "option_text": str(option_value), "candidate_id": selected.get("candidate_id")})], selected_candidate=selected, grounding_strategy="select_element_option", confidence=confidence, rejected_candidates=rejected)
+        select_candidates = [c for c in candidates if c.get("kind") == "select" and c.get("enabled", True)]
+        if not self._target_tokens(payload) and len(select_candidates) == 1:
+            selected = select_candidates[0]
+            return GroundingResult(actions=[GroundedAction("select_option", {"selector": selected["selector"], "option_text": str(option_value), "candidate_id": selected.get("candidate_id")})], selected_candidate=selected, grounding_strategy="single_select_element_option", confidence=0.72, rejected_candidates=rejected)
         option, more_rejected, option_conf = self._select_candidate(candidates, [str(option_value)], preferred_kinds=["option", "radio"])
         rejected.extend(more_rejected)
         if option:
@@ -134,7 +141,11 @@ class ActionGrounder:
         raise ValueError("Unable to ground select_option: no select or option candidate matched")
 
     def _ground_target_action(self, intent: str, payload: dict[str, Any], candidates: list[dict[str, Any]]) -> GroundingResult:
-        selected, rejected, confidence = self._select_candidate(candidates, self._target_tokens(payload), preferred_kinds=list(_CLICK_KINDS) if intent in {"click", "hover"} else None)
+        target_tokens = self._target_tokens(payload)
+        selected, rejected, confidence = self._select_candidate(candidates, target_tokens, preferred_kinds=list(_CLICK_KINDS) if intent in {"click", "hover"} else None)
+        if not selected and intent == "click" and self._looks_like_search_target(target_tokens):
+            selected, search_rejected, confidence = self._select_search_submit(candidates)
+            rejected.extend(search_rejected)
         if not selected:
             raise ValueError(f"Unable to ground {intent}: unknown target; refusing Submit fallback")
         if intent == "click" and selected.get("kind") in _INPUT_KINDS and (payload.get("value") or payload.get("text")):
@@ -162,7 +173,32 @@ class ActionGrounder:
             value = payload.get(key)
             if value is not None and str(value).strip():
                 values.append(str(value).strip())
+                simplified = ActionGrounder._strip_generic_target_words(str(value))
+                if simplified and simplified not in values:
+                    values.append(simplified)
         return values
+
+    @staticmethod
+    def _strip_generic_target_words(value: str) -> str:
+        words = re.findall(r"[\wА-Яа-яЁё]+", value, flags=re.UNICODE)
+        generic = {
+            "field",
+            "input",
+            "textbox",
+            "text",
+            "box",
+            "button",
+            "link",
+            "control",
+            "поле",
+            "ввода",
+            "кнопка",
+            "кнопку",
+            "ссылка",
+            "ссылку",
+        }
+        kept = [word for word in words if word.casefold() not in generic]
+        return " ".join(kept).strip()
 
     @staticmethod
     def _looks_like_login(payload: dict[str, Any], *, user_goal: str) -> bool:
@@ -177,6 +213,9 @@ class ActionGrounder:
         for index, candidate in enumerate(candidates):
             if preferred_kinds and candidate.get("kind") not in preferred_kinds:
                 rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "kind_mismatch", "kind": candidate.get("kind")})
+                continue
+            if self._is_skip_link_candidate(candidate):
+                rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "skip_link_candidate", "kind": candidate.get("kind")})
                 continue
             if not candidate.get("enabled", True):
                 rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "disabled"})
@@ -209,10 +248,93 @@ class ActionGrounder:
         return None, rejected, 0.0
 
     def _candidate_parts(self, candidate: dict[str, Any]) -> list[str]:
-        return [self._norm(candidate.get(key, "")) for key in ("candidate_id", "selector", "text", "inner_text", "aria_label", "title", "name", "placeholder", "value", "href") if candidate.get(key)]
+        return [
+            self._norm(candidate.get(key, ""))
+            for key in (
+                "candidate_id",
+                "selector",
+                "text",
+                "inner_text",
+                "aria_label",
+                "title",
+                "name",
+                "placeholder",
+                "value",
+                "href",
+                "id",
+                "className",
+                "input_type",
+                "role",
+            )
+            if candidate.get(key)
+        ]
 
     def _candidate_haystack(self, candidate: dict[str, Any]) -> str:
         return " ".join(self._candidate_parts(candidate))
+
+    def _is_skip_link_candidate(self, candidate: dict[str, Any]) -> bool:
+        text = self._norm(candidate.get("text") or candidate.get("inner_text") or candidate.get("aria_label") or "")
+        href = self._norm(candidate.get("href") or "")
+        return text.startswith("skip to ") or bool(re.fullmatch(r"#(?:main|content|search|navigation|nav)", href))
+
+    @classmethod
+    def _looks_like_search_target(cls, tokens: list[str]) -> bool:
+        hay = " ".join(cls._norm(token) for token in tokens)
+        return any(token in hay for token in ("search", "query", "find", "поиск", "найди", "искать"))
+
+    def _select_search_field(self, candidates: list[dict[str, Any]], *, preferred_kinds: list[str]) -> tuple[dict[str, Any] | None, list[dict[str, Any]], float]:
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        rejected: list[dict[str, Any]] = []
+        for index, candidate in enumerate(candidates):
+            if candidate.get("kind") not in preferred_kinds:
+                continue
+            if not candidate.get("enabled", True):
+                rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "disabled"})
+                continue
+            hay = self._candidate_haystack(candidate)
+            score = 0
+            if "search" in hay or "query" in hay or "поиск" in hay:
+                score += 70
+            if candidate.get("input_type") == "search":
+                score += 60
+            if self._norm(candidate.get("name")) in {"q", "query", "search"}:
+                score += 30
+            if score:
+                scored.append((score, -index, candidate))
+            else:
+                rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "search_field_mismatch", "kind": candidate.get("kind")})
+        if scored:
+            score, _neg_index, candidate = sorted(scored, key=lambda item: (item[0], item[1]), reverse=True)[0]
+            return candidate, rejected, 0.9 if score >= 100 else 0.72
+        return None, rejected, 0.0
+
+    def _select_search_submit(self, candidates: list[dict[str, Any]]) -> tuple[dict[str, Any] | None, list[dict[str, Any]], float]:
+        scored: list[tuple[int, int, dict[str, Any]]] = []
+        rejected: list[dict[str, Any]] = []
+        for index, candidate in enumerate(candidates):
+            if candidate.get("kind") not in {"button", "clickable"}:
+                continue
+            if not candidate.get("enabled", True):
+                rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "disabled"})
+                continue
+            hay = self._candidate_haystack(candidate)
+            score = 0
+            if any(token in hay for token in ("search", "find", "поиск")):
+                score += 90
+            if any(token == self._norm(candidate.get("value")) for token in ("go", "search", "find")):
+                score += 45
+            if self._norm(candidate.get("text") or candidate.get("name") or candidate.get("aria_label")) in _SUBMIT_WORDS:
+                score += 35
+            if candidate.get("input_type") == "submit":
+                score += 25
+            if score:
+                scored.append((score, -index, candidate))
+            else:
+                rejected.append({"candidate_id": candidate.get("candidate_id"), "reason": "search_submit_mismatch", "kind": candidate.get("kind")})
+        if scored:
+            score, _neg_index, candidate = sorted(scored, key=lambda item: (item[0], item[1]), reverse=True)[0]
+            return candidate, rejected, 0.88 if score >= 90 else 0.68
+        return None, rejected, 0.0
 
     @staticmethod
     def _norm(value: Any) -> str:

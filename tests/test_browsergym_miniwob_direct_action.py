@@ -253,6 +253,38 @@ def test_choose_date_policy_runs_pre_llm_and_skips_llm_call():
     assert planner.llm_client.calls == []
 
 
+def test_non_extraction_subset_is_not_intercepted_by_extraction_controller():
+    planner = _Planner({"rationale": "fallback", "action": "noop()"})
+    adapter = BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.click-collapsible")
+    obs = {
+        "goal": "Expand the section below and click submit.",
+        "url": "http://miniwob/",
+        "page_clickable_candidates": [
+            {"bid": "h", "tag": "p", "className": "ui-accordion-header", "text": "Section #1", "source": "dom"},
+            {"bid": "s", "tag": "button", "text": "Submit", "source": "dom"},
+        ],
+    }
+
+    decision = adapter.act("goal", obs, {}, [])
+
+    assert decision.action == 'click("h", "left")'
+    assert decision.mapping_strategy == "policy_basic_collapsible_expand"
+    assert planner.llm_client.calls == []
+
+
+def test_visual_task_llm_failure_is_controlled_no_decision():
+    planner = _Planner({"rationale": "unused", "action": "noop()"})
+    planner.llm_client = _FailingDirectLLM({})
+    adapter = BrowserGymAgentAdapter(planner, None, _Validator(), env_id="browsergym/miniwob.identify-shape")
+
+    decision = adapter.act("goal", {"goal": "Click the button that best describes the figure below.", "url": "http://miniwob/"}, {}, [])
+
+    assert decision.action == "noop()"
+    assert decision.mapping_strategy == "visual_spatial_controller_required"
+    assert decision.mapping_error == "action_mapping_failure: visual_spatial_controller_required"
+    assert (decision.mapping_diagnostics or {}).get("reason") == "visual controller required"
+
+
 def test_grounding_keeps_click_on_datepicker_input():
     result = ground_miniwob_action(
         action='click("17", "left")',

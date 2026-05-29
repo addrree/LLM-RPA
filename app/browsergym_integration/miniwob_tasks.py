@@ -23,6 +23,26 @@ RECOMMENDED_MINIWOB_TASK_NAMES = [
     "use-autocomplete",
     "book-flight",
 ]
+BASIC_ACTION_MINIWOB_TASK_NAMES = [
+    "click-button",
+    "click-button-sequence",
+    "click-checkboxes",
+    "click-dialog",
+    "click-link",
+    "click-menu",
+    "click-option",
+    "click-test",
+    "enter-text",
+    "focus-text",
+    "login-user",
+    "choose-list",
+    "use-autocomplete",
+    "click-scroll-list",
+    "click-tab",
+    "click-tab-2",
+    "click-collapsible",
+    "click-collapsible-2",
+]
 EXTRACTION_TEXT_MINIWOB_TASK_NAMES = [
     "find-word",
     "find-greatest",
@@ -33,15 +53,19 @@ EXTRACTION_TEXT_MINIWOB_TASK_NAMES = [
 ]
 EXTRACTION_MINIWOB_TASK_NAMES = EXTRACTION_TEXT_MINIWOB_TASK_NAMES
 VISUAL_SPATIAL_MINIWOB_TASK_NAMES = [
+    "identify-shape",
     "count-shape",
     "count-sides",
-    "identify-shape",
     "grid-coordinate",
     "find-midpoint",
+    "circle-center",
+    "bisect-angle",
 ]
 ACTION_COMPLEX_MINIWOB_TASK_NAMES = [
-    "daily-calendar",
     "book-flight",
+    "buy-ticket",
+    "daily-calendar",
+    "choose-date",
 ]
 
 

@@ -99,6 +99,7 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
     () => {
       const selectors = [
         'a[href]','a','button','input','textarea','select','option','label','[role]','[onclick]','[role="link"]','span','div','p','td','li',
+        'svg','svg circle','svg rect','svg polygon','svg path','svg text','.plot-point',
         '.ui-menu-item','.ui-autocomplete li','.ui-menu li','.ui-datepicker','.ui-datepicker-title',
         '.ui-datepicker-month','.ui-datepicker-year','.ui-datepicker-prev','.ui-datepicker-next',
         '.ui-datepicker-calendar td a','.ui-datepicker-calendar td','.ui-state-default','.ui-state-active','.ui-priority-secondary'
@@ -119,7 +120,13 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
           id: el.id || '', name: el.getAttribute('name') || '', value: el.value || '',
           text: (el.innerText || el.textContent || '').trim(), innerText: (el.innerText || '').trim(), textContent: (el.textContent || '').trim(),
           href: el.getAttribute('href') || '', title: el.getAttribute('title') || '', ariaLabel: el.getAttribute('aria-label') || '',
-          className: typeof el.className === 'string' ? el.className : '', placeholder: el.getAttribute('placeholder') || '',
+          className: typeof el.className === 'string' ? el.className : (el.getAttribute('class') || ''), placeholder: el.getAttribute('placeholder') || '',
+          fill: el.getAttribute('fill') || style.fill || '', stroke: el.getAttribute('stroke') || style.stroke || '',
+          points: el.getAttribute('points') || '', d: el.getAttribute('d') || '',
+          cx: el.getAttribute('cx') || '', cy: el.getAttribute('cy') || '', r: el.getAttribute('r') || '',
+          x_attr: el.getAttribute('x') || '', y_attr: el.getAttribute('y') || '',
+          width_attr: el.getAttribute('width') || '', height_attr: el.getAttribute('height') || '',
+          fontSize: el.getAttribute('font-size') || style.fontSize || '',
           disabled: !!el.disabled, checked: !!el.checked, selected: !!el.selected, visible,
           bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom},
           page_center_x: rect.x + rect.width/2, page_center_y: rect.y + rect.height/2,
@@ -141,7 +148,9 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
         ].join(' ').toLowerCase();
         return ['input','textarea','button','select'].includes(c.tag)
           || ['button','link','textbox','menuitem'].includes((c.role || '').toLowerCase())
-          || ['button','action','icon','toolbar','star','important','trash','delete','reply','send','forward','email-actions','email-reply','email-forward'].some(k => hay.includes(k));
+          || (c.tag === 'circle' && /\\(-?\\d+\\s*,\\s*-?\\d+\\)/.test(c.id || ''))
+          || (['circle','rect','polygon','path','text'].includes(c.tag) && c.parent_tag === 'svg')
+          || ['button','action','icon','toolbar','star','important','trash','delete','reply','send','forward','email-actions','email-reply','email-forward','plot-point'].some(k => hay.includes(k));
       };
       let outFiltered = out.filter(c => c.visible && ((c.text||c.innerText||c.textContent||'').trim() || c.href || (c.className||'').toLowerCase().includes('ui-datepicker') || (c.className||'').toLowerCase().includes('ui-autocomplete') || c.role || isActionish(c)));
       if (!outFiltered.length) {
@@ -171,7 +180,13 @@ def extract_miniwob_dom_candidates(page) -> list[dict[str, Any]]:
             id: el.id || '', name: el.getAttribute('name') || '', value: el.value || '',
             text: txt, innerText: (el.innerText||'').trim(), textContent: (el.textContent||'').trim(),
             href: el.getAttribute('href') || '', title: el.getAttribute('title') || '', ariaLabel: el.getAttribute('aria-label') || '',
-            className: typeof el.className === 'string' ? el.className : '', placeholder: el.getAttribute('placeholder') || '',
+            className: typeof el.className === 'string' ? el.className : (el.getAttribute('class') || ''), placeholder: el.getAttribute('placeholder') || '',
+            fill: el.getAttribute('fill') || style.fill || '', stroke: el.getAttribute('stroke') || style.stroke || '',
+            points: el.getAttribute('points') || '', d: el.getAttribute('d') || '',
+            cx: el.getAttribute('cx') || '', cy: el.getAttribute('cy') || '', r: el.getAttribute('r') || '',
+            x_attr: el.getAttribute('x') || '', y_attr: el.getAttribute('y') || '',
+            width_attr: el.getAttribute('width') || '', height_attr: el.getAttribute('height') || '',
+            fontSize: el.getAttribute('font-size') || style.fontSize || '',
             visible, bbox: {x: rect.x, y: rect.y, width: rect.width, height: rect.height, left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom},
             page_center_x: rect.x + rect.width/2, page_center_y: rect.y + rect.height/2, center_x: rect.x + rect.width/2, center_y: rect.y + rect.height/2,
             parent_text: parent ? ((parent.innerText || parent.textContent || '').trim().slice(0,200)) : '',

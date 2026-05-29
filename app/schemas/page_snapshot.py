@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -26,5 +26,13 @@ class PageSnapshot(BaseModel):
     visible_labels: List[str] = Field(default_factory=list)
     visible_buttons: List[str] = Field(default_factory=list)
     visible_inputs: List[str] = Field(default_factory=list)
+    visible_links: List[dict[str, Any]] = Field(default_factory=list)
+    text_lines: List[str] = Field(default_factory=list)
+    candidates: List[dict[str, Any]] = Field(default_factory=list)
+    buttons: List[dict[str, Any]] = Field(default_factory=list)
+    links: List[dict[str, Any]] = Field(default_factory=list)
+    inputs: List[dict[str, Any]] = Field(default_factory=list)
+    rows: List[dict[str, Any]] = Field(default_factory=list)
+    tables: List[dict[str, Any]] = Field(default_factory=list)
     timestamp: datetime
     page_text: Optional[str] = None

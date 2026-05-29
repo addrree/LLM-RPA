@@ -1,4 +1,4 @@
-from scripts.run_minwob_subset import parse_args
+from scripts.run_minwob_subset import _suite_type, parse_args
 
 
 def test_parse_minwob_cli_args():
@@ -24,3 +24,10 @@ def test_parse_minwob_subset_arg():
     assert args2.subset == "extraction"
     args3 = parse_args(["--subset", "visual"])
     assert args3.subset == "visual"
+
+
+def test_suite_type_labels_for_diploma_reports():
+    assert _suite_type("extraction") == "miniwob_extraction"
+    assert _suite_type("basic") == "miniwob_action_grounding"
+    assert _suite_type("action") == "miniwob_action_grounding"
+    assert _suite_type("visual") == "miniwob_visual_spatial"

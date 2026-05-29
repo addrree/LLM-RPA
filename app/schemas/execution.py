@@ -39,3 +39,4 @@ class ExecutionResult(BaseModel):
     failure_details: Dict[str, Any] = Field(default_factory=dict)
     technical_failure: bool = False
     retry_artifacts: List[Dict[str, Any]] = Field(default_factory=list)
+    used_skills: List[str] = Field(default_factory=list)

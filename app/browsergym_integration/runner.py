@@ -10,7 +10,7 @@ from app.browsergym_integration.config import BrowserGymRunConfig
 from app.browsergym_integration.miniwob_grounding import real_candidate_bid
 from app.browsergym_integration.observation_adapter import browsergym_obs_to_page_context
 from app.browsergym_integration.miniwob_dom_bridge import extract_miniwob_dom_candidates, merge_dom_candidates_with_ax
-from app.browsergym_integration.report import BrowserGymRunReport, BrowserGymStepRecord
+from app.browsergym_integration.report import BrowserGymRunReport, BrowserGymStepRecord, enrich_miniwob_report
 
 
 class BrowserGymRunner:
@@ -29,6 +29,7 @@ class BrowserGymRunner:
         "policy_click_link_target_not_found",
         "policy_choose_date_fill_no_progress",
         "extraction_no_decision",
+        "visual_spatial_controller_required",
     }
     NON_RECOVERABLE_DIAGNOSTICS = {
         "menu_requires_hover_no_supported_action",
@@ -94,6 +95,14 @@ class BrowserGymRunner:
             if value and not cls._looks_like_action_space_repr(value) and value not in cleaned:
                 cleaned.append(value)
         return (cleaned or cls._browsergym_default_action_syntax())[:25]
+
+    @staticmethod
+    def _miniwob_action_mapping():
+        try:
+            from browsergym.core.action.highlevel import HighLevelActionSet
+        except Exception:
+            return None
+        return HighLevelActionSet(subsets=["chat", "infeas", "bid", "coord", "nav", "tab"]).to_python_code
 
     @staticmethod
     def _find_page(env):
@@ -203,14 +212,16 @@ class BrowserGymRunner:
         return augmented
 
     def _persist_report(self, report: BrowserGymRunReport) -> BrowserGymRunReport:
+        if self.config.benchmark == "miniwob" or str(self.config.env_id).startswith("browsergym/miniwob"):
+            report = enrich_miniwob_report(report)
         if not self.config.save_artifacts:
             return report
         self.config.output_dir.mkdir(parents=True, exist_ok=True)
-        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S")
+        ts = datetime.utcnow().strftime("%Y%m%d_%H%M%S_%f")
         env_id_s = self.config.env_id.replace("/", "_").replace(".", "_")
         out = self.config.output_dir / f"browsergym_run_{env_id_s}_{ts}.json"
-        out.write_text(json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
         report.output_path = str(out)
+        out.write_text(json.dumps(report.model_dump(mode="json"), ensure_ascii=False, indent=2), encoding="utf-8")
         return report
 
 
@@ -324,10 +335,19 @@ class BrowserGymRunner:
             message = f"browsergym.miniwob import failed: {exc}" if failure_stage == "miniwob_import" else f"Install browsergym dependencies first: {exc}"
             return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage=failure_stage, error_message=message, runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
 
+        make_kwargs = {"task_kwargs": self.config.task_kwargs or {}}
+        if self._is_miniwob_config(self.config):
+            action_mapping = self._miniwob_action_mapping()
+            if action_mapping is not None:
+                make_kwargs["action_mapping"] = action_mapping
         try:
-            env = gym.make(self.config.env_id, task_kwargs=self.config.task_kwargs or {})
+            env = gym.make(self.config.env_id, **make_kwargs)
         except TypeError:
-            env = gym.make(self.config.env_id)
+            make_kwargs.pop("action_mapping", None)
+            try:
+                env = gym.make(self.config.env_id, **make_kwargs)
+            except TypeError:
+                env = gym.make(self.config.env_id)
         except Exception as exc:
             return self._persist_report(BrowserGymRunReport(env_id=self.config.env_id, goal=self.config.goal or "", status="skipped", failure_stage="env_creation", error_message=str(exc), error_traceback=traceback.format_exc(), runtime_sec=time.time() - started, benchmark=self.config.benchmark, task_name=self.config.task_name))
         agent = self.agent_factory()
@@ -468,6 +488,9 @@ class BrowserGymRunner:
             elif last_strategy == "extraction_no_decision":
                 failure_stage = "extraction_no_decision"
                 error_message = str(last_diag.get("reason") or last_error or "extraction_no_decision")
+            elif last_strategy == "visual_spatial_controller_required":
+                failure_stage = "visual_spatial_no_decision"
+                error_message = str(last_diag.get("reason") or last_diag.get("failure_reason") or "visual controller required")
             elif "repeated action without progress" in str(last_error or "").lower():
                 failure_stage = "no_progress_repeated_action"
                 error_message = str(last_error)

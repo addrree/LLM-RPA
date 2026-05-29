@@ -1,0 +1,177 @@
+{
+  "suite_id": "real_web_skill_suite_v2",
+  "suite_type": "real_web_llm_rpa_skill_smoke",
+  "description": "Real public-site smoke suite for full natural-language LLM+RPA pipeline evaluation. expected_skills are evaluator metadata only and must not route execution.",
+  "scenarios": [
+    {
+      "id": "wikipedia_english_article_count",
+      "category": "anchor_value",
+      "site": "wikipedia",
+      "url": "https://www.wikipedia.org",
+      "goal": "Открой сайт Wikipedia и извлеки число статей рядом с языком English.",
+      "expected_fields": ["english_article_count"],
+      "expected_skills": ["observe_page", "extract_value_near_anchor"],
+      "default_enabled": true
+    },
+    {
+      "id": "wikipedia_language_stats",
+      "category": "anchor_value",
+      "site": "wikipedia",
+      "url": "https://www.wikipedia.org",
+      "goal": "Открой Wikipedia и выгрузи языковые разделы с количеством статей: язык, число статей, ссылка.",
+      "expected_fields": ["languages[]"],
+      "expected_skills": ["observe_page", "extract_structured_items", "extract_value_near_anchor", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "wiktionary_visible_language_links",
+      "category": "visible_links",
+      "site": "wiktionary",
+      "url": "https://www.wiktionary.org",
+      "goal": "Открой Wiktionary и выгрузи видимые языковые ссылки с текстом и href.",
+      "expected_fields": ["links[]"],
+      "expected_skills": ["observe_page", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "wiktionary_language_links",
+      "category": "visible_links",
+      "site": "wiktionary",
+      "url": "https://www.wiktionary.org",
+      "goal": "Открой Wiktionary и выгрузи видимые языковые ссылки с текстом и href.",
+      "expected_fields": ["links[]"],
+      "expected_skills": ["observe_page", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "cbr_currency_usd_eur",
+      "category": "table_extraction",
+      "site": "cbr",
+      "url": "https://www.cbr.ru/currency_base/daily/",
+      "goal": "Открой сайт ЦБ РФ со страницей ежедневных курсов валют и выгрузи строки для доллара США и евро: код валюты, номинал, название и курс.",
+      "expected_fields": ["currencies[]"],
+      "expected_skills": ["observe_page", "extract_structured_items", "extract_by_intent", "find_row_by_condition"],
+      "notes": "Official table extraction. Do not hardcode rates.",
+      "default_enabled": true
+    },
+    {
+      "id": "rbc_main_news",
+      "category": "news_list",
+      "site": "rbc",
+      "url": "https://www.rbc.ru",
+      "goal": "Открой РБК и выгрузи несколько главных новостей: заголовок, ссылку и раздел, если он виден.",
+      "expected_fields": ["news[]"],
+      "expected_skills": ["observe_page", "extract_structured_items", "extract_visible_links"],
+      "allowed_controlled_outcomes": ["success", "skipped_unavailable", "skipped_http_401", "skipped_http_403"],
+      "default_enabled": true
+    },
+    {
+      "id": "habr_visible_article_links",
+      "category": "news_list",
+      "site": "habr",
+      "url": "https://habr.com/ru/articles/",
+      "goal": "Открой Habr articles и извлеки первые видимые заголовки статей и ссылки на них.",
+      "expected_fields": ["articles[]"],
+      "expected_skills": ["observe_page", "extract_visible_links", "extract_structured_items"],
+      "default_enabled": true
+    },
+    {
+      "id": "habr_articles_with_metadata",
+      "category": "news_list",
+      "site": "habr",
+      "url": "https://habr.com/ru/articles/",
+      "goal": "Открой Habr и выгрузи первые видимые статьи: заголовок, ссылку, автора и время публикации, если эти поля видны.",
+      "expected_fields": ["articles[]"],
+      "expected_skills": ["observe_page", "extract_structured_items", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "arxiv_search_web_agents",
+      "category": "search_form",
+      "site": "arxiv",
+      "url": "https://arxiv.org",
+      "goal": "Открой arXiv, найди статьи по запросу \"web agents\" и выгрузи первые результаты: название, авторов и ссылку.",
+      "expected_fields": ["query", "papers[]"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "python_org_search_asyncio",
+      "category": "search_form",
+      "site": "python_org",
+      "url": "https://www.python.org",
+      "goal": "Открой python.org, найди через поиск \"asyncio\" и выгрузи первые результаты: заголовок и ссылку.",
+      "expected_fields": ["query", "results[]"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "github_repo_search_browser_automation",
+      "category": "search_form",
+      "site": "github",
+      "url": "https://github.com",
+      "goal": "Открой GitHub, найди репозитории по запросу \"browser automation python\" и выгрузи первые результаты: название репозитория, описание и ссылку.",
+      "expected_fields": ["repositories[]"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_visible_links"],
+      "allowed_controlled_outcomes": ["success", "skipped_unavailable", "skipped_auth_required", "skipped_antibot"],
+      "default_enabled": true
+    },
+    {
+      "id": "pypi_package_playwright",
+      "category": "search_form",
+      "site": "pypi",
+      "url": "https://pypi.org",
+      "goal": "Открой PyPI, найди пакет \"playwright\" и выгрузи название пакета, последнюю версию и краткое описание.",
+      "expected_fields": ["package_name", "version", "description"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_value_near_anchor", "extract_structured_items"],
+      "default_enabled": true
+    },
+    {
+      "id": "mdn_search_fetch_api",
+      "category": "search_form",
+      "site": "mdn",
+      "url": "https://developer.mozilla.org",
+      "goal": "Открой MDN Web Docs, найди \"fetch API\" и выгрузи первые видимые результаты поиска: заголовок и ссылку.",
+      "expected_fields": ["query", "results[]"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_visible_links"],
+      "default_enabled": true
+    },
+    {
+      "id": "osm_wiki_semantic_navigation",
+      "category": "semantic_navigation",
+      "site": "openstreetmap_wiki",
+      "url": "https://wiki.openstreetmap.org",
+      "goal": "Открой сайт OpenStreetMap Wiki и найди или нажми видимую ссылку с текстом Wiki или Help, затем верни текущий URL и заголовок страницы.",
+      "expected_fields": ["clicked_text", "final_url", "page_title"],
+      "expected_skills": ["observe_page", "click_by_semantic_target"],
+      "allowed_controlled_outcomes": ["success", "target_link_not_found", "preflight_unavailable"],
+      "default_enabled": true
+    },
+    {
+      "id": "ozon_product_search_budget",
+      "category": "marketplace",
+      "site": "ozon",
+      "url": "https://www.ozon.ru",
+      "goal": "Открой Ozon, найди внешние SSD объёмом 1 ТБ до 7000 рублей и выгрузи первые видимые товары: название, цену, рейтинг при наличии и ссылку.",
+      "expected_fields": ["products[]"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_by_intent"],
+      "notes": "Marketplace scenario. May be skipped if captcha/anti-bot/geoblock occurs.",
+      "allowed_controlled_outcomes": ["success", "partial_success", "skipped_captcha_or_antibot", "skipped_unavailable", "preflight_unavailable"],
+      "optional": true,
+      "default_enabled": false
+    },
+    {
+      "id": "wildberries_product_search_budget",
+      "category": "marketplace",
+      "site": "wildberries",
+      "url": "https://www.wildberries.ru",
+      "goal": "Открой Wildberries, найди беспроводные мыши до 2000 рублей и выгрузи несколько видимых товаров: название, цену и ссылку.",
+      "expected_fields": ["products[]"],
+      "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_by_intent"],
+      "notes": "Alternative marketplace scenario. May be captcha/anti-bot.",
+      "allowed_controlled_outcomes": ["success", "partial_success", "skipped_captcha_or_antibot", "skipped_unavailable", "preflight_unavailable"],
+      "optional": true,
+      "default_enabled": false
+    }
+  ]
+}

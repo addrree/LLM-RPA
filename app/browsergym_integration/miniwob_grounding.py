@@ -184,7 +184,10 @@ def _action_syntax_prefers_option_list(action_syntax: list[str] | None) -> bool:
     return False
 
 
-def browsergym_select_option_action(candidate_id: str, option_text: str, action_syntax: list[str] | None = None) -> str:
+def browsergym_select_option_action(candidate_id: str, option_text: str | list[str], action_syntax: list[str] | None = None) -> str:
+    if isinstance(option_text, list):
+        options = ", ".join(f'"{_escape(item)}"' for item in option_text)
+        return f'select_option("{_escape(candidate_id)}", [{options}])'
     if _action_syntax_prefers_option_list(action_syntax):
         return f'select_option("{_escape(candidate_id)}", ["{_escape(option_text)}"])'
     return f'select_option("{_escape(candidate_id)}", "{_escape(option_text)}")'

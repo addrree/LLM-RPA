@@ -510,7 +510,15 @@ def normalize_benchmark_plan(
     payload = plan.model_dump(mode="json")
     steps = payload.get("steps", [])
     task_family = str(benchmark_context.get("task_family", "")).strip().lower()
-    required_fields = benchmark_context.get("required_top_level_fields", [])
+    required_fields = benchmark_context.get("required_top_level_fields")
+    if not isinstance(required_fields, list):
+        required_fields = benchmark_context.get("required_fields")
+    if not isinstance(required_fields, list):
+        expected_result = payload.get("expected_result")
+        if isinstance(expected_result, dict) and isinstance(expected_result.get("required_fields"), list):
+            required_fields = expected_result.get("required_fields")
+        else:
+            required_fields = []
     allowed_actions = {
         str(action).strip()
         for action in (benchmark_context.get("allowed_actions") or [])
@@ -650,7 +658,11 @@ class WorkflowManager:
         "check",
         "uncheck",
         "select_autocomplete",
+        "choose_autocomplete_suggestion",
         "choose_date",
+        "click_by_semantic_target",
+        "fill_by_semantic_target",
+        "select_by_semantic_target",
         "wait_for",
         "extract_text",
         "extract_html",
@@ -662,9 +674,16 @@ class WorkflowManager:
         "compare_structured_values",
         "assert_page_contains",
         "observe_page",
+        "extract_by_intent",
+        "extract_visible_links",
         "extract_pattern_from_page_text",
         "extract_text_near_text",
         "extract_value_near_anchor",
+        "find_row_by_condition",
+        "click_row_action",
+        "visual_observe",
+        "visual_extract_object_count",
+        "visual_click_by_geometry",
         "finish",
     }
     RECOVERABLE_FAILURE_TYPES = {
@@ -1064,6 +1083,7 @@ class WorkflowManager:
             error_message=error_message,
             failure_type="observe_action_error" if error_message else None,
             technical_failure=bool(error_message),
+            used_skills=list(runtime_state.get("used_skills", [])),
         )
         verdict = VerificationVerdict(
             task_completed=status == "success",
@@ -1162,6 +1182,7 @@ class WorkflowManager:
     ):
         runtime_state = runtime_state if runtime_state is not None else {}
         runtime_state["benchmark_context"] = benchmark_context or {}
+        runtime_state["user_goal"] = user_goal
         current_plan = initial_plan
         max_retries = self._effective_max_retries(current_plan.constraints.max_verification_retries)
         max_retries = self._effective_max_retries_for_context(max_retries=max_retries, benchmark_context=benchmark_context)
@@ -1547,6 +1568,8 @@ class WorkflowManager:
         if not benchmark_context:
             return max_retries
         family = str(benchmark_context.get("task_family", "")).strip()
+        if family in {"real_web_skill_smoke", "real_web_user_request"}:
+            return 0
         if family in {"single_value_extraction", "anchored_value_extraction"}:
             return min(max_retries, 1)
         if family in {"navigation_then_extraction"}:

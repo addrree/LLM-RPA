@@ -69,6 +69,14 @@ class PlanValidator:
                 self._validate_choose_date_args(step.args)
             if step.action == "select_autocomplete":
                 self._validate_select_autocomplete_args(step.args)
+            if step.action == "choose_autocomplete_suggestion":
+                self._validate_select_autocomplete_args(step.args)
+            if step.action == "click_by_semantic_target":
+                self._validate_click_by_semantic_target_args(step.args)
+            if step.action == "fill_by_semantic_target":
+                self._validate_fill_by_semantic_target_args(step.args)
+            if step.action == "select_by_semantic_target":
+                self._validate_select_by_semantic_target_args(step.args)
             if step.action == "navigate_to_relevant_section":
                 self._validate_click_args(step.args)
             if step.action == "wait_for":
@@ -91,12 +99,26 @@ class PlanValidator:
                 self._validate_assert_page_contains(step.args)
             if step.action == "observe_page" and not step.save_as:
                 raise PlanValidationError("observe_page requires 'save_as'")
+            if step.action == "extract_by_intent":
+                self._validate_extract_by_intent_args(step.args, step.save_as)
+            if step.action == "extract_visible_links":
+                self._validate_output_action(step.action, step.args, step.save_as)
             if step.action == "extract_pattern_from_page_text":
                 self._validate_extract_pattern_from_page_text(step.args, step.save_as)
             if step.action == "extract_text_near_text":
                 self._validate_extract_text_near_text(step.args, step.save_as)
             if step.action == "extract_value_near_anchor":
                 self._validate_extract_value_near_anchor(step.args, step.save_as)
+            if step.action == "find_row_by_condition":
+                self._validate_find_row_by_condition_args(step.args, step.save_as)
+            if step.action == "click_row_action":
+                self._validate_click_row_action_args(step.args)
+            if step.action == "visual_observe":
+                self._validate_output_action(step.action, step.args, step.save_as)
+            if step.action == "visual_extract_object_count":
+                self._validate_visual_extract_object_count_args(step.args, step.save_as)
+            if step.action == "visual_click_by_geometry":
+                self._validate_visual_click_by_geometry_args(step.args)
 
     @staticmethod
     def _has_target_reference(args: dict) -> bool:
@@ -135,6 +157,65 @@ class PlanValidator:
             raise PlanValidationError("select_autocomplete requires query/text")
         if not any(str(args.get(key, "")).strip() for key in ("suggestion_target", "suggestion", "option_text", "value")):
             raise PlanValidationError("select_autocomplete requires suggestion target/value")
+
+    @staticmethod
+    def _validate_output_action(action: str, args: dict, save_as: str | None) -> None:
+        if not save_as and not str(args.get("output_key", "")).strip():
+            raise PlanValidationError(f"{action} requires save_as or args.output_key")
+
+    @staticmethod
+    def _validate_click_by_semantic_target_args(args: dict) -> None:
+        if not str(args.get("target_text", args.get("text", args.get("target", "")))).strip():
+            raise PlanValidationError("click_by_semantic_target requires target_text")
+        exact = args.get("exact")
+        if exact is not None and not isinstance(exact, bool):
+            raise PlanValidationError("click_by_semantic_target requires boolean exact")
+        allow_mouse_fallback = args.get("allow_mouse_fallback")
+        if allow_mouse_fallback is not None and not isinstance(allow_mouse_fallback, bool):
+            raise PlanValidationError("click_by_semantic_target requires boolean allow_mouse_fallback")
+
+    @staticmethod
+    def _validate_fill_by_semantic_target_args(args: dict) -> None:
+        if not str(args.get("value", args.get("text", ""))).strip():
+            raise PlanValidationError("fill_by_semantic_target requires value")
+        if not any(str(args.get(key, "")).strip() for key in ("field_hint", "target_text", "target", "role")):
+            raise PlanValidationError("fill_by_semantic_target requires field_hint/target_text/target/role")
+
+    @staticmethod
+    def _validate_select_by_semantic_target_args(args: dict) -> None:
+        if not str(args.get("option_text", args.get("value", ""))).strip():
+            raise PlanValidationError("select_by_semantic_target requires option_text")
+
+    @staticmethod
+    def _validate_extract_by_intent_args(args: dict, save_as: str | None) -> None:
+        if not str(args.get("intent", "")).strip():
+            raise PlanValidationError("extract_by_intent requires intent")
+        PlanValidator._validate_output_action("extract_by_intent", args, save_as)
+
+    @staticmethod
+    def _validate_find_row_by_condition_args(args: dict, save_as: str | None) -> None:
+        if not args.get("condition"):
+            raise PlanValidationError("find_row_by_condition requires condition")
+        PlanValidator._validate_output_action("find_row_by_condition", args, save_as)
+
+    @staticmethod
+    def _validate_click_row_action_args(args: dict) -> None:
+        if not (args.get("row_ref") or args.get("condition")):
+            raise PlanValidationError("click_row_action requires row_ref or condition")
+        action_name = str(args.get("action_name", "")).strip().lower()
+        if action_name not in {"star", "trash", "delete", "reply", "open", "select"}:
+            raise PlanValidationError("click_row_action action_name must be star/trash/delete/reply/open/select")
+
+    @staticmethod
+    def _validate_visual_extract_object_count_args(args: dict, save_as: str | None) -> None:
+        if not str(args.get("object", args.get("shape", args.get("target", "")))).strip():
+            raise PlanValidationError("visual_extract_object_count requires object/shape/target")
+        PlanValidator._validate_output_action("visual_extract_object_count", args, save_as)
+
+    @staticmethod
+    def _validate_visual_click_by_geometry_args(args: dict) -> None:
+        if "x" not in args or "y" not in args:
+            raise PlanValidationError("visual_click_by_geometry requires x and y coordinates")
 
     @staticmethod
     def _validate_click_args(args: dict) -> None:
@@ -591,6 +672,11 @@ class PlanValidator:
 
     def _validate_expected_result_consistency(self, plan: TaskSpec) -> None:
         saved_fields = {step.save_as for step in plan.steps if step.save_as}
+        saved_fields.update(
+            str(step.args.get("output_key")).strip()
+            for step in plan.steps
+            if isinstance(step.args, dict) and str(step.args.get("output_key", "")).strip()
+        )
         structured_nested_fields = self._collect_structured_nested_fields(plan)
         for field in plan.expected_result.required_fields:
             if field in TECHNICAL_ARTIFACT_FIELDS:

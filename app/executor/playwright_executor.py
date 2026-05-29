@@ -13,7 +13,35 @@ UTC = timezone.utc
 
 
 class PlaywrightExecutor:
-    BROWSER_RETRYABLE_ACTIONS = {"open_url", "click", "fill", "focus", "clear", "press", "hover", "select_option", "check", "uncheck", "select_autocomplete", "choose_date", "wait_for", "navigate_to_relevant_section"}
+    BROWSER_RETRYABLE_ACTIONS = {
+        "open_url",
+        "click",
+        "fill",
+        "focus",
+        "clear",
+        "press",
+        "hover",
+        "select_option",
+        "check",
+        "uncheck",
+        "select_autocomplete",
+        "choose_autocomplete_suggestion",
+        "choose_date",
+        "click_by_semantic_target",
+        "fill_by_semantic_target",
+        "select_by_semantic_target",
+        "click_row_action",
+        "visual_click_by_geometry",
+        "wait_for",
+        "navigate_to_relevant_section",
+    }
+    OUTPUT_KEY_ACTIONS = {
+        "extract_by_intent",
+        "extract_visible_links",
+        "find_row_by_condition",
+        "visual_observe",
+        "visual_extract_object_count",
+    }
 
     def __init__(self, *, headless: bool = True, slow_mo: int = 0, record_video: bool = False):
         self.handlers = ActionHandlers()
@@ -128,8 +156,12 @@ class PlaywrightExecutor:
                         logs=logs,
                     )
 
+                    output_key = str(step.args.get("output_key", "")).strip()
                     if step.save_as:
                         extracted_data[step.save_as] = result
+                        runtime_state["extracted_data"] = extracted_data
+                    elif step.action in self.OUTPUT_KEY_ACTIONS and output_key:
+                        extracted_data[output_key] = result
                         runtime_state["extracted_data"] = extracted_data
                     elif step.action in {
                         "extract_items",
@@ -204,8 +236,9 @@ class PlaywrightExecutor:
                 page_text_excerpt=text_excerpt,
                 screenshot_path=screenshot_path,
                 logs=logs,
-                retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
-            )
+                    retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
+                    used_skills=list(runtime_state.get("used_skills", [])),
+                )
 
         except Exception as e:
             failure_details = {}
@@ -283,6 +316,7 @@ class PlaywrightExecutor:
                 failure_details=failure_details,
                 technical_failure=self._is_technical_failure(str(e)),
                 retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
+                used_skills=list(runtime_state.get("used_skills", [])),
             )
 
     async def _run_step_with_browser_retries(self, *, page, session, step, runtime_state, logs):
@@ -338,7 +372,7 @@ class PlaywrightExecutor:
 
     async def _pre_retry_state_check(self, *, page, step) -> None:
         if step.action == "wait_for" and step.args.get("selector"):
-            await page.wait_for_selector(step.args["selector"], state="attached", timeout=3000)
+            await page.wait_for_timeout(50)
             return
         if step.action == "click":
             await page.wait_for_timeout(50)

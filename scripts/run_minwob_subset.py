@@ -16,7 +16,8 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from app.browsergym_integration import BrowserGymAgentAdapter, BrowserGymRunConfig, BrowserGymRunner
-from app.browsergym_integration.miniwob_tasks import ACTION_COMPLEX_MINIWOB_TASK_NAMES, EXTRACTION_TEXT_MINIWOB_TASK_NAMES, EXTRACTION_MINIWOB_TASK_NAMES, VISUAL_SPATIAL_MINIWOB_TASK_NAMES, list_minwob_env_ids, select_minwob_subset, task_name_from_env_id
+from app.browsergym_integration.report import enrich_miniwob_report
+from app.browsergym_integration.miniwob_tasks import ACTION_COMPLEX_MINIWOB_TASK_NAMES, BASIC_ACTION_MINIWOB_TASK_NAMES, EXTRACTION_TEXT_MINIWOB_TASK_NAMES, EXTRACTION_MINIWOB_TASK_NAMES, VISUAL_SPATIAL_MINIWOB_TASK_NAMES, list_minwob_env_ids, select_minwob_subset, task_name_from_env_id
 from app.main import build_llm_client
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
@@ -57,6 +58,7 @@ def _mean_or_none(values: list[float]) -> float | None:
 
 
 def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, Any]:
+    report = enrich_miniwob_report(report)
     steps = list(getattr(report, "steps", []) or [])
     reward = getattr(report, "reward", None)
     success = reward is not None and float(reward) > 0
@@ -82,6 +84,15 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
         "final_answer": getattr(report, "final_answer", None),
         "vision_used": bool(use_vision or any(bool(getattr(step, "vision_used", False)) for step in steps)),
         "vision_image_present": bool(any(bool(getattr(step, "vision_image_present", False)) for step in steps)),
+        "llm_used": bool(getattr(report, "llm_used", False)),
+        "planner_used": bool(getattr(report, "planner_used", False)),
+        "verifier_used": bool(getattr(report, "verifier_used", False)),
+        "policy_used": bool(getattr(report, "policy_used", False)),
+        "extraction_controller_used": bool(getattr(report, "extraction_controller_used", False)),
+        "visual_controller_used": bool(getattr(report, "visual_controller_used", False)),
+        "skill_name": getattr(report, "skill_name", None),
+        "controller_name": getattr(report, "controller_name", None),
+        "raw_llm_output_present": bool(getattr(report, "raw_llm_output_present", False)),
         "extraction_intent": next((((getattr(step, "mapping_diagnostics", {}) or {}).get("extraction_intent")) for step in steps if isinstance(getattr(step, "mapping_diagnostics", None), dict) and (getattr(step, "mapping_diagnostics", {}) or {}).get("extraction_intent")), None),
         "extracted_answer": next((getattr(step, "extracted_value", None) for step in steps if getattr(step, "extracted_value", None)), None),
         "extracted_data": next(((getattr(step, "mapping_diagnostics", {}) or {}).get("extracted_data") for step in steps if isinstance(getattr(step, "mapping_diagnostics", None), dict) and (getattr(step, "mapping_diagnostics", {}) or {}).get("extracted_data") is not None), None),
@@ -116,6 +127,15 @@ def result_from_report(report, *, env_id: str, use_vision: bool) -> dict[str, An
                 "fallback_type": getattr(step, "fallback_type", None),
                 "fallback_reward": getattr(step, "fallback_reward", None),
                 "fallback_terminated": getattr(step, "fallback_terminated", None),
+                "llm_used": bool(getattr(step, "llm_used", False)),
+                "planner_used": bool(getattr(step, "planner_used", False)),
+                "verifier_used": bool(getattr(step, "verifier_used", False)),
+                "policy_used": bool(getattr(step, "policy_used", False)),
+                "extraction_controller_used": bool(getattr(step, "extraction_controller_used", False)),
+                "visual_controller_used": bool(getattr(step, "visual_controller_used", False)),
+                "skill_name": getattr(step, "skill_name", None),
+                "controller_name": getattr(step, "controller_name", None),
+                "raw_llm_output_present": bool(getattr(step, "raw_llm_output_present", False)),
             }
             for step in steps
         ],
@@ -145,6 +165,12 @@ def build_aggregate(results: list[dict[str, Any]], *, use_vision: bool, generate
         "mean_runtime_sec": _mean_or_none(runtimes),
         "failure_buckets": dict(sorted(failure_buckets.items())),
         "use_vision": use_vision,
+        "planner_used": False,
+        "verifier_used": False,
+        "llm_used": any(bool(result.get("llm_used")) for result in results),
+        "policy_used": any(bool(result.get("policy_used")) for result in results),
+        "extraction_controller_used": any(bool(result.get("extraction_controller_used")) for result in results),
+        "visual_controller_used": any(bool(result.get("visual_controller_used")) for result in results),
         "results": results,
     }
 
@@ -171,6 +197,15 @@ def write_outputs(aggregate: dict[str, Any], output_json: str | Path, output_csv
         "final_answer",
         "vision_used",
         "vision_image_present",
+        "llm_used",
+        "planner_used",
+        "verifier_used",
+        "policy_used",
+        "extraction_controller_used",
+        "visual_controller_used",
+        "skill_name",
+        "controller_name",
+        "raw_llm_output_present",
         "output_path",
     ]
     with csv_path.open("w", newline="", encoding="utf-8") as fh:
@@ -197,6 +232,15 @@ def skipped_result(env_id: str, message: str, *, use_vision: bool) -> dict[str, 
         "final_answer": None,
         "vision_used": use_vision,
         "vision_image_present": False,
+        "llm_used": False,
+        "planner_used": False,
+        "verifier_used": False,
+        "policy_used": False,
+        "extraction_controller_used": False,
+        "visual_controller_used": False,
+        "skill_name": None,
+        "controller_name": None,
+        "raw_llm_output_present": False,
         "output_path": None,
     }
 
@@ -205,6 +249,10 @@ def _suite_type(subset: str | None) -> str:
         return "miniwob_extraction"
     if subset == "visual":
         return "miniwob_visual_spatial"
+    if subset in {"basic", "action"}:
+        return "miniwob_action_grounding"
+    if subset in {"complex", "action-complex"}:
+        return "miniwob_action_complex"
     return "miniwob_action"
 
 
@@ -222,9 +270,7 @@ def main(argv=None) -> int:
     excluded_tasks = [part.strip() for part in str(args.exclude or "").split(",") if part.strip()]
     requested_task_ids: list[str] = []
     if args.subset in {"basic", "action"} and not task_ids:
-        task_ids = ",".join(t for t in [
-            "click-button","click-button-sequence","click-checkboxes","click-dialog","click-link","click-menu","click-option","click-test","enter-text","focus-text","login-user","choose-list","choose-date","use-autocomplete"
-        ])
+        task_ids = ",".join(BASIC_ACTION_MINIWOB_TASK_NAMES)
     if args.subset == "extraction" and not task_ids:
         task_ids = ",".join(EXTRACTION_TEXT_MINIWOB_TASK_NAMES)
     if args.subset == "action-complex" and not task_ids:
@@ -238,7 +284,7 @@ def main(argv=None) -> int:
     if task_ids:
         requested_task_ids = [part.strip() for part in str(task_ids).split(",") if part.strip()]
     effective_limit = args.limit
-    if effective_limit is None and args.subset != "extraction":
+    if effective_limit is None and args.subset is None:
         effective_limit = 10
     selected = select_minwob_subset(
         env_ids,

@@ -9,7 +9,7 @@ from app.browsergym_integration.action_mapper import browsergym_finish_action, t
 from app.browsergym_integration.errors import UnsupportedBrowserGymActionError
 from app.browsergym_integration.miniwob_grounding import extract_select_target_from_instruction, extract_textbox_candidates_from_observation, find_submit_button, ground_miniwob_action, map_login_textboxes, parse_quoted_strings, real_candidate_bid, textbox_candidates
 from app.browsergym_integration.miniwob_policy import MiniWoBDeterministicPolicy
-from app.browsergym_integration.miniwob_tasks import EXTRACTION_MINIWOB_TASK_NAMES, task_name_from_env_id
+from app.browsergym_integration.miniwob_tasks import EXTRACTION_MINIWOB_TASK_NAMES, VISUAL_SPATIAL_MINIWOB_TASK_NAMES, task_name_from_env_id
 from app.browsergym_integration.local_extractor import (
     extract_pattern_from_observation,
     extract_structured_items_from_observation,
@@ -234,10 +234,11 @@ class BrowserGymAgentAdapter:
         image_base64 = extract_browsergym_image_base64(obs, info) if self.use_vision else None
         vision_image_present = image_base64 is not None
         miniwob_instruction = context.get("goal_instruction") or goal or "Complete the MiniWoB task according to the page instruction"
-        if (self.env_id or "").lower().endswith("find-midpoint"):
+        env_lower = (self.env_id or "").lower()
+        if env_lower.endswith(("find-midpoint", "circle-center", "bisect-angle")):
             return BrowserGymAgentDecision(
                 action="noop()",
-                rationale="find-midpoint requires visual/canvas coordinate selection",
+                rationale="task requires visual/canvas coordinate selection",
                 finish=False,
                 vision_used=self.use_vision,
                 vision_image_present=vision_image_present,
@@ -247,7 +248,7 @@ class BrowserGymAgentAdapter:
                 action_string_after_mapping="noop()",
                 mapping_error="action_mapping_failure: visual_spatial_controller_required",
                 mapping_strategy="visual_spatial_controller_required",
-                mapping_diagnostics={"failure_reason": "find-midpoint requires visual/canvas coordinate selection"},
+                mapping_diagnostics={"reason": "visual controller required", "failure_reason": "task requires visual/canvas coordinate selection"},
             )
         action_examples = self._default_action_syntax_examples()
         candidates_for_state = list(context.get("clickable_candidates") or [])
@@ -357,7 +358,7 @@ class BrowserGymAgentAdapter:
         env_task_name = task_name_from_env_id(self.env_id or "").lower()
         is_extraction_subset_task = env_task_name in set(EXTRACTION_MINIWOB_TASK_NAMES)
         extraction_known = extraction_intent.get("intent") != "unknown"
-        if extraction_known:
+        if extraction_known and is_extraction_subset_task:
             extraction_decision = solve_extraction_task(extraction_intent, extraction_context, candidates_for_state, self.browsergym_action_syntax)
             if extraction_decision is not None and extraction_decision.action:
                 return BrowserGymAgentDecision(
@@ -404,13 +405,12 @@ class BrowserGymAgentAdapter:
                     },
                 )
         task_name = (self.env_id or "").lower()
-        is_choose_date = "choose-date" in task_name
         policy = self.miniwob_policy.try_act(env_id=self.env_id or "", task_name=(self.env_id or "").split(".")[-1], instruction=miniwob_instruction, candidates=candidates_for_state, history=history, action_syntax=self.browsergym_action_syntax)
-        if policy is not None and is_choose_date:
+        if policy is not None:
             md = dict(policy.mapping_diagnostics or {})
             md.setdefault("policy_pre_llm_used", True)
             pname = md.get("policy_name", "unknown")
-            return BrowserGymAgentDecision(action=policy.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy.action, action_string_before_mapping=policy.action, action_string_after_mapping=policy.action, selected_candidate=policy.selected_candidate, selected_candidate_bid=real_candidate_bid(policy.selected_candidate), bid_source=(policy.selected_candidate or {}).get("bid_source") if isinstance(policy.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
+            return BrowserGymAgentDecision(action=policy.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy.action, action_string_before_mapping=policy.action, action_string_after_mapping=policy.action, selected_candidate=policy.selected_candidate, selected_candidate_bid=real_candidate_bid(policy.selected_candidate), bid_source=(policy.selected_candidate or {}).get("bid_source") if isinstance(policy.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy.mapping_strategy, mapping_diagnostics=md, mapping_error=policy.mapping_error)
         mapping_error = None
         try:
             parsed = self._call_direct_action_model(system_prompt, user_prompt, images)
@@ -423,8 +423,31 @@ class BrowserGymAgentAdapter:
                 md["llm_failed_policy_fallback"] = True
                 md["llm_error"] = str(exc)
                 pname = md.get("policy_name", "unknown")
-                return BrowserGymAgentDecision(action=policy2.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy2.action, action_string_before_mapping=policy2.action, action_string_after_mapping=policy2.action, selected_candidate=policy2.selected_candidate, selected_candidate_bid=real_candidate_bid(policy2.selected_candidate), bid_source=(policy2.selected_candidate or {}).get("bid_source") if isinstance(policy2.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy2.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
+                return BrowserGymAgentDecision(action=policy2.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy2.action, action_string_before_mapping=policy2.action, action_string_after_mapping=policy2.action, selected_candidate=policy2.selected_candidate, selected_candidate_bid=real_candidate_bid(policy2.selected_candidate), bid_source=(policy2.selected_candidate or {}).get("bid_source") if isinstance(policy2.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy2.mapping_strategy, mapping_diagnostics=md, mapping_error=policy2.mapping_error)
             llm_diag = dict(getattr(getattr(self.planner, "llm_client", None), "last_chat_diagnostics", {}) or {})
+            if env_task_name in set(VISUAL_SPATIAL_MINIWOB_TASK_NAMES):
+                return BrowserGymAgentDecision(
+                    action="noop()",
+                    rationale=str(exc),
+                    finish=False,
+                    vision_used=self.use_vision,
+                    vision_image_present=vision_image_present,
+                    miniwob_instruction=miniwob_instruction,
+                    action_string="noop()",
+                    action_string_before_mapping="noop()",
+                    action_string_after_mapping="noop()",
+                    clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0),
+                    page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False,
+                    mapping_error="action_mapping_failure: visual_spatial_controller_required",
+                    mapping_strategy="visual_spatial_controller_required",
+                    mapping_diagnostics={
+                        "reason": "visual controller required",
+                        "failure_reason": "visual/spatial task could not be solved without a reliable vision/controller decision",
+                        "llm_error": str(exc),
+                        "content_source": llm_diag.get("content_source"),
+                        "response_mode": llm_diag.get("content_source"),
+                    },
+                )
             return BrowserGymAgentDecision(
                 action="noop()",
                 rationale=str(exc),
@@ -449,7 +472,7 @@ class BrowserGymAgentAdapter:
                 md = dict(policy2.mapping_diagnostics or {})
                 md["llm_failed_policy_fallback"] = True
                 pname = md.get("policy_name", "unknown")
-                return BrowserGymAgentDecision(action=policy2.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy2.action, action_string_before_mapping=policy2.action, action_string_after_mapping=policy2.action, selected_candidate=policy2.selected_candidate, selected_candidate_bid=real_candidate_bid(policy2.selected_candidate), bid_source=(policy2.selected_candidate or {}).get("bid_source") if isinstance(policy2.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy2.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
+                return BrowserGymAgentDecision(action=policy2.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy2.action, action_string_before_mapping=policy2.action, action_string_after_mapping=policy2.action, selected_candidate=policy2.selected_candidate, selected_candidate_bid=real_candidate_bid(policy2.selected_candidate), bid_source=(policy2.selected_candidate or {}).get("bid_source") if isinstance(policy2.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy2.mapping_strategy, mapping_diagnostics=md, mapping_error=policy2.mapping_error)
         if isinstance(parsed, str):
             parsed = self._extract_json_object(parsed)
         elif not isinstance(parsed, dict):
@@ -483,7 +506,7 @@ class BrowserGymAgentAdapter:
                 md = dict(policy3.mapping_diagnostics or {})
                 md["llm_empty_or_invalid_policy_fallback"] = True
                 pname = md.get("policy_name", "unknown")
-                return BrowserGymAgentDecision(action=policy3.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy3.action, action_string_before_mapping=policy3.action, action_string_after_mapping=policy3.action, selected_candidate=policy3.selected_candidate, selected_candidate_bid=real_candidate_bid(policy3.selected_candidate), bid_source=(policy3.selected_candidate or {}).get("bid_source") if isinstance(policy3.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy3.mapping_strategy, mapping_diagnostics=md, mapping_error=None)
+                return BrowserGymAgentDecision(action=policy3.action, rationale=f"deterministic MiniWoB policy: {pname}", finish=False, vision_used=self.use_vision, vision_image_present=vision_image_present, miniwob_instruction=miniwob_instruction, action_string=policy3.action, action_string_before_mapping=policy3.action, action_string_after_mapping=policy3.action, selected_candidate=policy3.selected_candidate, selected_candidate_bid=real_candidate_bid(policy3.selected_candidate), bid_source=(policy3.selected_candidate or {}).get("bid_source") if isinstance(policy3.selected_candidate, dict) else None, clickable_candidates_count=int(context.get("clickable_candidates_count", 0) or 0), page_candidate_extraction_failed=bool(obs.get("page_candidate_extraction_failed")) if isinstance(obs, dict) else False, mapping_strategy=policy3.mapping_strategy, mapping_diagnostics=md, mapping_error=policy3.mapping_error)
         mapping_error = mapping_error or validation_error
         before_mapping = action
         selected_candidate = None

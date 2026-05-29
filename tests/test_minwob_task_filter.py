@@ -1,4 +1,7 @@
 from app.browsergym_integration.miniwob_tasks import (
+    ACTION_COMPLEX_MINIWOB_TASK_NAMES,
+    BASIC_ACTION_MINIWOB_TASK_NAMES,
+    VISUAL_SPATIAL_MINIWOB_TASK_NAMES,
     env_id_for_task_name,
     select_minwob_subset,
     task_name_from_env_id,
@@ -41,3 +44,24 @@ def test_recommended_subset_ignores_missing_envs():
 def test_exclude_book_flight():
     envs = ["browsergym/miniwob.click-button", "browsergym/miniwob.book-flight"]
     assert select_minwob_subset(envs, exclude_patterns="book-flight") == ["browsergym/miniwob.click-button"]
+
+
+def test_basic_action_subset_excludes_complex_flows():
+    assert "click-scroll-list" in BASIC_ACTION_MINIWOB_TASK_NAMES
+    assert "click-tab-2" in BASIC_ACTION_MINIWOB_TASK_NAMES
+    assert "click-collapsible-2" in BASIC_ACTION_MINIWOB_TASK_NAMES
+    assert "choose-date" not in BASIC_ACTION_MINIWOB_TASK_NAMES
+    assert "book-flight" not in BASIC_ACTION_MINIWOB_TASK_NAMES
+    assert "choose-date" in ACTION_COMPLEX_MINIWOB_TASK_NAMES
+
+
+def test_visual_spatial_subset_includes_coordinate_tasks():
+    assert VISUAL_SPATIAL_MINIWOB_TASK_NAMES == [
+        "identify-shape",
+        "count-shape",
+        "count-sides",
+        "grid-coordinate",
+        "find-midpoint",
+        "circle-center",
+        "bisect-angle",
+    ]

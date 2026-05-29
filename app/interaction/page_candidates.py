@@ -118,10 +118,15 @@ class PageCandidateExtractor:
                   kind: kindFor(el),
                   role,
                   tag,
+                  id: el.getAttribute("id") || "",
+                  className: el.getAttribute("class") || "",
                   text,
+                  innerText: norm(el.innerText || ""),
+                  textContent: norm(el.textContent || ""),
                   inner_text: norm(el.innerText || ""),
                   text_content: norm(el.textContent || ""),
                   aria_label: el.getAttribute("aria-label") || "",
+                  ariaLabel: el.getAttribute("aria-label") || "",
                   title: el.getAttribute("title") || "",
                   name: el.getAttribute("name") || labelText(el) || "",
                   value: el.value || el.getAttribute("value") || "",
@@ -150,7 +155,7 @@ class PageCandidateExtractor:
 
     @staticmethod
     def compact(candidates: list[dict[str, Any]], *, limit: int = 80) -> list[dict[str, Any]]:
-        keys = ["candidate_id", "kind", "role", "tag", "text", "aria_label", "name", "placeholder", "value", "href", "selector", "input_type", "checked", "selected"]
+        keys = ["candidate_id", "kind", "role", "tag", "id", "className", "text", "innerText", "textContent", "aria_label", "ariaLabel", "name", "placeholder", "value", "href", "selector", "input_type", "bbox", "checked", "selected"]
         compacted = []
         for item in candidates[:limit]:
             compacted.append({key: item.get(key) for key in keys if item.get(key) not in (None, "", [])})
