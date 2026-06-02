@@ -4,8 +4,10 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import (
+    build_semantic_region_fields_args,
     canonical_structured_intent,
     coalesce_package_metadata_steps,
+    goal_requests_semantic_region_fields,
     item_type_args_for_intent,
     looks_like_css_selector,
     normalize_plan_action_aliases,
@@ -661,6 +663,20 @@ class Planner:
                 current["save_as"] = str(current["args"]["output_key"]).strip()
             if not isinstance(current.get("step_id"), int):
                 current["step_id"] = index
+            if (
+                action == "extract_structured_items"
+                and goal_requests_semantic_region_fields(user_goal, required_fields)
+                and ("fields" not in current["args"] or not current["args"].get("fields"))
+            ):
+                allowed_actions = set()
+                if isinstance(benchmark_context, dict) and isinstance(benchmark_context.get("allowed_actions"), list):
+                    allowed_actions = {str(item).strip() for item in benchmark_context.get("allowed_actions", [])}
+                if not allowed_actions or "extract_by_intent" in allowed_actions:
+                    action = "extract_by_intent"
+                    current["action"] = action
+                    output_key = str(current["args"].get("output_key") or current.get("save_as") or "contact_info").strip()
+                    current["args"] = build_semantic_region_fields_args(user_goal, required_fields, output_key=output_key)
+                    current["save_as"] = output_key
             if action == "extract_structured_items" and "pattern" not in current["args"]:
                 allowed_actions = set()
                 if isinstance(benchmark_context, dict) and isinstance(benchmark_context.get("allowed_actions"), list):

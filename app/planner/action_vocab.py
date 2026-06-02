@@ -50,7 +50,9 @@ ACTION_ALIASES: dict[str, str] = {
     "extract_card_items": "extract_by_intent",
     "extract_cards": "extract_by_intent",
     "extract_article_links": "extract_by_intent",
+    "extract_fields_from_region": "extract_by_intent",
 }
+
 
 ACTION_ALIAS_INTENTS: dict[str, str] = {
     "extract_results": "search_results",
@@ -79,7 +81,12 @@ INTENT_ALIASES: dict[str, str] = {
     "currency_row": "table_rows",
     "currency_rows": "table_rows",
     "currency_table_rows": "table_rows",
+    "field_schema": "semantic_region_fields",
+    "fields_schema": "semantic_region_fields",
+    "region_fields": "semantic_region_fields",
+    "extract_fields_from_region": "semantic_region_fields",
 }
+
 
 CANONICAL_ACTIONS = {
     "open_url",
@@ -126,11 +133,203 @@ CANONICAL_ACTIONS = {
 }
 
 
+CONTACT_REGION_CANDIDATES = [
+    "Контакты",
+    "Contacts",
+    "Contact",
+    "Связаться",
+    "Support",
+    "Поддержка",
+    "About",
+    "О нас",
+]
+
+
+def goal_requests_semantic_region_fields(goal: object, required_fields: list[str] | None = None) -> bool:
+    text = str(goal or "").casefold()
+    fields = {str(field or "").strip().casefold() for field in (required_fields or [])}
+    contact_terms = (
+        "contact",
+        "contacts",
+        "support",
+        "about",
+        "контакт",
+        "связ",
+        "поддерж",
+        "реквизит",
+        "сведения об организа",
+    )
+    field_terms = (
+        "email",
+        "e-mail",
+        "mail",
+        "phone",
+        "telephone",
+        "address",
+        "почт",
+        "телефон",
+        "адрес",
+    )
+    schema_fields = {"email", "phone", "address", "contact_page_url", "final_url", "url"}
+    return any(term in text for term in contact_terms) and (
+        any(term in text for term in field_terms)
+        or bool(fields & schema_fields)
+        or any(term in text for term in ("данн", "информац", "сведения", "details", "info", "link", "page", "ссылк", "страниц"))
+    )
+
+
+def infer_semantic_region_required_fields(goal: object, required_fields: list[str] | None = None) -> list[str]:
+    text = str(goal or "").casefold()
+    inferred = [str(field or "").strip() for field in (required_fields or []) if str(field or "").strip()]
+
+    def add(field: str) -> None:
+        if field not in inferred:
+            inferred.append(field)
+
+    broad_contact = any(term in text for term in ("contact data", "contact details", "контактные данн", "контактную информац", "реквизит", "сведения об организа"))
+    if broad_contact:
+        for field in ("address", "phone", "email", "contact_page_url"):
+            add(field)
+    if any(term in text for term in ("address", "адрес")):
+        add("address")
+    if any(term in text for term in ("phone", "telephone", "tel", "телефон")):
+        add("phone")
+    if any(term in text for term in ("email", "e-mail", "mail", "почт")):
+        add("email")
+    if any(term in text for term in ("contact page", "contacts page", "contact link", "ссылк", "страниц")) and any(term in text for term in ("contact", "контакт")):
+        add("contact_page_url")
+    return inferred
+
+
+def build_semantic_region_fields_args(goal: object, required_fields: list[str] | None = None, output_key: str = "contact_info") -> dict[str, Any]:
+    fields: dict[str, dict[str, Any]] = {}
+    for field in infer_semantic_region_required_fields(goal, required_fields):
+        normalized = normalize_required_field_alias(field)
+        if normalized in {"email"}:
+            fields["email"] = {"type": "email"}
+        elif normalized in {"phone"}:
+            fields["phone"] = {"type": "phone"}
+        elif normalized in {"address"}:
+            fields["address"] = {"type": "text", "anchors": ["Адрес", "Address"]}
+        elif normalized in {"contact_page_url", "final_url", "url"}:
+            fields["contact_page_url"] = {"type": "current_url"}
+    if not fields:
+        fields = {
+            "address": {"type": "text", "anchors": ["Адрес", "Address"]},
+            "phone": {"type": "phone"},
+            "email": {"type": "email"},
+            "contact_page_url": {"type": "current_url"},
+        }
+    return {
+        "intent": "semantic_region_fields",
+        "region_hint": "contacts/support/about/details",
+        "region_candidates": CONTACT_REGION_CANDIDATES,
+        "fields": fields,
+        "output_key": output_key,
+    }
+
+
 def normalize_required_field_alias(field: str) -> str:
     normalized_field = str(field or "").strip()
     if normalized_field.endswith("[]"):
         normalized_field = normalized_field[:-2]
     return REQUIRED_FIELD_ALIASES.get(normalized_field.lower(), normalized_field)
+
+
+CONTACT_REGION_CANDIDATES = [
+    "Контакты",
+    "Contacts",
+    "Contact",
+    "Связаться",
+    "Support",
+    "Поддержка",
+    "About",
+    "О нас",
+]
+
+
+def goal_requests_semantic_region_fields(goal: object, required_fields: list[str] | None = None) -> bool:
+    text = str(goal or "").casefold()
+    fields = {str(field or "").strip().casefold() for field in (required_fields or [])}
+    contact_terms = (
+        "contact",
+        "contacts",
+        "support",
+        "about",
+        "контакт",
+        "связ",
+        "поддерж",
+        "реквизит",
+        "сведения об организа",
+    )
+    field_terms = (
+        "email",
+        "e-mail",
+        "mail",
+        "phone",
+        "telephone",
+        "address",
+        "почт",
+        "телефон",
+        "адрес",
+    )
+    schema_fields = {"email", "phone", "address", "contact_page_url", "final_url", "url"}
+    return any(term in text for term in contact_terms) and (
+        any(term in text for term in field_terms)
+        or bool(fields & schema_fields)
+        or any(term in text for term in ("данн", "информац", "сведения", "details", "info", "link", "page", "ссылк", "страниц"))
+    )
+
+
+def infer_semantic_region_required_fields(goal: object, required_fields: list[str] | None = None) -> list[str]:
+    text = str(goal or "").casefold()
+    inferred = [str(field or "").strip() for field in (required_fields or []) if str(field or "").strip()]
+
+    def add(field: str) -> None:
+        if field not in inferred:
+            inferred.append(field)
+
+    broad_contact = any(term in text for term in ("contact data", "contact details", "контактные данн", "контактную информац", "реквизит", "сведения об организа"))
+    if broad_contact:
+        for field in ("address", "phone", "email", "contact_page_url"):
+            add(field)
+    if any(term in text for term in ("address", "адрес")):
+        add("address")
+    if any(term in text for term in ("phone", "telephone", "tel", "телефон")):
+        add("phone")
+    if any(term in text for term in ("email", "e-mail", "mail", "почт")):
+        add("email")
+    if any(term in text for term in ("contact page", "contacts page", "contact link", "ссылк", "страниц")) and any(term in text for term in ("contact", "контакт")):
+        add("contact_page_url")
+    return inferred
+
+
+def build_semantic_region_fields_args(goal: object, required_fields: list[str] | None = None, output_key: str = "contact_info") -> dict[str, Any]:
+    fields: dict[str, dict[str, Any]] = {}
+    for field in infer_semantic_region_required_fields(goal, required_fields):
+        normalized = normalize_required_field_alias(field)
+        if normalized in {"email"}:
+            fields["email"] = {"type": "email"}
+        elif normalized in {"phone"}:
+            fields["phone"] = {"type": "phone"}
+        elif normalized in {"address"}:
+            fields["address"] = {"type": "text", "anchors": ["Адрес", "Address"]}
+        elif normalized in {"contact_page_url", "final_url", "url"}:
+            fields["contact_page_url"] = {"type": "current_url"}
+    if not fields:
+        fields = {
+            "address": {"type": "text", "anchors": ["Адрес", "Address"]},
+            "phone": {"type": "phone"},
+            "email": {"type": "email"},
+            "contact_page_url": {"type": "current_url"},
+        }
+    return {
+        "intent": "semantic_region_fields",
+        "region_hint": "contacts/support/about/details",
+        "region_candidates": CONTACT_REGION_CANDIDATES,
+        "fields": fields,
+        "output_key": output_key,
+    }
 
 
 def normalize_required_field_aliases(fields: list[str]) -> list[str]:
