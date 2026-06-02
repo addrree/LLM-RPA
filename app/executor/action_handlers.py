@@ -1,8 +1,9 @@
 import asyncio
 import re
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any
-from urllib.parse import urlparse
+from urllib.parse import parse_qs, urlparse
 
 from app.observer.page_observer import PageObserver
 from app.interaction.action_grounder import ActionGrounder
@@ -14,6 +15,73 @@ class StructuredExtractionError(ValueError):
         super().__init__(message)
         self.code = code
         self.details = details or {}
+
+
+RATE_LIMIT_MARKERS = (
+    "rate exceeded",
+    "too many requests",
+    "rate limit",
+    "http 429",
+    "quota exceeded",
+)
+
+CAPTCHA_MARKERS = (
+    "captcha",
+    "robot check",
+    "cloudflare",
+    "confirm that you are not a robot",
+    "verify you are human",
+    "are you a human",
+    "just a moment",
+    "client challenge",
+    "browser challenge",
+    "challenge page",
+    "checking your browser",
+    "security check",
+    "ddos-guard",
+    "perimeterx",
+    "datadome",
+)
+
+ACCESS_DENIED_MARKERS = (
+    "access denied",
+    "forbidden",
+    "not authorized",
+    "unauthorized",
+    "permission denied",
+)
+
+
+@dataclass(frozen=True)
+class BlockDetectionResult:
+    blocked: bool
+    failure_stage: str | None = None
+    markers: tuple[str, ...] = ()
+
+
+def detect_blocked_or_limited_text(text: str, *, status_codes: list[int | None] | None = None) -> BlockDetectionResult:
+    folded = str(text or "").casefold()
+    codes = {int(code) for code in status_codes or [] if code is not None}
+    if 429 in codes:
+        return BlockDetectionResult(True, "skipped_rate_limited", ("429",))
+    if 401 in codes:
+        return BlockDetectionResult(True, "skipped_http_401", ("401",))
+    if 403 in codes:
+        return BlockDetectionResult(True, "skipped_http_403", ("403",))
+
+    rate_markers = tuple(marker for marker in RATE_LIMIT_MARKERS if marker.casefold() in folded)
+    if rate_markers:
+        return BlockDetectionResult(True, "skipped_rate_limited", rate_markers)
+
+    captcha_markers = tuple(marker for marker in CAPTCHA_MARKERS if marker.casefold() in folded)
+    if captcha_markers:
+        return BlockDetectionResult(True, "skipped_captcha_or_antibot", captcha_markers)
+
+    access_markers = tuple(marker for marker in ACCESS_DENIED_MARKERS if marker.casefold() in folded)
+    if access_markers:
+        return BlockDetectionResult(True, "skipped_access_denied", access_markers)
+
+    return BlockDetectionResult(False)
 
 
 class ActionHandlers:
@@ -38,6 +106,7 @@ class ActionHandlers:
         wait_until = str(args.get("wait_until", "domcontentloaded"))
         timeout_ms = int(args.get("timeout_ms", 20000))
         await page.goto(args["url"], wait_until=wait_until, timeout=timeout_ms)
+        await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="after_open_url")
 
     async def click(self, page, args, runtime_state=None):
         locator, candidate = await self._resolve_ranked_click_locator(page=page, args=args, runtime_state=runtime_state)
@@ -179,7 +248,15 @@ class ActionHandlers:
                     details={"target_text": request.get("target_text")},
                 )
             if last_error is not None:
-                raise last_error
+                raise StructuredExtractionError(
+                    code="target_link_not_found",
+                    message=f"semantic click target not found: {request.get('target_text')!r}",
+                    details={
+                        "target_text": request.get("target_text"),
+                        "target_candidates": target_candidates,
+                        "last_error": str(last_error),
+                    },
+                ) from last_error
             result = await self._ground_interaction(page, "click", request, runtime_state)
         for action in result.actions:
             try:
@@ -262,6 +339,33 @@ class ActionHandlers:
             "доступ ограничен",
         ]
         return any(marker in haystack for marker in markers)
+
+    @staticmethod
+    async def _raise_if_page_blocked_or_limited(page, *, runtime_state=None, stage: str) -> None:
+        try:
+            title = await page.title()
+        except Exception:
+            title = ""
+        try:
+            body_text = await page.locator("body").inner_text(timeout=1200)
+        except Exception:
+            body_text = ""
+        detection = detect_blocked_or_limited_text(f"{title}\n{body_text}")
+        if not detection.blocked:
+            return
+        diagnostics = {
+            "stage": stage,
+            "failure_stage": detection.failure_stage,
+            "markers": list(detection.markers),
+        }
+        if runtime_state is not None:
+            runtime_state["blocked_or_limited_status"] = diagnostics
+            runtime_state["rate_limit_detected"] = detection.failure_stage == "skipped_rate_limited"
+        raise StructuredExtractionError(
+            code=detection.failure_stage or "skipped_access_denied",
+            message=f"blocked_or_limited_page_detected: {detection.failure_stage}",
+            details=diagnostics,
+        )
 
     @staticmethod
     async def _wait_after_possible_navigation(page) -> None:
@@ -613,6 +717,7 @@ class ActionHandlers:
 
     async def extract_items(self, page, args, runtime_state=None):
         self._mark_used_skill(runtime_state, "row_list_extraction")
+        await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="before_extract_items")
         if self._article_links_requested(args=args, runtime_state=runtime_state) and self._article_metadata_requested(
             args=args,
             runtime_state=runtime_state,
@@ -624,8 +729,8 @@ class ActionHandlers:
                 )
                 return articles
         container_selector = args["container_selector"]
-        limit = int(args["limit"])
-        fields = args["fields"]
+        limit = int(args.get("limit", 20))
+        fields = args.get("fields") or {}
 
         containers = page.locator(container_selector)
         count = min(await containers.count(), limit)
@@ -643,12 +748,41 @@ class ActionHandlers:
 
     async def extract_structured_items(self, page, args, runtime_state=None):
         self._mark_used_skill(runtime_state, "row_list_extraction")
-        pattern = args["pattern"]
-        limit = int(args["limit"])
-        fields = args["fields"]
+        await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="before_extract_structured_items")
+        limit = int(args.get("limit", 20))
+        fields = args.get("fields") or {}
+        pattern = str(args.get("pattern", "") or "").strip()
         flags = args.get("flags")
         benchmark_context = runtime_state.get("benchmark_context", {}) if isinstance(runtime_state, dict) else {}
         task_family = str(benchmark_context.get("task_family", "")).strip().lower()
+
+        if not pattern:
+            intent = str(args.get("intent", "") or args.get("item_type", "") or "").strip()
+            if intent:
+                delegated = dict(args)
+                delegated["intent"] = intent
+                return await self.extract_by_intent(page, delegated, runtime_state)
+            table_rows = await self._extract_table_rows(page=page, limit=limit)
+            if table_rows:
+                projected = self._project_structured_rows_to_fields(rows=table_rows, fields=fields, limit=limit)
+                args["_executor_note"] = (
+                    "extract_structured_items fallback=table_rows_no_pattern; "
+                    f"returned {len(projected)} row(s)"
+                )
+                return projected
+            list_rows = await self._extract_repeated_link_or_list_items(page=page, limit=limit)
+            if list_rows:
+                projected = self._project_structured_rows_to_fields(rows=list_rows, fields=fields, limit=limit)
+                args["_executor_note"] = (
+                    "extract_structured_items fallback=list_items_no_pattern; "
+                    f"returned {len(projected)} row(s)"
+                )
+                return projected
+            raise StructuredExtractionError(
+                code="structured_extraction_no_pattern_no_fallback",
+                message="extract_structured_items requires a pattern or an available generic DOM/table/list fallback.",
+                details={"intent": intent, "fields": fields},
+            )
 
         if task_family == "repeated_structured_items" and self._is_overly_broad_repeated_pattern(pattern):
             projected, note = await self._extract_repeated_structured_with_quality_fallbacks(
@@ -904,6 +1038,7 @@ class ActionHandlers:
 
     async def extract_visible_links(self, page, args, runtime_state=None):
         await self._settle_page_for_read(page)
+        await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="before_extract_visible_links")
         direct_result = await self._direct_search_result_from_current_page(page=page, args=args, runtime_state=runtime_state)
         if direct_result:
             if runtime_state is not None:
@@ -996,6 +1131,12 @@ class ActionHandlers:
 
     @staticmethod
     def _article_links_requested(*, args: dict, runtime_state=None) -> bool:
+        explicit = " ".join(
+            str(args.get(key, ""))
+            for key in ("intent", "item_type", "type", "output_key")
+        ).casefold()
+        if any(token in explicit for token in ["article", "articles", "article_results", "news", "news_items"]):
+            return True
         text = " ".join(
             [
                 str(args.get("output_key", "")),
@@ -1032,16 +1173,23 @@ class ActionHandlers:
                 "metadata",
                 "автор",
                 "время",
+                "дат",
+                "публикац",
+                "автор",
+                "время",
                 "дата",
                 "публикац",
-                "Р°РІС‚РѕСЂ",
-                "РІСЂРµРјСЏ",
-                "РїСѓР±Р»РёРє",
             ]
         )
 
     @staticmethod
     def _paper_results_requested(*, args: dict, runtime_state=None) -> bool:
+        explicit = " ".join(
+            str(args.get(key, ""))
+            for key in ("intent", "item_type", "type", "output_key")
+        ).casefold()
+        if any(token in explicit for token in ["paper", "papers", "paper_results", "preprint"]):
+            return True
         text = " ".join(
             [
                 str(args.get("output_key", "")),
@@ -1051,10 +1199,16 @@ class ActionHandlers:
                 str((runtime_state or {}).get("user_goal", "")) if isinstance(runtime_state, dict) else "",
             ]
         ).casefold()
-        return any(token in text for token in ["paper", "papers", "arxiv", "preprint", "препринт", "научн"])
+        return any(token in text for token in ["paper", "papers", "preprint", "препринт", "научн"])
 
     @staticmethod
     def _repository_results_requested(*, args: dict, runtime_state=None) -> bool:
+        explicit = " ".join(
+            str(args.get(key, ""))
+            for key in ("intent", "item_type", "type", "output_key")
+        ).casefold()
+        if any(token in explicit for token in ["repository", "repositories", "repo", "repository_results"]):
+            return True
         text = " ".join(
             [
                 str(args.get("output_key", "")),
@@ -1064,7 +1218,7 @@ class ActionHandlers:
                 str((runtime_state or {}).get("user_goal", "")) if isinstance(runtime_state, dict) else "",
             ]
         ).casefold()
-        return any(token in text for token in ["repository", "repositories", "repo", "github", "РµРїРѕР·РёС‚РѕСЂ"])
+        return any(token in text for token in ["repository", "repositories", "repo", "репозитор"])
 
     @staticmethod
     def _search_results_requested(*, args: dict, runtime_state=None) -> bool:
@@ -1103,7 +1257,18 @@ class ActionHandlers:
     @classmethod
     def _filter_links_to_article_like_paths(cls, links: list[dict[str, Any]], *, current_url: str) -> list[dict[str, Any]]:
         current_host = urlparse(str(current_url or "")).netloc.casefold()
-        article_path_tokens = ("/article", "/articles", "/post", "/posts", "/blog", "/publication")
+        article_path_tokens = (
+            "/article",
+            "/articles",
+            "/post",
+            "/posts",
+            "/blog",
+            "/blogs",
+            "/publication",
+            "/news",
+            "/story",
+            "/stories",
+        )
         by_href: dict[str, dict[str, Any]] = {}
         for link in links:
             href = str(link.get("href", "")).strip()
@@ -1113,9 +1278,10 @@ class ActionHandlers:
             text = str(link.get("text", "")).strip()
             if current_host and host and host != current_host and not host.endswith("." + current_host):
                 continue
-            if not any(token in path for token in article_path_tokens):
+            has_date_detail_path = bool(re.search(r"/\d{4}/\d{1,2}/[^/]+", path))
+            if not has_date_detail_path and not any(token in path for token in article_path_tokens):
                 continue
-            if not cls._article_path_has_detail(path, article_path_tokens):
+            if not has_date_detail_path and not cls._article_path_has_detail(path, article_path_tokens):
                 continue
             if not cls._looks_like_article_title_text(text):
                 continue
@@ -1123,10 +1289,13 @@ class ActionHandlers:
                 continue
             key = href or text.casefold()
             current = by_href.get(key)
-            if current is None or cls._article_link_score(link) > cls._article_link_score(current):
-                by_href[key] = link
+            normalized_link = dict(link)
+            normalized_link.setdefault("title", text)
+            normalized_link.setdefault("link", href)
+            if current is None or cls._article_link_score(normalized_link) > cls._article_link_score(current):
+                by_href[key] = normalized_link
         filtered = list(by_href.values())
-        return filtered or links
+        return filtered
 
     @staticmethod
     def _article_path_has_detail(path: str, article_path_tokens: tuple[str, ...]) -> bool:
@@ -1178,7 +1347,9 @@ class ActionHandlers:
 
     async def extract_by_intent(self, page, args, runtime_state=None):
         intent = str(args.get("intent", "")).strip().lower()
+        item_type = str(args.get("item_type", "") or args.get("type", "")).strip().lower()
         self._mark_used_skill(runtime_state, "extract_by_intent")
+        await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="before_extract_by_intent")
         if intent in {"current_url", "final_url", "url"}:
             return page.url
         if intent in {"page_title", "title"}:
@@ -1197,6 +1368,57 @@ class ActionHandlers:
                     return {field: row.get(self._intent_field_alias(field), row.get(field)) for field in requested}
         if intent in {"visible_links", "extract_visible_links", "links"}:
             return await self.extract_visible_links(page, args, runtime_state)
+        if intent in {"package", "package_metadata", "package_info", "library_metadata"}:
+            self._mark_used_skill(runtime_state, "package_metadata_extraction")
+            result = await self._extract_package_metadata_generic(page=page, args=args, runtime_state=runtime_state)
+            args["_executor_note"] = "extract_by_intent intent=package_metadata extractor=generic_package_metadata"
+            return result
+        if intent in {"search_results", "results", "result_list"}:
+            result = await self._collect_search_results_by_intent(page=page, args=args, runtime_state=runtime_state)
+            args["_executor_note"] = (
+                f"extract_by_intent intent=search_results item_type={item_type or 'generic'} "
+                f"selected_count={len(result)}"
+            )
+            return result
+        if intent in {"paper_results", "papers"}:
+            delegated = dict(args)
+            delegated["item_type"] = "paper"
+            result = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+            args["_executor_note"] = f"extract_by_intent intent=paper_results selected_count={len(result)}"
+            return result
+        if intent in {"repository_results", "repositories", "repo_results"}:
+            delegated = dict(args)
+            delegated["item_type"] = "repository"
+            result = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+            args["_executor_note"] = f"extract_by_intent intent=repository_results selected_count={len(result)}"
+            return result
+        if intent in {"article_results", "articles", "news_items", "news"}:
+            delegated = dict(args)
+            delegated["item_type"] = "news" if intent in {"news_items", "news"} else "article"
+            result = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+            args["_executor_note"] = f"extract_by_intent intent={intent} selected_count={len(result)}"
+            return result
+        if intent in {"product_cards", "products"}:
+            result = await self._collect_product_cards_generic(page=page, args=args, runtime_state=runtime_state)
+            args["_executor_note"] = f"extract_by_intent intent=product_cards selected_count={len(result)}"
+            return result
+        if intent in {"table_rows", "rows"}:
+            rows = await self._extract_table_rows_as_dicts(page=page, limit=int(args.get("limit", 80)))
+            requested_headers = self._requested_table_headers(args=args, runtime_state=runtime_state)
+            if requested_headers:
+                rows = self._filter_table_rows_by_requested_headers(rows=rows, requested_headers=requested_headers)
+            condition = args.get("condition") or args.get("target")
+            if condition:
+                rows = self._filter_structured_rows_by_condition(rows=rows, condition=condition)
+            header_note = f" requested_headers={requested_headers}" if requested_headers else ""
+            args["_executor_note"] = f"extract_by_intent intent=table_rows selected_count={len(rows)}{header_note}"
+            return rows
+        if intent in {"currency_table_rows", "currency_rows"}:
+            rows = await self._extract_table_rows_as_dicts(page=page, limit=int(args.get("limit", 120)))
+            condition = args.get("condition") or args.get("target")
+            rows = self._filter_structured_rows_by_condition(rows=rows, condition=condition) if condition else rows
+            args["_executor_note"] = f"extract_by_intent intent=currency_table_rows selected_count={len(rows)}"
+            return rows
         if intent in {"value_near_anchor", "extract_value_near_anchor", "anchor_value"}:
             delegated = dict(args)
             delegated.setdefault("anchor_text", args.get("target") or args.get("anchor"))
@@ -2284,8 +2506,9 @@ class ActionHandlers:
                 try {
                   const url = new URL(href, window.location.href);
                   const path = url.pathname.toLowerCase();
-                  if (!/\\/(article|articles|post|posts|blog|publication)s?\\//.test(path)) return false;
-                  const tail = path.split(/\\/(?:article|articles|post|posts|blog|publication)s?\\//).pop() || "";
+                  if (/\\/\\d{4}\\/\\d{1,2}\\//.test(path) || /\\.(html?|aspx?)$/.test(path)) return true;
+                  if (!/\\/(article|articles|post|posts|blog|blogs|publication|news|story|stories)s?\\//.test(path)) return false;
+                  const tail = path.split(/\\/(?:article|articles|post|posts|blog|blogs|publication|news|story|stories)s?\\//).pop() || "";
                   return tail.replace(/\\//g, "").length > 0;
                 } catch (_) {
                   return false;
@@ -2375,7 +2598,906 @@ class ActionHandlers:
             """,
             {"limit": max(limit, 1)},
         )
+        items: list[dict[str, Any]] = []
+        for raw_item in payload or []:
+            if not isinstance(raw_item, dict):
+                continue
+            item = dict(raw_item)
+            title = str(item.get("title") or item.get("text") or "").strip()
+            href = str(item.get("href") or item.get("link") or "").strip()
+            publication_time = str(item.get("publication_time") or item.get("published_at") or "").strip()
+            if not title or not href:
+                continue
+            if not self._looks_like_publication_time_text(publication_time):
+                continue
+            author = self._clean_article_author_text(
+                item.get("author") or item.get("authors") or "",
+                publication_time=publication_time,
+            )
+            item["author"] = author
+            item["authors"] = author
+            item["publication_time"] = publication_time
+            item["published_at"] = publication_time
+            items.append(item)
+        return items
+
+    @classmethod
+    def _collect_article_like_items_from_text(
+        cls,
+        *,
+        source_text: str,
+        links: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        lines = [" ".join(line.split()).strip() for line in str(source_text or "").splitlines()]
+        lines = [line for line in lines if line]
+        if not lines:
+            return []
+
+        links_by_text: dict[str, dict[str, Any]] = {}
+        for link in links:
+            text = cls._normalize_result_match_text(str(link.get("title") or link.get("text") or ""))
+            if text and text not in links_by_text:
+                links_by_text[text] = link
+
+        section_labels = {
+            "latest",
+            "recent",
+            "all posts",
+            "home",
+            "blog",
+            "search",
+            "rss",
+            "subscribe",
+            "related links",
+        }
+        items: list[dict[str, Any]] = []
+        for index, line in enumerate(lines):
+            if not cls._looks_like_publication_time_text(line):
+                continue
+            publication_time = line
+            previous = [
+                candidate
+                for candidate in lines[max(0, index - 6) : index]
+                if candidate != "·" and candidate.casefold() not in section_labels
+            ]
+            if not previous:
+                continue
+            author = ""
+            if previous and cls._looks_like_author_name(previous[-1]):
+                author = previous.pop()
+            title = ""
+            for candidate in reversed(previous):
+                if cls._looks_like_article_title_text(candidate) and not cls._looks_like_publication_time_text(candidate):
+                    title = candidate
+                    break
+            if not title:
+                continue
+            description = ""
+            for candidate in lines[index + 1 : index + 5]:
+                if candidate.casefold() in section_labels or candidate == "·":
+                    continue
+                if cls._looks_like_publication_time_text(candidate):
+                    break
+                if len(candidate) >= 12:
+                    description = candidate
+                    break
+            link = cls._link_for_result_title(title=title, links_by_text=links_by_text)
+            href = str((link or {}).get("href") or (link or {}).get("link") or "")
+            if links_by_text and not href:
+                continue
+            items.append(
+                {
+                    "title": title,
+                    "text": title,
+                    "href": href,
+                    "link": href,
+                    "author": author,
+                    "authors": author,
+                    "publication_time": publication_time,
+                    "published_at": publication_time,
+                    "description": description,
+                    "source": "article_text_fallback",
+                }
+            )
+            if len(items) >= max(limit, 1):
+                break
+        return items
+
+    @staticmethod
+    def _looks_like_author_name(value: object) -> bool:
+        text = " ".join(str(value or "").split()).strip()
+        if not text or len(text) > 80:
+            return False
+        if any(char.isdigit() for char in text):
+            return False
+        words = text.split()
+        if not (2 <= len(words) <= 5):
+            return False
+        return sum(1 for word in words if word[:1].isupper()) >= 2
+
+    @staticmethod
+    def _clean_article_author_text(value: object, *, publication_time: str = "") -> str:
+        text = " ".join(str(value or "").split())
+        if publication_time:
+            text = text.replace(str(publication_time), " ")
+        text = re.sub(
+            r"\b\d+\s*(?:sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\s+(?:ago)\b",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        text = re.sub(
+            r"\b\d+\s*(?:секунд|секунды|сек|минут|минуту|мин|час|часа|часов|день|дня|дней|недел|месяц|месяца|месяцев|год|года|лет)\s+назад\b",
+            " ",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return " ".join(text.split()).strip(" -•·|")
+
+    @staticmethod
+    def _looks_like_publication_time_text(value: object) -> bool:
+        text = " ".join(str(value or "").split())
+        if not text or len(text) > 120:
+            return False
+        if re.search(r"\b\d+\s+years?\s+of\b", text, flags=re.IGNORECASE):
+            return False
+        return bool(
+            re.search(
+                r"\b\d{1,2}:\d{2}\b|\b\d{4}-\d{2}-\d{2}\b|\b\d+\s*(?:sec|secs|second|seconds|min|mins|minute|minutes|hour|hours|day|days|week|weeks|month|months|year|years)\b|\b(?:ago)\b|\b\d+\s*(?:секунд|секунды|сек|минут|минуту|мин|час|часа|часов|день|дня|дней|недел|месяц|месяца|месяцев|год|года|лет)\b|\bназад\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+            or re.search(
+                r"\b(?:jan|january|feb|february|mar|march|apr|april|may|jun|june|jul|july|aug|august|sep|sept|september|oct|october|nov|november|dec|december)\s+\d{1,2},?\s+\d{4}\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+
+    async def _collect_search_results_by_intent(self, *, page, args: dict, runtime_state=None) -> list[dict[str, Any]]:
+        await self._settle_page_for_read(page)
+        item_type = str(args.get("item_type", "") or args.get("type", "")).strip().lower()
+        limit = int(args.get("limit", 20))
+        if item_type in {"paper", "papers", "preprint"}:
+            items = await self._collect_paper_like_results_generic(page=page, limit=limit)
+            if items:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+                return items
+        if item_type in {"repository", "repositories", "repo"}:
+            items = await self._collect_repository_like_results_generic(page=page, limit=limit)
+            if items:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+                return items
+        if item_type in {"article", "articles", "news", "news_items"}:
+            if self._article_metadata_requested(args=args, runtime_state=runtime_state):
+                items = await self._collect_article_like_results_generic(page=page, limit=limit)
+                if items:
+                    self._mark_used_skill(runtime_state, "row_list_extraction")
+                    self._mark_used_skill(runtime_state, "extract_visible_links")
+                    return items
+                source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=False)
+                links = await self._collect_visible_links_generic(page=page, limit=max(limit * 4, 80))
+                items = self._collect_article_like_items_from_text(source_text=source_text, links=links, limit=limit)
+                if items:
+                    self._mark_used_skill(runtime_state, "row_list_extraction")
+                    self._mark_used_skill(runtime_state, "extract_visible_links")
+                    return items
+            links = await self._collect_visible_links_generic(page=page, limit=max(limit * 4, 80))
+            filtered = self._filter_links_to_article_like_paths(links, current_url=getattr(page, "url", ""))[: max(limit, 1)]
+            if filtered:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+            return filtered
+
+        if self._paper_results_requested(args=args, runtime_state=runtime_state):
+            items = await self._collect_paper_like_results_generic(page=page, limit=limit)
+            if items:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+                return items
+        if self._repository_results_requested(args=args, runtime_state=runtime_state):
+            items = await self._collect_repository_like_results_generic(page=page, limit=limit)
+            if items:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+                return items
+        if self._article_links_requested(args=args, runtime_state=runtime_state):
+            if self._article_metadata_requested(args=args, runtime_state=runtime_state):
+                items = await self._collect_article_like_results_generic(page=page, limit=limit)
+                if items:
+                    self._mark_used_skill(runtime_state, "row_list_extraction")
+                    self._mark_used_skill(runtime_state, "extract_visible_links")
+                    return items
+                source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=False)
+                links = await self._collect_visible_links_generic(page=page, limit=max(limit * 4, 80))
+                items = self._collect_article_like_items_from_text(source_text=source_text, links=links, limit=limit)
+                if items:
+                    self._mark_used_skill(runtime_state, "row_list_extraction")
+                    self._mark_used_skill(runtime_state, "extract_visible_links")
+                    return items
+            links = await self._collect_visible_links_generic(page=page, limit=max(limit * 4, 80))
+            filtered = self._filter_links_to_article_like_paths(links, current_url=getattr(page, "url", ""))[: max(limit, 1)]
+            if filtered:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+            return filtered
+        items = await self._collect_result_like_items_generic(page=page, limit=limit)
+        if not items:
+            direct_result = await self._direct_search_result_from_current_page(
+                page=page,
+                args=args,
+                runtime_state=runtime_state,
+            )
+            if direct_result:
+                self._mark_used_skill(runtime_state, "row_list_extraction")
+                self._mark_used_skill(runtime_state, "extract_visible_links")
+                return [direct_result]
+            source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=False)
+            links = await self._collect_visible_links_generic(page=page, limit=max(limit * 4, 80))
+            items = self._collect_result_like_items_from_text(source_text=source_text, links=links, limit=limit)
+        if items:
+            self._mark_used_skill(runtime_state, "row_list_extraction")
+            self._mark_used_skill(runtime_state, "extract_visible_links")
+        return items
+
+    async def _collect_result_like_items_generic(self, *, page, limit: int) -> list[dict[str, Any]]:
+        payload = await page.evaluate(
+            """
+            ({ limit }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const current = new URL(window.location.href);
+              const query = norm(
+                current.searchParams.get("q")
+                || current.searchParams.get("query")
+                || current.searchParams.get("search")
+                || ""
+              ).toLowerCase();
+              const queryTerms = query.split(/[^\\p{L}\\p{N}_-]+/u).filter((term) => term.length >= 3);
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const inIgnoredRegion = (el) => !!el.closest('nav, header, footer, aside, [role="navigation"], [aria-hidden="true"], .breadcrumbs, .breadcrumb, .a11y-menu, [class*="footer" i], [class*="menu" i]');
+              const cssEscape = (value) => {
+                if (window.CSS && CSS.escape) return CSS.escape(value);
+                return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+              };
+              const cssPath = (el) => {
+                if (!el || !el.tagName) return "";
+                if (el.id) return `#${cssEscape(el.id)}`;
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.body && parts.length < 6) {
+                  const tag = cur.tagName.toLowerCase();
+                  let part = tag;
+                  const cls = Array.from(cur.classList || []).slice(0, 2).map(cssEscape);
+                  if (cls.length) part += "." + cls.join(".");
+                  const parent = cur.parentElement;
+                  if (parent) {
+                    const siblings = Array.from(parent.children).filter((sib) => sib.tagName === cur.tagName);
+                    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(cur) + 1})`;
+                  }
+                  parts.unshift(part);
+                  cur = parent;
+                }
+                return parts.join(" > ");
+              };
+              const descriptionFrom = (container, title) => {
+                const lines = String(container?.innerText || container?.textContent || "").split(/\\n+/).map(norm).filter(Boolean);
+                for (const line of lines) {
+                  if (!line || line === title || line.length < 20 || line.length > 360) continue;
+                  if (/^(search|results?|login|sign in|next|previous|share|menu)$/i.test(line)) continue;
+                  return line;
+                }
+                return "";
+              };
+              const samePageJump = (href) => {
+                try {
+                  const url = new URL(href, window.location.href);
+                  return url.origin === current.origin
+                    && url.pathname === current.pathname
+                    && url.search === current.search
+                    && !!url.hash;
+                } catch (_) {
+                  return false;
+                }
+              };
+              const queryMatches = (title, description, href) => {
+                if (!queryTerms.length) return true;
+                let path = "";
+                try {
+                  const url = new URL(href, window.location.href);
+                  path = decodeURIComponent(url.pathname || "");
+                } catch (_) {}
+                const haystack = `${title} ${description} ${path}`.toLowerCase();
+                return queryTerms.some((term) => haystack.includes(term));
+              };
+              const uiLabel = (title) => /^(skip to .+|search|results?|login|sign in|sign up|menu|next|previous|read more|about|careers?|advertise|community|privacy|legal|settings|rss feed)$/i.test(title);
+              const seen = new Set();
+              const results = [];
+              const resultContainers = Array.from(document.querySelectorAll('main li, [role="main"] li, main article, [role="main"] article, main section, [role="main"] section, [class*="result" i], [class*="search-result" i], [class*="item" i]')).filter((node) => isVisible(node) && !inIgnoredRegion(node));
+              for (const node of resultContainers) {
+                const text = norm(node.innerText || node.textContent || "");
+                if (!text || text.length < 20 || text.length > 1800) continue;
+                const selector = cssPath(node);
+                const resultishContainer = /\b(result|search-result|list|item)\b/i.test(selector) || !!node.closest('[class*="result" i], [role="listitem"]');
+                const lines = String(node.innerText || node.textContent || "").split(/\\n+/).map(norm).filter(Boolean);
+                const heading = node.querySelector('h1,h2,h3,h4,[role="heading"]');
+                let title = norm(heading?.innerText || heading?.textContent || "");
+                if (!title) {
+                  title = lines.find((line) => line.length >= 4 && line.length <= 220 && !uiLabel(line) && !/^(version|released):/i.test(line)) || "";
+                }
+                if (!title || uiLabel(title)) continue;
+                const anchor = Array.from(node.querySelectorAll('a[href]')).find((link) => {
+                  const label = norm(link.innerText || link.textContent || link.getAttribute("aria-label") || link.getAttribute("title") || "");
+                  const href = link.href || link.getAttribute("href") || "";
+                  return href && !samePageJump(href) && !/^(next|previous|login|sign in|sign up|search)$/i.test(label);
+                });
+                const href = anchor ? (anchor.href || anchor.getAttribute("href") || "") : "";
+                const description = descriptionFrom(node, title);
+                const key = href || `${title}|${description}`;
+                if (!key || seen.has(key)) continue;
+                if (!resultishContainer && !queryMatches(title, description, href)) continue;
+                seen.add(key);
+                results.push({
+                  title,
+                  text: title,
+                  href,
+                  link: href,
+                  description,
+                  selector
+                });
+                if (results.length >= limit) break;
+              }
+              if (results.length >= limit) return results;
+              const anchors = Array.from(document.querySelectorAll('main a[href], [role="main"] a[href], article a[href], section a[href], [class*="result" i] a[href], [class*="search" i] a[href]')).filter((anchor) => isVisible(anchor) && !inIgnoredRegion(anchor));
+              for (const anchor of anchors) {
+                const href = anchor.href || anchor.getAttribute("href") || "";
+                const title = norm(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "");
+                if (!href || !title || title.length < 4 || title.length > 220) continue;
+                if (samePageJump(href)) continue;
+                if (/^(login|sign in|sign up|menu|next|previous|read more)$/i.test(title)) continue;
+                if (seen.has(href)) continue;
+                const container = anchor.closest('article,li,section,div[class*="result" i],div[class*="item" i],div[class*="card" i],div[class*="search" i]') || anchor.parentElement || anchor;
+                if (inIgnoredRegion(container)) continue;
+                const selector = cssPath(anchor);
+                const resultishSelector = /\\b(result|search|item|card)\\b/i.test(selector) || !!anchor.closest('article,[role="listitem"],[class*="result" i],[class*="search" i]');
+                const description = descriptionFrom(container, title);
+                if (!description && uiLabel(title)) continue;
+                if (!description && !resultishSelector && !queryMatches(title, description, href)) continue;
+                if (queryTerms.length && !queryMatches(title, description, href) && !description) continue;
+                seen.add(href);
+                results.push({
+                  title,
+                  text: title,
+                  href,
+                  link: href,
+                  description,
+                  selector
+                });
+                if (results.length >= limit) break;
+              }
+              return results;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
         return [dict(item) for item in payload or [] if isinstance(item, dict)]
+
+    @classmethod
+    def _collect_result_like_items_from_text(
+        cls,
+        *,
+        source_text: str,
+        links: list[dict[str, Any]],
+        limit: int,
+    ) -> list[dict[str, Any]]:
+        lines = [" ".join(line.split()).strip() for line in str(source_text or "").splitlines()]
+        lines = [line for line in lines if line]
+        if not lines:
+            return []
+        start = 0
+        for idx, line in enumerate(lines):
+            if re.search(r"\bresults?\b|\bрезультат", line, flags=re.IGNORECASE):
+                start = idx + 1
+                break
+        footer_markers = {
+            "privacy policy",
+            "about",
+            "disclaimers",
+            "contact",
+            "developers",
+            "statistics",
+            "mobile view",
+            "see all results",
+        }
+        ui_pattern = re.compile(
+            r"^(search|results?|advanced search|search in:|help|tools|appearance|small|standard|large|wide|automatic|light|dark|next|previous|login|log in|create account|donate)$",
+            flags=re.IGNORECASE,
+        )
+        metadata_pattern = re.compile(
+            r"\b\d+\s*(?:kb|mb|words?)\b|released?:|version:|\b\d{1,2}:\d{2}\b|\b\d{4}\b",
+            flags=re.IGNORECASE,
+        )
+        by_text: dict[str, dict[str, Any]] = {}
+        for link in links:
+            text = cls._normalize_result_match_text(str(link.get("title") or link.get("text") or ""))
+            if text and text not in by_text:
+                by_text[text] = link
+
+        items: list[dict[str, Any]] = []
+        idx = start
+        while idx < len(lines) and len(items) < max(limit, 1):
+            title = lines[idx]
+            folded = title.casefold()
+            if any(marker == folded or marker in folded for marker in footer_markers):
+                break
+            idx += 1
+            if ui_pattern.match(title):
+                continue
+            if re.match(r"^results?\s+\d", title, flags=re.IGNORECASE):
+                continue
+            if title.endswith(":") or len(title) < 3 or len(title) > 140:
+                continue
+            if metadata_pattern.search(title):
+                continue
+            if title.lower().startswith(("the page ", "did you mean", "jump to", "main menu")):
+                continue
+            description_parts: list[str] = []
+            lookahead = idx
+            while lookahead < len(lines) and len(description_parts) < 2:
+                candidate = lines[lookahead]
+                candidate_folded = candidate.casefold()
+                if ui_pattern.match(candidate) or any(marker == candidate_folded for marker in footer_markers):
+                    break
+                if metadata_pattern.search(candidate):
+                    lookahead += 1
+                    break
+                if len(candidate) >= 20 and candidate != title:
+                    description_parts.append(candidate)
+                lookahead += 1
+            if not description_parts:
+                continue
+            link = cls._link_for_result_title(title=title, links_by_text=by_text)
+            href = str((link or {}).get("href") or (link or {}).get("link") or "")
+            items.append(
+                {
+                    "title": title,
+                    "text": title,
+                    "href": href,
+                    "link": href,
+                    "description": " ".join(description_parts),
+                    "selector": "",
+                    "source": "text_result_fallback",
+                }
+            )
+            idx = max(idx, lookahead)
+        return items
+
+    @classmethod
+    def _link_for_result_title(cls, *, title: str, links_by_text: dict[str, dict[str, Any]]) -> dict[str, Any] | None:
+        wanted = cls._normalize_result_match_text(title)
+        if not wanted:
+            return None
+        if wanted in links_by_text:
+            return links_by_text[wanted]
+        for text, link in links_by_text.items():
+            if wanted in text or text in wanted:
+                return link
+        return None
+
+    @staticmethod
+    def _normalize_result_match_text(value: str) -> str:
+        return re.sub(r"\s+", " ", str(value or "").strip().casefold())
+
+    async def _extract_package_metadata_generic(self, *, page) -> dict[str, Any]:
+        payload = await page.evaluate(
+            """
+            () => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const meaningful = (value) => {
+                const text = norm(value);
+                if (!text || text.length < 8 || text.length > 500) return "";
+                if (/^(menu|navigation|search|login|sign in|sign up)$/i.test(text)) return "";
+                return text;
+              };
+              const title = norm(document.title || "");
+              const heading = norm(document.querySelector("main h1, h1, main h2, h2")?.innerText || "");
+              const metaDescription = norm(document.querySelector('meta[name="description"], meta[property="og:description"]')?.getAttribute("content") || "");
+              const paragraphs = Array.from(document.querySelectorAll("main p, article p, section p, p"))
+                .map((el) => meaningful(el.innerText || el.textContent || ""))
+                .filter(Boolean);
+              const bodyLines = String(document.body?.innerText || "").split(/\\n+/).map(norm).filter(Boolean);
+              const versionLine = bodyLines.find((line) => /\\b(version|latest release|latest version|release|released|выпущен|верси)/i.test(line) && /\\d+\\.\\d+/.test(line)) || "";
+              const versionMatch = (versionLine || bodyLines.join(" ")).match(/(?:version|latest release|latest version|release|released|верси[яи]?)[^0-9]{0,40}([0-9]+(?:\\.[0-9A-Za-z][0-9A-Za-z._-]*)+)/i)
+                || title.match(/\\b([0-9]+(?:\\.[0-9A-Za-z][0-9A-Za-z._-]*)+)\\b/)
+                || heading.match(/\\b([0-9]+(?:\\.[0-9A-Za-z][0-9A-Za-z._-]*)+)\\b/);
+              const packageName = heading || title.split(/[|·-]/)[0].trim();
+              const description = metaDescription || paragraphs[0] || "";
+              return {
+                package_name: packageName,
+                name: packageName,
+                latest_version: versionMatch ? versionMatch[1] : "",
+                version: versionMatch ? versionMatch[1] : "",
+                description,
+                source_title: title,
+                version_source: versionLine
+              };
+            }
+            """
+        )
+        return {key: value for key, value in dict(payload or {}).items() if value not in (None, "")}
+
+    async def _extract_package_metadata_generic(
+        self,
+        *,
+        page,
+        args: dict[str, Any] | None = None,
+        runtime_state=None,
+    ) -> dict[str, Any]:
+        args = args or {}
+        payload = await self._collect_package_metadata_payload(page=page)
+        target = self._infer_package_metadata_target(args=args, runtime_state=runtime_state, payload=payload)
+        candidate = self._select_package_metadata_candidate(payload.get("candidates", []), target=target)
+
+        href = str((candidate or {}).get("href") or "").strip()
+        if href and target and not self._package_payload_looks_like_detail(payload=payload, target=target):
+            try:
+                await page.goto(href, wait_until="domcontentloaded", timeout=int(args.get("navigation_timeout_ms", 20000)))
+                await self._wait_after_possible_navigation(page)
+                payload = await self._collect_package_metadata_payload(page=page)
+            except Exception:
+                pass
+
+        return self._build_package_metadata_payload(payload=payload, target=target, candidate=candidate)
+
+    @staticmethod
+    async def _collect_package_metadata_payload(*, page) -> dict[str, Any]:
+        payload = await page.evaluate(
+            """
+            () => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const visible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const meaningfulParagraph = (value) => {
+                const text = norm(value);
+                if (!text || text.length < 8 || text.length > 500) return "";
+                if (/^(menu|navigation|search|login|sign in|sign up)$/i.test(text)) return "";
+                return text;
+              };
+              const meaningfulTitle = (value) => {
+                const text = norm(value);
+                if (!text || text.length < 2 || text.length > 160) return "";
+                if (/^(menu|navigation|search|login|sign in|sign up|filter by classifier|filters?)$/i.test(text)) return "";
+                return text;
+              };
+              const cssEscape = (value) => {
+                if (window.CSS && CSS.escape) return CSS.escape(value);
+                return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+              };
+              const cssPath = (el) => {
+                if (!el || !el.tagName) return "";
+                if (el.id) return `#${cssEscape(el.id)}`;
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.body && parts.length < 6) {
+                  const tag = cur.tagName.toLowerCase();
+                  let part = tag;
+                  const cls = Array.from(cur.classList || []).slice(0, 2).map(cssEscape);
+                  if (cls.length) part += "." + cls.join(".");
+                  const parent = cur.parentElement;
+                  if (parent) {
+                    const siblings = Array.from(parent.children).filter((sib) => sib.tagName === cur.tagName);
+                    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(cur) + 1})`;
+                  }
+                  parts.unshift(part);
+                  cur = parent;
+                }
+                return parts.join(" > ");
+              };
+              const title = norm(document.title || "");
+              const heading = norm(document.querySelector("main h1, h1, main h2, h2")?.innerText || "");
+              const metaDescription = norm(document.querySelector('meta[name="description"], meta[property="og:description"]')?.getAttribute("content") || "");
+              const paragraphs = Array.from(document.querySelectorAll("main p, article p, section p, p"))
+                .map((el) => meaningfulParagraph(el.innerText || el.textContent || ""))
+                .filter(Boolean);
+              const bodyLines = String(document.body?.innerText || "").split(/\\n+/).map(norm).filter(Boolean);
+              const containers = Array.from(document.querySelectorAll('main article, main li, main [role="listitem"], main section, main div[class*="result" i], main div[class*="item" i], article, li, [role="listitem"]'))
+                .filter(visible);
+              const candidates = [];
+              const seen = new Set();
+              for (const node of containers) {
+                const raw = String(node.innerText || node.textContent || "");
+                const text = norm(raw);
+                if (!text || text.length < 6 || text.length > 1800) continue;
+                if (/^(filters?|filter by classifier|navigation|menu|search)$/i.test(text)) continue;
+                const lines = raw.split(/\\n+/).map(norm).filter(Boolean);
+                const anchor = node.querySelector('a[href]');
+                const href = anchor ? (anchor.href || anchor.getAttribute("href") || "") : "";
+                const anchorText = anchor ? meaningfulTitle(anchor.innerText || anchor.textContent || anchor.getAttribute("title") || anchor.getAttribute("aria-label") || "") : "";
+                const titleCandidate = anchorText
+                  || meaningfulTitle(node.querySelector("h1,h2,h3,strong,b,[class*='title' i]")?.innerText || "")
+                  || meaningfulTitle(lines[0] || "");
+                if (!titleCandidate) continue;
+                const description = lines.find((line) => line !== titleCandidate && line !== anchorText && line.length >= 8 && line.length <= 280 && !/^\\d{4}|^(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\\b/i.test(line)) || "";
+                const key = `${titleCandidate}|${href}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                candidates.push({
+                  title: titleCandidate,
+                  name: titleCandidate,
+                  href,
+                  link: href,
+                  description,
+                  text,
+                  selector: cssPath(node)
+                });
+                if (candidates.length >= 60) break;
+              }
+              return {
+                url: window.location.href,
+                title,
+                heading,
+                meta_description: metaDescription,
+                paragraphs,
+                body_lines: bodyLines,
+                source_title: title,
+                candidates
+              };
+            }
+            """
+        )
+        return dict(payload or {})
+
+    @classmethod
+    def _infer_package_metadata_target(
+        cls,
+        *,
+        args: dict[str, Any],
+        runtime_state,
+        payload: dict[str, Any],
+    ) -> str:
+        candidates: list[str] = []
+        for key in ("package_name", "package", "name", "query", "target", "entity", "search_query"):
+            value = str(args.get(key, "") or "").strip()
+            if value:
+                candidates.append(value)
+
+        parsed = urlparse(str(payload.get("url", "") or ""))
+        query = parse_qs(parsed.query)
+        for key in ("q", "query", "search", "term"):
+            for value in query.get(key, []):
+                if str(value).strip():
+                    candidates.append(str(value).strip())
+
+        body_text = "\n".join(str(line) for line in payload.get("body_lines", []) if str(line).strip())
+        goal = str((runtime_state or {}).get("user_goal", ""))
+        for pattern in (
+            r'\bfor\s+["“]([^"”]{2,80})["”]',
+            r"\bpackage\s+([A-Za-z0-9][A-Za-z0-9_.-]{1,80})",
+            r"\blibrary\s+([A-Za-z0-9][A-Za-z0-9_.-]{1,80})",
+            r"\bmodule\s+([A-Za-z0-9][A-Za-z0-9_.-]{1,80})",
+        ):
+            for source in (body_text, goal):
+                match = re.search(pattern, source, flags=re.IGNORECASE)
+                if match:
+                    candidates.append(match.group(1).strip())
+
+        for quoted in re.findall(r'["“]([^"”]{2,80})["”]', goal):
+            candidates.append(quoted.strip())
+
+        ignored = {"pypi", "python", "package", "library", "module", "project", "search", "find"}
+        for candidate in candidates:
+            normalized = re.sub(r"\s+", " ", str(candidate or "").strip().strip(".,;:()[]{}"))
+            if not normalized or normalized.casefold() in ignored:
+                continue
+            if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{1,80}", normalized):
+                return normalized
+        return ""
+
+    @classmethod
+    def _select_package_metadata_candidate(
+        cls,
+        candidates: object,
+        *,
+        target: str,
+    ) -> dict[str, Any] | None:
+        if not isinstance(candidates, list):
+            return None
+        target_norm = cls._normalize_package_token(target)
+        best: tuple[int, dict[str, Any]] | None = None
+        for raw in candidates:
+            if not isinstance(raw, dict):
+                continue
+            item = dict(raw)
+            title = str(item.get("title") or item.get("name") or "").strip()
+            href = str(item.get("href") or item.get("link") or "")
+            text = str(item.get("text") or "")
+            if title.casefold() in {"filter by classifier", "search results", "filters", "filter"}:
+                continue
+            score = 0
+            title_norm = cls._normalize_package_token(title)
+            href_norm = cls._normalize_package_token(href)
+            text_norm = cls._normalize_package_token(text)
+            if target_norm:
+                if title_norm == target_norm:
+                    score += 300
+                elif title_norm.startswith(f"{target_norm}-") or title_norm.startswith(f"{target_norm}."):
+                    score += 120
+                elif target_norm in title_norm:
+                    score += 80
+                if target_norm in href_norm:
+                    score += 70
+                if target_norm in text_norm:
+                    score += 40
+            else:
+                score += 20
+            if href:
+                score += 10
+            if str(item.get("description") or "").strip():
+                score += 5
+            if best is None or score > best[0]:
+                best = (score, item)
+        if best and (best[0] > 0 or not target_norm):
+            return best[1]
+        return None
+
+    @staticmethod
+    def _normalize_package_token(value: str) -> str:
+        return re.sub(r"[^a-z0-9_.-]+", " ", str(value or "").casefold()).strip()
+
+    @classmethod
+    def _package_payload_looks_like_detail(cls, *, payload: dict[str, Any], target: str) -> bool:
+        target_norm = cls._normalize_package_token(target)
+        heading = cls._normalize_package_token(str(payload.get("heading", "") or ""))
+        title = cls._normalize_package_token(str(payload.get("title", "") or ""))
+        version = cls._extract_package_version(payload=payload, target=target)
+        if not target_norm:
+            return bool(version)
+        return bool(version and (target_norm in heading or target_norm in title))
+
+    @classmethod
+    def _build_package_metadata_payload(
+        cls,
+        *,
+        payload: dict[str, Any],
+        target: str,
+        candidate: dict[str, Any] | None,
+    ) -> dict[str, Any]:
+        version = cls._extract_package_version(payload=payload, target=target)
+        package_name = cls._clean_package_name(
+            target
+            or str(payload.get("heading", "") or "")
+            or str((candidate or {}).get("title", "") or "")
+            or str(payload.get("title", "") or "").split("|")[0].split("·")[0].split("-")[0]
+        )
+        description = cls._select_package_description(payload=payload, candidate=candidate)
+        result = {
+            "package_name": package_name,
+            "name": package_name,
+            "latest_version": version,
+            "version": version,
+            "description": description,
+            "source_title": payload.get("source_title") or payload.get("title"),
+        }
+        if candidate:
+            href = str(candidate.get("href") or candidate.get("link") or "").strip()
+            if href:
+                result["source_url"] = href
+        return {key: value for key, value in result.items() if value not in (None, "")}
+
+    @staticmethod
+    def _clean_package_name(value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "").strip())
+        text = re.sub(r"\s+\d+(?:\.[0-9A-Za-z][0-9A-Za-z._-]*)+\s*$", "", text)
+        return text
+
+    @classmethod
+    def _extract_package_version(cls, *, payload: dict[str, Any], target: str) -> str:
+        version_pattern = r"([0-9]+(?:\.[0-9A-Za-z][0-9A-Za-z._-]*)+)"
+        lines = [str(line) for line in payload.get("body_lines", []) if str(line).strip()]
+        heading = str(payload.get("heading", "") or "")
+        title = str(payload.get("title", "") or "")
+        target_re = re.escape(target) if target else ""
+        if target_re:
+            for source in (heading, title, "\n".join(lines[:30])):
+                match = re.search(rf"\b{target_re}\b[^\n0-9]{{0,30}}{version_pattern}", source, flags=re.IGNORECASE)
+                if match:
+                    return match.group(1)
+        for line in lines:
+            if re.search(r"\b(version|latest release|latest version|release|released)\b", line, flags=re.IGNORECASE):
+                match = re.search(version_pattern, line)
+                if match:
+                    return match.group(1)
+        for source in (heading, title):
+            match = re.search(version_pattern, source)
+            if match:
+                return match.group(1)
+        return ""
+
+    @staticmethod
+    def _select_package_description(*, payload: dict[str, Any], candidate: dict[str, Any] | None) -> str:
+        candidate_description = str((candidate or {}).get("description", "") or "").strip()
+        meta_description = str(payload.get("meta_description", "") or "").strip()
+        paragraphs = [str(item).strip() for item in payload.get("paragraphs", []) if str(item).strip()]
+        generic_meta = {
+            "the python package index (pypi) is a repository of software for the python programming language.",
+        }
+        for value in [meta_description, candidate_description, *paragraphs]:
+            if value.casefold() in generic_meta:
+                continue
+            if value:
+                return value
+        return ""
+
+    async def _collect_product_cards_generic(self, *, page, args: dict, runtime_state=None) -> list[dict[str, Any]]:
+        limit = int(args.get("limit", 20))
+        payload = await page.evaluate(
+            """
+            ({ limit }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const pricePattern = /(?:₽|руб\\.?|р\\.|\\$|€|£|\\u00A3)\\s*\\d[\\d\\s.,]*|\\d[\\d\\s.,]*(?:₽|руб\\.?|р\\.|\\$|€|£|\\u00A3)/i;
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const candidates = Array.from(document.querySelectorAll('article, li, [role="listitem"], div[class*="card" i], div[class*="item" i], div[class*="product" i]')).filter(isVisible);
+              const seen = new Set();
+              const products = [];
+              for (const node of candidates) {
+                const text = norm(node.innerText || node.textContent || "");
+                if (!text || text.length < 12 || text.length > 1800 || !pricePattern.test(text)) continue;
+                const anchor = node.querySelector('a[href]');
+                const href = anchor ? (anchor.href || anchor.getAttribute('href') || "") : "";
+                const image = node.querySelector('img');
+                const lines = String(node.innerText || node.textContent || "").split(/\\n+/).map(norm).filter(Boolean);
+                const priceLine = lines.find((line) => pricePattern.test(line)) || "";
+                const title = (anchor ? norm(anchor.innerText || anchor.textContent || anchor.getAttribute('title') || anchor.getAttribute('aria-label') || "") : "")
+                  || lines.find((line) => line !== priceLine && line.length >= 6 && line.length <= 220) || "";
+                if (!title || seen.has(href || title)) continue;
+                const ratingEl = node.querySelector('[class*="rating" i], [aria-label*="rating" i], [title*="rating" i]');
+                const ratingClass = ratingEl ? (ratingEl.getAttribute('class') || ratingEl.getAttribute('aria-label') || ratingEl.getAttribute('title') || "") : "";
+                const ratingLine = lines.find((line) => /★|звезд|rating|рейтинг|reviews|отзыв/i.test(line) && /\\d|one|two|three|four|five/i.test(line)) || ratingClass;
+                seen.add(href || title);
+                products.push({
+                  title,
+                  name: title,
+                  price: priceLine,
+                  rating: ratingLine,
+                  href,
+                  link: href,
+                  image: image ? (image.currentSrc || image.src || image.getAttribute('src') || "") : "",
+                  raw_text: text
+                });
+                if (products.length >= Math.max(limit * 4, limit)) break;
+              }
+              return products;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        products = [dict(item) for item in payload or [] if isinstance(item, dict)]
+        budget = self._extract_budget_from_goal_or_args(args=args, runtime_state=runtime_state)
+        for item in products:
+            normalized_price = self._normalize_price_token(str(item.get("price", "")))
+            if normalized_price is not None:
+                item["price_value"] = normalized_price
+        if budget is not None:
+            priced = [item for item in products if isinstance(item.get("price_value"), (int, float))]
+            if priced:
+                products = [item for item in priced if float(item["price_value"]) <= float(budget)]
+            elif products and runtime_state is not None:
+                runtime_state["partial_success_reason"] = "price_filter_not_applied"
+        self._mark_used_skill(runtime_state, "row_list_extraction")
+        return products[: max(limit, 1)]
 
     async def _collect_paper_like_results_generic(self, *, page, limit: int) -> list[dict[str, Any]]:
         payload = await page.evaluate(
@@ -2417,7 +3539,6 @@ class ActionHandlers:
               const isGoodTitle = (text) => {
                 const value = cleanTitle(text);
                 if (!value || value.length < 8) return false;
-                if (/^arxiv:\\d/i.test(value)) return false;
                 if (/^(\\[?\\s*)?(pdf|ps|html|other|doi|view)(\\s*[,\\]]|$)/i.test(value)) return false;
                 if (/^[a-z-]+\\.[a-z-]+(\\.[a-z-]+)?$/i.test(value)) return false;
                 return true;
@@ -2429,7 +3550,7 @@ class ActionHandlers:
                   .sort((a, b) => b.length - a.length);
                 let title = titleCandidates[0] || "";
                 const anchorText = norm(anchor.innerText || anchor.textContent || "");
-                if (!title || /^arxiv:\\d/i.test(title) || title === anchorText) {
+                if (!title || title === anchorText) {
                   const candidates = Array.from(container.querySelectorAll('h1,h2,h3,strong,b,p,span,a')).map((el) => cleanTitle(el.innerText || el.textContent || "")).filter(Boolean);
                   title = candidates.find(isGoodTitle) || title;
                 }
@@ -2523,7 +3644,7 @@ class ActionHandlers:
                 const repo = lower.split("/")[1] || "";
                 const blockedOwners = new Set([
                   "about", "apps", "collections", "contact", "customer-stories", "enterprise",
-                  "enterprises", "events", "explore", "features", "github", "login", "marketplace",
+                  "enterprises", "events", "explore", "features", "login", "marketplace",
                   "new", "notifications", "orgs", "organizations", "pricing", "search", "security",
                   "settings", "signup", "sponsors", "topics"
                 ]);
@@ -2775,6 +3896,58 @@ class ActionHandlers:
         return [required_terms] if required_terms else []
 
     @classmethod
+    def _filter_structured_rows_by_condition(cls, *, rows: list[dict[str, Any]], condition: Any) -> list[dict[str, Any]]:
+        term_groups = cls._condition_term_groups(condition)
+        if not term_groups:
+            return rows
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            haystack = " ".join(
+                [
+                    str(row.get("text", "")),
+                    " ".join(str(cell) for cell in row.get("cells", []) or []),
+                    " ".join(str(value) for value in (row.get("fields_by_header") or {}).values()),
+                    " ".join(str(value) for key, value in row.items() if key not in {"cells", "headers", "fields_by_header"}),
+                ]
+            ).casefold()
+            if any(all(term.casefold() in haystack for term in terms) for terms in term_groups):
+                matched.append(row)
+        return matched
+
+    @staticmethod
+    def _extract_budget_from_goal_or_args(*, args: dict, runtime_state=None) -> float | None:
+        for key in ("budget", "max_price", "price_lte"):
+            value = args.get(key)
+            if value is None:
+                continue
+            normalized = ActionHandlers._normalize_price_token(str(value))
+            if normalized is not None:
+                return float(normalized)
+        goal = str((runtime_state or {}).get("user_goal", "")) if isinstance(runtime_state, dict) else ""
+        match = re.search(r"(?:до|under|below|<=|less than)\s*([0-9][0-9\s.,]*)\s*(?:₽|руб|р\.?|rub)?", goal, flags=re.IGNORECASE)
+        if match:
+            normalized = ActionHandlers._normalize_price_token(match.group(1))
+            return float(normalized) if normalized is not None else None
+        return None
+
+    @staticmethod
+    def _normalize_price_token(value: str) -> float | None:
+        text = str(value or "")
+        match = re.search(r"([0-9][0-9\s.,]*)", text)
+        if not match:
+            return None
+        token = match.group(1).replace("\u00a0", " ").replace("\u202f", " ")
+        token = re.sub(r"\s+", "", token)
+        if "," in token and "." in token:
+            token = token.replace(".", "").replace(",", ".")
+        elif "," in token:
+            token = token.replace(",", ".")
+        try:
+            return float(token)
+        except ValueError:
+            return None
+
+    @classmethod
     def _filter_rows_by_pattern_literals(cls, *, rows: list[dict[str, Any]], pattern: str) -> list[dict[str, Any]]:
         terms = cls._literal_terms_from_pattern(pattern)
         if not terms:
@@ -2823,10 +3996,100 @@ class ActionHandlers:
         payload.update(aliases)
         return payload
 
+    @classmethod
+    def _requested_table_headers(cls, *, args: dict, runtime_state=None) -> list[str]:
+        explicit = (
+            args.get("columns")
+            or args.get("headers")
+            or args.get("required_headers")
+            or args.get("fields")
+        )
+        headers = cls._normalize_requested_header_list(explicit)
+        if headers:
+            return headers
+        goal = str((runtime_state or {}).get("user_goal", "") or "")
+        if not goal:
+            return []
+        marker_match = re.search(
+            r"(?:columns?|headers?|fields?|колонк\w*|столбц\w*|пол\w*)\s*[:：]?\s+([^.;\n]+)",
+            goal,
+            flags=re.IGNORECASE,
+        )
+        if not marker_match:
+            return []
+        return cls._normalize_requested_header_list(marker_match.group(1))
+
+    @staticmethod
+    def _normalize_requested_header_list(value: Any) -> list[str]:
+        if isinstance(value, dict):
+            raw_items = list(value.keys())
+        elif isinstance(value, list):
+            raw_items = value
+        elif isinstance(value, str):
+            raw_items = re.split(r",|;|\band\b|\bor\b|\bи\b|\bили\b", value, flags=re.IGNORECASE)
+        else:
+            raw_items = []
+        stop_words = {
+            "with",
+            "columns",
+            "column",
+            "headers",
+            "header",
+            "fields",
+            "field",
+            "колонками",
+            "колонки",
+            "колонка",
+            "полями",
+            "поля",
+        }
+        headers: list[str] = []
+        for item in raw_items:
+            header = str(item or "").strip().strip("`'\"“”«»()[]{}")
+            header = re.sub(r"\s+", " ", header)
+            header = header.strip(" .,:;-")
+            if not header:
+                continue
+            if header.casefold() in stop_words:
+                continue
+            if len(header) > 60:
+                continue
+            if not re.search(r"[A-Za-zА-Яа-яЁё0-9]", header):
+                continue
+            if header not in headers:
+                headers.append(header)
+        return headers
+
+    @classmethod
+    def _filter_table_rows_by_requested_headers(
+        cls,
+        *,
+        rows: list[dict[str, Any]],
+        requested_headers: list[str],
+    ) -> list[dict[str, Any]]:
+        requested = [cls._normalize_header_match_key(header) for header in requested_headers]
+        requested = [header for header in requested if header]
+        if not requested:
+            return rows
+        matched: list[dict[str, Any]] = []
+        for row in rows:
+            row_headers = [cls._normalize_header_match_key(header) for header in row.get("headers", []) or []]
+            row_headers = [header for header in row_headers if header]
+            if row_headers and all(
+                any(required == header or required in header or header in required for header in row_headers)
+                for required in requested
+            ):
+                matched.append(row)
+        return matched or rows
+
+    @staticmethod
+    def _normalize_header_match_key(value: str) -> str:
+        return re.sub(r"[^\wА-Яа-яЁё]+", "", str(value or "").casefold(), flags=re.UNICODE)
+
     @staticmethod
     def _header_alias(header: str) -> str:
         normalized = header.strip().casefold()
-        if any(token in normalized for token in ["numeric", "digit", "number", "циф", "С†РёС„"]):
+        if any(token in normalized for token in ["numeric", "digit", "number", "циф"]):
             return "numeric_code"
         if any(token in normalized for token in ["букв", "currency", "code", "код"]) and "циф" not in normalized:
             return "currency"
@@ -3269,6 +4532,45 @@ class ActionHandlers:
         )
         return [list(row) for row in (rows or []) if isinstance(row, list) and len(row) >= 2]
 
+    async def _extract_table_rows_as_dicts(self, *, page, limit: int) -> list[dict[str, Any]]:
+        rows = await page.evaluate(
+            """
+            ({ limit }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const tables = Array.from(document.querySelectorAll("table"));
+              const results = [];
+              for (const table of tables) {
+                const allRows = Array.from(table.querySelectorAll("tr"));
+                let headers = [];
+                const headerRow = allRows.find((tr) => tr.querySelectorAll("th").length >= 2);
+                if (headerRow) {
+                  headers = Array.from(headerRow.querySelectorAll("th,td")).map((cell) => norm(cell.innerText || cell.textContent || "")).filter(Boolean);
+                }
+                for (const tr of allRows) {
+                  const cells = Array.from(tr.querySelectorAll("td,th")).map((cell) => norm(cell.innerText || cell.textContent || "")).filter(Boolean);
+                  if (cells.length < 2) continue;
+                  if (headers.length && cells.join("|") === headers.join("|")) continue;
+                  results.push({
+                    headers,
+                    cells,
+                    text: cells.join(" "),
+                    row_id: `table_row_${results.length + 1}`
+                  });
+                  if (results.length >= limit) return results;
+                }
+              }
+              return results;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        normalized: list[dict[str, Any]] = []
+        for row in rows or []:
+            if not isinstance(row, dict):
+                continue
+            normalized.append(self._build_row_payload(row))
+        return normalized
+
     async def _extract_table_like_rows(self, *, page, limit: int) -> list[list[str]]:
         table_like = await page.evaluate(
             """
@@ -3454,53 +4756,6 @@ class ActionHandlers:
             if item:
                 items.append(item)
         return items
-
-    @classmethod
-    def _project_structured_objects_to_fields(
-        cls,
-        *,
-        objects: list[dict[str, Any]],
-        fields: Any,
-        limit: int,
-    ) -> list[dict[str, Any]]:
-        if not objects:
-            return []
-        if isinstance(fields, dict) and fields:
-            names = [str(name).strip() for name in fields.keys() if str(name).strip()]
-        elif isinstance(fields, list) and fields:
-            names = [str(name).strip() for name in fields if str(name).strip()]
-        else:
-            names = ["name", "date", "href", "text"]
-
-        items: list[dict[str, Any]] = []
-        for source in objects[: max(limit, 1)]:
-            item: dict[str, Any] = {}
-            for field_name in names:
-                mapped = cls._map_structured_field_from_object(source=source, field_name=field_name)
-                if mapped is not None and mapped != "":
-                    item[field_name] = mapped
-            if item:
-                items.append(item)
-        return items
-
-    @classmethod
-    def _map_structured_field_from_object(cls, *, source: dict[str, Any], field_name: str) -> Any:
-        key = str(field_name or "").strip().lower()
-        if not key:
-            return None
-        if source.get(key) not in (None, ""):
-            return source.get(key)
-        if key in {"name", "title"}:
-            return source.get("title") or source.get("name") or source.get("version") or source.get("text")
-        if "version" in key:
-            return source.get("version") or cls._extract_version_like_token(str(source.get("raw_text", "")))
-        if "date" in key:
-            return source.get("date") or cls._extract_date_like_token(str(source.get("raw_text", "")))
-        if key in {"href", "url", "link"} or "href" in key or "url" in key:
-            return source.get("href")
-        if "text" in key or "raw" in key or "detail" in key or "description" in key:
-            return source.get("text") or source.get("raw_text")
-        return source.get("text") or source.get("raw_text")
 
     @classmethod
     def _score_structured_fallback_quality(cls, *, items: list[dict[str, Any]], limit: int, fallback_kind: str) -> dict[str, Any]:
@@ -3690,24 +4945,6 @@ class ActionHandlers:
             if normalized:
                 lines.append(normalized)
         return lines
-
-    @classmethod
-    def _find_heading_index(cls, lines: list[str], *, heading_text: str, ignore_case: bool) -> int | None:
-        target = cls._normalize_line(heading_text)
-        if not target:
-            return None
-        if ignore_case:
-            target_cmp = target.lower()
-            for idx, line in enumerate(lines):
-                candidate = cls._normalize_line(line).lower()
-                if candidate == target_cmp or target_cmp in candidate:
-                    return idx
-            return None
-        for idx, line in enumerate(lines):
-            candidate = cls._normalize_line(line)
-            if candidate == target or target in candidate:
-                return idx
-        return None
 
     @classmethod
     def _looks_like_heading_line(cls, line: str) -> bool:

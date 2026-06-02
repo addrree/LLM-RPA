@@ -26,6 +26,8 @@ class LLMArtifact(BaseModel):
 
 class ExecutionResult(BaseModel):
     status: str
+    partial_success: bool = False
+    missing_fields: List[str] = Field(default_factory=list)
     extracted_data: Dict[str, Any] = Field(default_factory=dict)
     final_url: Optional[str] = None
     page_title: Optional[str] = None
@@ -40,3 +42,5 @@ class ExecutionResult(BaseModel):
     technical_failure: bool = False
     retry_artifacts: List[Dict[str, Any]] = Field(default_factory=list)
     used_skills: List[str] = Field(default_factory=list)
+    blocked_or_limited_status: Optional[Dict[str, Any]] = None
+    rate_limit_detected: bool = False

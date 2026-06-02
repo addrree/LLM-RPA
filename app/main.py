@@ -18,7 +18,7 @@ from app.benchmark import (
 )
 from app.executor.playwright_executor import PlaywrightExecutor
 from app.orchestrator.persistence import export_results, save_artifacts
-from app.orchestrator.workflow_manager import WorkflowManager
+from app.orchestrator.workflow_manager import WorkflowManager, WorkflowStageError
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
 from app.utils.llm_client import LLMClient, LLMClientError
@@ -28,13 +28,15 @@ from app.verifier.llm_verifier import LLMVerifier
 UTC = timezone.utc
 
 
-def build_llm_client(backend: str | None = None):
+def build_llm_client(backend: str | None = None, timeout_sec: int | None = None):
     selected_backend = (backend or os.getenv("LLM_BACKEND", "ollama")).strip().lower()
 
     return LLMClient(
         backend=selected_backend,
         planner_model=os.getenv("OLLAMA_PLANNER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
         verifier_model=os.getenv("OLLAMA_VERIFIER_MODEL", os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")),
+        vision_model=os.getenv("OLLAMA_VISION_MODEL", os.getenv("OLLAMA_VERIFIER_VISION_MODEL", "")),
+        timeout_sec=timeout_sec,
         ollama_base_url=os.getenv(
             "OLLAMA_BASE_URL",
             "https://ollama.com" if selected_backend == "ollama_cloud" else "http://localhost:11434",
@@ -42,7 +44,16 @@ def build_llm_client(backend: str | None = None):
     )
 
 
-def build_workflow(*, llm_client, show_browser: bool, slow_mo: int, record_video: bool, two_stage_planning: bool, interaction_mode: str = "plan"):
+def build_workflow(
+    *,
+    llm_client,
+    show_browser: bool,
+    slow_mo: int,
+    record_video: bool,
+    two_stage_planning: bool,
+    interaction_mode: str = "plan",
+    max_corrective_retries: int | None = None,
+):
     return WorkflowManager(
         planner=Planner(llm_client),
         validator=PlanValidator(),
@@ -51,7 +62,20 @@ def build_workflow(*, llm_client, show_browser: bool, slow_mo: int, record_video
         replanner=Replanner(llm_client),
         two_stage_planning=two_stage_planning,
         interaction_mode=interaction_mode,
+        max_corrective_retries=max_corrective_retries,
     )
+
+
+def effective_llm_timeout_sec(
+    *,
+    llm_timeout_sec: int | None,
+    task_timeout_sec: int | None,
+) -> int | None:
+    if llm_timeout_sec is not None:
+        return llm_timeout_sec if llm_timeout_sec > 0 else None
+    if task_timeout_sec and task_timeout_sec > 0:
+        return max(10, min(300, task_timeout_sec))
+    return None
 
 
 async def run(
@@ -63,10 +87,19 @@ async def run(
     export_formats: list[str] | None = None,
     two_stage_planning: bool = False,
     interaction_mode: str = "plan",
+    max_corrective_retries: int | None = None,
+    task_timeout_sec: int | None = None,
+    llm_timeout_sec: int | None = None,
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
-    llm_client = build_llm_client(backend=backend)
+    llm_client = build_llm_client(
+        backend=backend,
+        timeout_sec=effective_llm_timeout_sec(
+            llm_timeout_sec=llm_timeout_sec,
+            task_timeout_sec=task_timeout_sec,
+        ),
+    )
 
     workflow = build_workflow(
         llm_client=llm_client,
@@ -75,9 +108,16 @@ async def run(
         record_video=record_video,
         two_stage_planning=two_stage_planning,
         interaction_mode=interaction_mode,
+        max_corrective_retries=max_corrective_retries,
     )
 
-    result = await workflow.run(user_goal)
+    try:
+        if task_timeout_sec and task_timeout_sec > 0:
+            result = await asyncio.wait_for(workflow.run(user_goal), timeout=task_timeout_sec)
+        else:
+            result = await workflow.run(user_goal)
+    except asyncio.TimeoutError as exc:
+        raise WorkflowStageError("timeout", f"Workflow exceeded task_timeout_sec={task_timeout_sec}") from exc
     run_id = datetime.now(UTC).strftime("%Y%m%d_%H%M%S")
 
     artifact_paths = save_artifacts(result, run_id=run_id)
@@ -117,10 +157,19 @@ async def run_benchmark(
     two_stage_planning: bool,
     benchmark_runs: int,
     interaction_mode: str = "plan",
+    max_corrective_retries: int | None = None,
+    task_timeout_sec: int | None = None,
+    llm_timeout_sec: int | None = None,
 ):
     export_formats = export_formats or ["json"]
     export_formats = list(dict.fromkeys(export_formats))
-    llm_client = build_llm_client(backend=backend)
+    llm_client = build_llm_client(
+        backend=backend,
+        timeout_sec=effective_llm_timeout_sec(
+            llm_timeout_sec=llm_timeout_sec,
+            task_timeout_sec=task_timeout_sec,
+        ),
+    )
     suite = load_scenario_suite(suite_path)
 
     runner = BenchmarkRunner(
@@ -131,8 +180,10 @@ async def run_benchmark(
             record_video=record_video,
             two_stage_planning=two_stage_planning,
             interaction_mode=interaction_mode,
+            max_corrective_retries=max_corrective_retries,
         ),
         export_formats=export_formats,
+        task_timeout_sec=task_timeout_sec,
     )
     selection = BenchmarkSelection(scenario_ids=scenario_ids, categories=categories)
     run_reports = []
@@ -153,6 +204,13 @@ async def run_benchmark(
         print("\nMULTI-RUN SUMMARY:")
         print(json.dumps(summary.model_dump(mode="json"), ensure_ascii=False, indent=2))
         print(f"- json: {summary_path}")
+
+
+def non_negative_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("must be >= 0")
+    return parsed
 
 
 def parse_args():
@@ -194,6 +252,26 @@ def parse_args():
         choices=["plan", "observe_action"],
         default="plan",
         help="Use the existing planning pipeline or opt-in observe/action loop",
+    )
+    parser.add_argument(
+        "--max-corrective-retries",
+        "--max-verification-retries",
+        dest="max_corrective_retries",
+        type=non_negative_int,
+        default=None,
+        help="Upper bound for corrective replanning attempts after verifier rejection. Use 0 to disable them.",
+    )
+    parser.add_argument(
+        "--task-timeout-sec",
+        type=non_negative_int,
+        default=None,
+        help="Upper bound for one app.main workflow run. Use 0 to disable it.",
+    )
+    parser.add_argument(
+        "--llm-timeout-sec",
+        type=non_negative_int,
+        default=None,
+        help="Per-request LLM HTTP timeout. Use 0 to keep OLLAMA_TIMEOUT_SEC.",
     )
     parser.add_argument(
         "--export-format",
@@ -269,6 +347,9 @@ if __name__ == "__main__":
                     two_stage_planning=args.two_stage_planning,
                     benchmark_runs=max(args.benchmark_runs, 1),
                     interaction_mode=args.interaction_mode,
+                    max_corrective_retries=args.max_corrective_retries,
+                    task_timeout_sec=args.task_timeout_sec,
+                    llm_timeout_sec=args.llm_timeout_sec,
                 )
             )
         else:
@@ -282,6 +363,9 @@ if __name__ == "__main__":
                     export_formats=args.export_format,
                     two_stage_planning=args.two_stage_planning,
                     interaction_mode=args.interaction_mode,
+                    max_corrective_retries=args.max_corrective_retries,
+                    task_timeout_sec=args.task_timeout_sec,
+                    llm_timeout_sec=args.llm_timeout_sec,
                 )
             )
     except LLMClientError as exc:
@@ -289,3 +373,5 @@ if __name__ == "__main__":
             "LLM backend error: no fallback was used, planning/verifying requires a working backend. "
             f"Details: {exc}"
         )
+    except WorkflowStageError as exc:
+        raise SystemExit(f"{exc.stage}_failed: {exc}") from None

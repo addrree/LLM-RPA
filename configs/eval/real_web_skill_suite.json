@@ -62,7 +62,7 @@
       "goal": "Открой РБК и выгрузи несколько главных новостей: заголовок, ссылку и раздел, если он виден.",
       "expected_fields": ["news[]"],
       "expected_skills": ["observe_page", "extract_structured_items", "extract_visible_links"],
-      "allowed_controlled_outcomes": ["success", "skipped_unavailable", "skipped_http_401", "skipped_http_403"],
+      "allowed_controlled_outcomes": ["success", "skipped_unavailable", "skipped_http_401", "skipped_http_403", "skipped_access_denied"],
       "default_enabled": true
     },
     {
@@ -113,7 +113,7 @@
       "goal": "Открой GitHub, найди репозитории по запросу \"browser automation python\" и выгрузи первые результаты: название репозитория, описание и ссылку.",
       "expected_fields": ["repositories[]"],
       "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_visible_links"],
-      "allowed_controlled_outcomes": ["success", "skipped_unavailable", "skipped_auth_required", "skipped_antibot"],
+      "allowed_controlled_outcomes": ["success", "skipped_unavailable", "skipped_auth_required", "skipped_antibot", "skipped_captcha_or_antibot", "skipped_http_403", "skipped_access_denied"],
       "default_enabled": true
     },
     {
@@ -124,6 +124,7 @@
       "goal": "Открой PyPI, найди пакет \"playwright\" и выгрузи название пакета, последнюю версию и краткое описание.",
       "expected_fields": ["package_name", "version", "description"],
       "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_value_near_anchor", "extract_structured_items"],
+      "allowed_controlled_outcomes": ["success", "skipped_captcha_or_antibot", "skipped_http_403", "skipped_access_denied"],
       "default_enabled": true
     },
     {
@@ -156,7 +157,7 @@
       "expected_fields": ["products[]"],
       "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_by_intent"],
       "notes": "Marketplace scenario. May be skipped if captcha/anti-bot/geoblock occurs.",
-      "allowed_controlled_outcomes": ["success", "partial_success", "skipped_captcha_or_antibot", "skipped_unavailable", "preflight_unavailable"],
+      "allowed_controlled_outcomes": ["success", "partial_success", "skipped_captcha_or_antibot", "skipped_unavailable", "preflight_unavailable", "skipped_http_403", "skipped_access_denied"],
       "optional": true,
       "default_enabled": false
     },
@@ -169,7 +170,7 @@
       "expected_fields": ["products[]"],
       "expected_skills": ["observe_page", "fill_by_semantic_target", "click_by_semantic_target", "extract_structured_items", "extract_by_intent"],
       "notes": "Alternative marketplace scenario. May be captcha/anti-bot.",
-      "allowed_controlled_outcomes": ["success", "partial_success", "skipped_captcha_or_antibot", "skipped_unavailable", "preflight_unavailable"],
+      "allowed_controlled_outcomes": ["success", "partial_success", "skipped_captcha_or_antibot", "skipped_unavailable", "preflight_unavailable", "skipped_http_403", "skipped_access_denied"],
       "optional": true,
       "default_enabled": false
     }

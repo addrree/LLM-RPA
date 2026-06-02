@@ -1,8 +1,9 @@
+import json
 from urllib.parse import urlparse
 import re
 
 from app.config import GLOBAL_MAX_REPLANS, GLOBAL_MAX_STEPS, GLOBAL_MAX_VERIFICATION_RETRIES, GLOBAL_TIMEOUT_SEC
-from app.planner.action_vocab import CANONICAL_ACTIONS
+from app.planner.action_vocab import CANONICAL_ACTIONS, normalize_intent_alias
 from app.schemas.task_spec import TaskSpec
 
 
@@ -21,11 +22,20 @@ class PlanValidator:
         self,
         plan: TaskSpec,
         allowed_actions: set[str] | None = None,
+        allowed_intents: set[str] | None = None,
+        forbidden_actions: set[str] | None = None,
+        profile_diagnostics: dict | None = None,
         benchmark_context: dict | None = None,
     ) -> None:
         self._validate_steps_not_empty(plan)
         self._validate_step_count(plan)
-        self._validate_actions(plan, allowed_actions=allowed_actions)
+        self._validate_actions(
+            plan,
+            allowed_actions=allowed_actions,
+            allowed_intents=allowed_intents,
+            forbidden_actions=forbidden_actions,
+            profile_diagnostics=profile_diagnostics,
+        )
         self._validate_step_order(plan)
         self._validate_finish_step(plan)
         self._validate_constraints(plan)
@@ -41,10 +51,36 @@ class PlanValidator:
         if len(plan.steps) > GLOBAL_MAX_STEPS:
             raise PlanValidationError("Plan exceeds global step limit.")
 
-    def _validate_actions(self, plan: TaskSpec, allowed_actions: set[str] | None = None) -> None:
+    def _validate_actions(
+        self,
+        plan: TaskSpec,
+        allowed_actions: set[str] | None = None,
+        allowed_intents: set[str] | None = None,
+        forbidden_actions: set[str] | None = None,
+        profile_diagnostics: dict | None = None,
+    ) -> None:
         effective_allowed_actions = allowed_actions or ALLOWED_ACTIONS
+        effective_forbidden_actions = forbidden_actions or set()
         for step in plan.steps:
+            if step.action in effective_forbidden_actions:
+                raise PlanValidationError(
+                    self._profile_failure_message(
+                        profile_diagnostics=profile_diagnostics,
+                        invalid_action=step.action,
+                        allowed_actions=effective_allowed_actions,
+                        allowed_intents=allowed_intents,
+                    )
+                )
             if step.action not in effective_allowed_actions:
+                if profile_diagnostics:
+                    raise PlanValidationError(
+                        self._profile_failure_message(
+                            profile_diagnostics=profile_diagnostics,
+                            invalid_action=step.action,
+                            allowed_actions=effective_allowed_actions,
+                            allowed_intents=allowed_intents,
+                        )
+                    )
                 raise PlanValidationError(f"Unsupported action: {step.action}")
 
             if step.action == "open_url" and not step.args.get("url"):
@@ -100,6 +136,17 @@ class PlanValidator:
             if step.action == "observe_page" and not step.save_as:
                 raise PlanValidationError("observe_page requires 'save_as'")
             if step.action == "extract_by_intent":
+                if allowed_intents is not None:
+                    intent = normalize_intent_alias(step.args.get("intent", ""))
+                    if intent and intent not in allowed_intents:
+                        raise PlanValidationError(
+                            self._profile_failure_message(
+                                profile_diagnostics=profile_diagnostics,
+                                invalid_intent=intent,
+                                allowed_actions=effective_allowed_actions,
+                                allowed_intents=allowed_intents,
+                            )
+                        )
                 self._validate_extract_by_intent_args(step.args, step.save_as)
             if step.action == "extract_visible_links":
                 self._validate_output_action(step.action, step.args, step.save_as)
@@ -119,6 +166,27 @@ class PlanValidator:
                 self._validate_visual_extract_object_count_args(step.args, step.save_as)
             if step.action == "visual_click_by_geometry":
                 self._validate_visual_click_by_geometry_args(step.args)
+
+    @staticmethod
+    def _profile_failure_message(
+        *,
+        profile_diagnostics: dict | None,
+        allowed_actions: set[str],
+        allowed_intents: set[str] | None,
+        invalid_action: str | None = None,
+        invalid_intent: str | None = None,
+    ) -> str:
+        diagnostics = {
+            "failure_stage": "planner_validation_failed",
+            "task_type": (profile_diagnostics or {}).get("task_type"),
+            "invalid_action": invalid_action,
+            "invalid_intent": invalid_intent,
+            "allowed_actions": sorted(allowed_actions),
+            "preferred_runtime_intents": sorted(allowed_intents or set()),
+            "conceptual_profile_intents": (profile_diagnostics or {}).get("conceptual_profile_intents", []),
+            "full_vocabulary_was_used": (profile_diagnostics or {}).get("full_vocabulary_was_used", False),
+        }
+        return f"planner_validation_failed: {json.dumps(diagnostics, ensure_ascii=False)}"
 
     @staticmethod
     def _has_target_reference(args: dict) -> bool:

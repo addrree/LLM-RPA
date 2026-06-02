@@ -7,7 +7,7 @@ from playwright.async_api import async_playwright
 from app.config import SCREENSHOTS_DIR, VIDEOS_DIR
 from app.executor.action_handlers import ActionHandlers, StructuredExtractionError
 from app.schemas.execution import ExecutionResult, StepLog
-from app.schemas.task_spec import TaskSpec
+from app.schemas.task_spec import ActionStep, TaskSpec
 
 UTC = timezone.utc
 
@@ -157,7 +157,15 @@ class PlaywrightExecutor:
                     )
 
                     output_key = str(step.args.get("output_key", "")).strip()
-                    if step.save_as:
+                    if self._is_package_metadata_step(step) and isinstance(result, dict):
+                        for key, value in result.items():
+                            if str(key).strip() and value not in (None, "", [], {}):
+                                extracted_data[str(key)] = value
+                        metadata_key = step.save_as or output_key
+                        if metadata_key:
+                            extracted_data[str(metadata_key)] = result
+                        runtime_state["extracted_data"] = extracted_data
+                    elif step.save_as:
                         extracted_data[step.save_as] = result
                         runtime_state["extracted_data"] = extracted_data
                     elif step.action in self.OUTPUT_KEY_ACTIONS and output_key:
@@ -236,14 +244,19 @@ class PlaywrightExecutor:
                 page_text_excerpt=text_excerpt,
                 screenshot_path=screenshot_path,
                 logs=logs,
-                    retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
-                    used_skills=list(runtime_state.get("used_skills", [])),
-                )
+                retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
+                used_skills=list(runtime_state.get("used_skills", [])),
+                blocked_or_limited_status=runtime_state.get("blocked_or_limited_status"),
+                rate_limit_detected=bool(runtime_state.get("rate_limit_detected", False)),
+            )
 
         except Exception as e:
             failure_details = {}
+            structured_failure_type = None
             if isinstance(e, StructuredExtractionError):
                 failure_details = {"code": e.code, **(e.details or {})}
+                if e.code:
+                    structured_failure_type = e.code
             if session and session.get("context") is not None:
                 trace_path = VIDEOS_DIR / f"trace_failure_{datetime.now(UTC).strftime('%Y%m%d_%H%M%S')}.zip"
                 try:
@@ -301,8 +314,15 @@ class PlaywrightExecutor:
             if owns_session:
                 await self._close_session(session)
 
+            failure_type = structured_failure_type or self._classify_failure_type(str(e))
+            skipped_failure = str(failure_type or "").startswith("skipped_")
+            useful_extracted_data = self._has_useful_extracted_data(extracted_data)
+            partial_success = useful_extracted_data and not skipped_failure
+            result_status = "skipped" if skipped_failure else ("partial_success" if partial_success else "failed")
+
             return ExecutionResult(
-                status="failed",
+                status=result_status,
+                partial_success=partial_success,
                 extracted_data=extracted_data,
                 final_url=final_url,
                 page_title=page_title,
@@ -310,13 +330,15 @@ class PlaywrightExecutor:
                 screenshot_path=screenshot_path,
                 logs=logs,
                 error_message=str(e),
-                failure_type=self._classify_failure_type(str(e)),
+                failure_type=failure_type,
                 failed_action=current_step.action if current_step else (logs[-1].action if logs else None),
                 failed_args=dict(current_step.args) if current_step else {},
                 failure_details=failure_details,
                 technical_failure=self._is_technical_failure(str(e)),
                 retry_artifacts=list(runtime_state.get("retry_artifacts", [])),
                 used_skills=list(runtime_state.get("used_skills", [])),
+                blocked_or_limited_status=runtime_state.get("blocked_or_limited_status"),
+                rate_limit_detected=bool(runtime_state.get("rate_limit_detected", False)),
             )
 
     async def _run_step_with_browser_retries(self, *, page, session, step, runtime_state, logs):
@@ -408,6 +430,35 @@ class PlaywrightExecutor:
     def _is_technical_failure(message: str) -> bool:
         text = message.lower()
         return any(token in text for token in ["timeout", "net::", "navigation", "target closed", "detached", "browser"])
+
+    @staticmethod
+    def _is_package_metadata_step(step: ActionStep) -> bool:
+        if step.action != "extract_by_intent":
+            return False
+        intent = str(step.args.get("intent", "") or "").strip().casefold()
+        return intent in {"package", "package_metadata", "package_info", "library_metadata"}
+
+    @staticmethod
+    def _has_useful_extracted_data(extracted_data: dict[str, Any]) -> bool:
+        if not isinstance(extracted_data, dict) or not extracted_data:
+            return False
+        for value in extracted_data.values():
+            if value is None:
+                continue
+            if isinstance(value, str):
+                if value.strip():
+                    return True
+                continue
+            if isinstance(value, (list, tuple, set)):
+                if value:
+                    return True
+                continue
+            if isinstance(value, dict):
+                if any(item not in (None, "", [], {}) for item in value.values()):
+                    return True
+                continue
+            return True
+        return False
 
     @classmethod
     def _classify_failure_type(cls, message: str) -> str:

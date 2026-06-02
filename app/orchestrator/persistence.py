@@ -37,6 +37,7 @@ def save_artifacts(result: dict, run_id: str) -> dict:
     _write_json(
         diagnostics_path,
         {
+            "runtime_diagnostics": result.get("runtime_diagnostics", {}),
             "retry_artifacts": execution_json.get("retry_artifacts", []),
             "failed_action": execution_json.get("failed_action"),
             "failed_args": execution_json.get("failed_args", {}),

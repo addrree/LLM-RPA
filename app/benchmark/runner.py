@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+import asyncio
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -18,7 +19,7 @@ from app.orchestrator.persistence import export_results, save_artifacts
 from app.orchestrator.workflow_manager import WorkflowStageError
 
 UTC = timezone.utc
-VALID_FAILURE_STAGES = {"planning", "validation", "execution", "verification", "export"}
+VALID_FAILURE_STAGES = {"planning", "validation", "execution", "verification", "export", "timeout"}
 
 
 class BenchmarkScenarioResult(BaseModel):
@@ -90,9 +91,11 @@ class BenchmarkRunner:
         self,
         workflow_factory: Callable[[], object],
         export_formats: list[str] | None = None,
+        task_timeout_sec: int | None = None,
     ):
         self.workflow_factory = workflow_factory
         self.export_formats = export_formats or ["json"]
+        self.task_timeout_sec = int(task_timeout_sec) if task_timeout_sec and task_timeout_sec > 0 else None
 
     async def run_suite(self, suite: ScenarioSuite, selection: BenchmarkSelection | None = None) -> BenchmarkRunReport:
         filtered = self._filter_scenarios(suite.scenarios, selection)
@@ -145,10 +148,14 @@ class BenchmarkRunner:
                 expected_item_fields=scenario.expected_item_fields,
                 required_top_level_fields=scenario.required_top_level_fields,
             )
-            result = await workflow.run(
+            workflow_coro = workflow.run(
                 self._build_grounded_goal(scenario, allowed_actions=benchmark_context["allowed_actions"]),
                 benchmark_context=benchmark_context,
             )
+            if self.task_timeout_sec is not None:
+                result = await asyncio.wait_for(workflow_coro, timeout=self.task_timeout_sec)
+            else:
+                result = await workflow_coro
             execution = result["execution_result"]
             verdict = result["verdict"]
             execution_status = execution.status
@@ -201,6 +208,9 @@ class BenchmarkRunner:
                     initial_plan_valid = False
                 if final_plan_valid is None:
                     final_plan_valid = False
+        except asyncio.TimeoutError:
+            failure_stage = "timeout"
+            error_message = f"Scenario exceeded task_timeout_sec={self.task_timeout_sec}"
         except Exception as exc:  # noqa: BLE001
             error_message = str(exc)
             if failure_stage is None:

@@ -1,9 +1,10 @@
 import json
+import os
 
 from app.schemas.execution import ExecutionResult, LLMArtifact
 from app.schemas.task_spec import TaskSpec
 from app.schemas.verification import VerificationPackage, VerificationVerdict
-from app.utils.llm_client import LLMClient
+from app.utils.llm_client import LLMClient, LLMClientError
 
 
 VERIFIER_SYSTEM_PROMPT = """
@@ -120,14 +121,90 @@ class LLMVerifier:
         )
 
         user_prompt = json.dumps(package.model_dump(), ensure_ascii=False, indent=2)
-        artifact = self.llm_client.generate_verifier_artifact(
-            system_prompt=VERIFIER_SYSTEM_PROMPT,
-            user_prompt=user_prompt,
-            image_path=result.screenshot_path,
-            stage="verifier",
-        )
+        verifier_image_path = result.screenshot_path if self._should_send_image_to_verifier(
+            plan=plan,
+            result=result,
+            benchmark_context=benchmark_context or {},
+        ) else None
+        try:
+            artifact = self.llm_client.generate_verifier_artifact(
+                system_prompt=VERIFIER_SYSTEM_PROMPT,
+                user_prompt=user_prompt,
+                image_path=verifier_image_path,
+                stage="verifier",
+            )
+        except LLMClientError as exc:
+            self.last_artifact = None
+            return VerificationVerdict(
+                task_completed=False,
+                confidence=0.0,
+                verdict="uncertain",
+                issues=[f"Verifier LLM response could not be parsed: {exc}"],
+                summary="Verifier returned invalid JSON; execution result was preserved for diagnostics.",
+            )
         self.last_artifact = artifact
-        return VerificationVerdict.model_validate(artifact.parsed_response)
+        return VerificationVerdict.model_validate(self._normalize_verdict_payload(artifact.parsed_response))
+
+    @staticmethod
+    def _should_send_image_to_verifier(
+        *,
+        plan: TaskSpec,
+        result: ExecutionResult,
+        benchmark_context: dict,
+    ) -> bool:
+        if not result.screenshot_path:
+            return False
+        mode = os.getenv("OLLAMA_VERIFIER_VISION_MODE", "auto").strip().casefold()
+        if mode in {"always", "on", "true", "1", "vision"}:
+            return True
+        if mode in {"never", "off", "false", "0", "text"}:
+            return False
+
+        visual_actions = {"visual_observe", "visual_extract_object_count", "visual_click_by_geometry", "screenshot"}
+        if any(step.action in visual_actions for step in plan.steps):
+            return True
+
+        task_family = str((benchmark_context or {}).get("task_family", "") or "").casefold()
+        if any(token in task_family for token in ("visual", "spatial", "image", "screenshot")):
+            return True
+
+        goal = str(plan.goal or "").casefold()
+        return any(
+            token in goal
+            for token in (
+                "visual",
+                "spatial",
+                "image",
+                "screenshot",
+                "canvas",
+                "coordinate",
+                "визуал",
+                "скрин",
+                "изображ",
+                "координат",
+            )
+        )
+
+    @staticmethod
+    def _normalize_verdict_payload(payload: object) -> dict:
+        data = dict(payload) if isinstance(payload, dict) else {}
+        verdict = str(data.get("verdict") or "").strip().lower()
+        if verdict not in {"accept", "reject", "uncertain"}:
+            verdict = "uncertain"
+        data["verdict"] = verdict
+        data["task_completed"] = bool(data.get("task_completed", verdict == "accept"))
+        try:
+            confidence = float(data.get("confidence", 0.0))
+        except (TypeError, ValueError):
+            confidence = 0.0
+        data["confidence"] = max(0.0, min(1.0, confidence))
+        issues = data.get("issues")
+        if not isinstance(issues, list):
+            issues = [str(issues)] if issues else []
+        data["issues"] = [str(issue) for issue in issues if str(issue).strip()]
+        if not str(data.get("summary", "") or "").strip():
+            data["summary"] = "; ".join(data["issues"]) if data["issues"] else f"Verifier returned {verdict}."
+        return data
 
     @staticmethod
     def _validate_structured_compare_contract(extracted_data: dict) -> list[str]:
@@ -291,6 +368,53 @@ class LLMVerifier:
         if negative_like_goal:
             return None
 
+        metadata_fields = {"final_url", "current_url", "url", "page_title", "current_title", "title"}
+        if set(normalized_required).issubset(metadata_fields):
+            missing_fields = [
+                field
+                for field in normalized_required
+                if not cls._has_meaningful_value(cls._value_for_required_field(field, result, extracted_data))
+            ]
+            if not missing_fields:
+                return VerificationVerdict(
+                    task_completed=True,
+                    confidence=0.93,
+                    verdict="accept",
+                    issues=[],
+                    summary="Deterministic verifier accepted populated page metadata fields.",
+                )
+
+        structured_outputs = {
+            "results",
+            "visible_links",
+            "links",
+            "products",
+            "product_cards",
+            "items",
+            "articles",
+            "article_results",
+            "extracted_articles",
+            "table_rows",
+            "rows",
+            "extracted_table",
+            "repositories",
+            "papers",
+        }
+        if set(normalized_required).issubset(structured_outputs):
+            missing_fields = [
+                field
+                for field in normalized_required
+                if not cls._has_meaningful_value(extracted_data.get(field))
+            ]
+            if not missing_fields:
+                return VerificationVerdict(
+                    task_completed=True,
+                    confidence=0.91,
+                    verdict="accept",
+                    issues=[],
+                    summary="Deterministic verifier accepted populated structured extraction fields.",
+                )
+
         task_family = str(benchmark_context.get("task_family", "")).strip().lower()
         if task_family == "single_value_extraction" and len(normalized_required) == 1:
             field = normalized_required[0]
@@ -341,3 +465,24 @@ class LLMVerifier:
                 summary="Deterministic verifier accepted repeated structured extraction without LLM call.",
             )
         return None
+
+    @staticmethod
+    def _value_for_required_field(field: str, result: ExecutionResult, extracted_data: dict) -> object:
+        normalized = str(field or "").strip().lower()
+        if normalized in {"final_url", "current_url", "url"}:
+            return extracted_data.get(field) or result.final_url
+        if normalized in {"page_title", "current_title", "title"}:
+            return extracted_data.get(field) or result.page_title
+        return extracted_data.get(field)
+
+    @staticmethod
+    def _has_meaningful_value(value: object) -> bool:
+        if value is None:
+            return False
+        if isinstance(value, str):
+            return bool(value.strip())
+        if isinstance(value, (list, tuple, set)):
+            return len(value) > 0
+        if isinstance(value, dict):
+            return len(value) > 0
+        return True

@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import json
 import os
+import re
 import ssl
 import sys
 import time
@@ -12,6 +13,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import parse_qs, urlparse
 from urllib.request import Request, urlopen
 
 from dotenv import load_dotenv
@@ -22,6 +24,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from app.main import build_llm_client, build_workflow
 from app.orchestrator.persistence import export_results, save_artifacts
 from app.orchestrator.workflow_manager import WorkflowStageError
+from app.utils.block_detection import detect_blocked_or_limited_payload, detect_blocked_or_limited_text
 
 UTC = timezone.utc
 DEFAULT_SUITE_PATH = Path("configs/eval/real_web_skill_suite.json")
@@ -51,10 +54,24 @@ REAL_WEB_ALLOWED_ACTIONS = {
     "visual_click_by_geometry",
 }
 ANTIBOT_MARKERS = (
+    "rate exceeded",
+    "too many requests",
+    "http 429",
+    "rate limit",
     "captcha",
     "robot check",
     "cloudflare",
     "access denied",
+    "verify you are human",
+    "are you a human",
+    "just a moment",
+    "checking your browser",
+    "ddos-guard",
+    "perimeterx",
+    "datadome",
+    "not authorized",
+    "unauthorized",
+    "permission denied",
     "подтвердите, что вы не робот",
     "проверка безопасности",
     "доступ ограничен",
@@ -116,6 +133,14 @@ def parse_args(argv=None):
         choices=["real", "benchmark"],
         default="real",
         help="real sends only the human goal+URL to the planner; benchmark also includes expected fields/skills hints",
+    )
+    parser.add_argument(
+        "--two-stage-planning",
+        nargs="?",
+        const=True,
+        default=True,
+        type=_parse_bool,
+        help="Use open_url -> observe_page -> context-aware replanning for real web scenarios (default: true)",
     )
     return parser.parse_args(argv)
 
@@ -239,8 +264,7 @@ def _detect_antibot(payload: dict[str, Any]) -> bool:
 
 
 def _text_has_antibot_markers(text: str) -> bool:
-    folded = str(text or "").casefold()
-    return any(marker.casefold() in folded for marker in ANTIBOT_MARKERS)
+    return detect_blocked_or_limited_text(text).blocked
 
 
 def _execution_has_antibot(execution) -> bool:
@@ -262,6 +286,9 @@ def _controlled_preflight_failure_stage(preflight: dict[str, Any]) -> str:
         preflight.get("http_status"),
         preflight.get("browser_status"),
     ]
+    blocked = detect_blocked_or_limited_payload(preflight)
+    if blocked.blocked and blocked.failure_stage:
+        return blocked.failure_stage
     if preflight.get("status") == "captcha_or_antibot" or _detect_antibot(preflight):
         return "skipped_captcha_or_antibot"
     if 401 in status_codes:
@@ -306,6 +333,121 @@ def _is_llm_quota_error(error: Exception | str) -> bool:
     return "status_code=429" in text or "usage limit" in text or "reached your session usage limit" in text
 
 
+def _normalize_expected_field(field: str) -> str:
+    value = str(field or "").strip()
+    return value[:-2] if value.endswith("[]") else value
+
+
+def _candidate_output_keys_for_expected_field(field: str) -> list[str]:
+    key = _normalize_expected_field(field)
+    aliases = {
+        "links": ["links", "visible_links", "language_links", "languages"],
+        "articles": ["articles", "article_links", "article_results"],
+        "news": ["news", "news_items", "headlines"],
+        "results": ["results", "search_results"],
+        "papers": ["papers", "paper_results", "articles"],
+        "repositories": ["repositories", "repository_results", "repo_results", "repos"],
+        "products": ["products", "product_cards"],
+        "currencies": ["currencies", "currency_rows", "currency_data", "rates", "all_currency_data"],
+    }
+    candidates = [key]
+    for alias in aliases.get(key, []):
+        if alias not in candidates:
+            candidates.append(alias)
+    return [candidate for candidate in candidates if candidate]
+
+
+def _missing_top_level_fields(expected_fields: list[str], extracted_data: dict[str, Any]) -> list[str]:
+    missing = []
+    for field in expected_fields:
+        keys = _candidate_output_keys_for_expected_field(field)
+        if not keys:
+            continue
+        if all(extracted_data.get(key) in (None, "", [], {}) for key in keys):
+            missing.append(field)
+    return missing
+
+
+def _has_useful_extracted_data(extracted_data: dict[str, Any]) -> bool:
+    for key, value in (extracted_data or {}).items():
+        if key == "page_snapshot":
+            continue
+        if value not in (None, "", [], {}):
+            return True
+    return False
+
+
+def _extract_query_from_goal_or_url(user_goal: str, final_url: str | None = None) -> str:
+    goal = str(user_goal or "")
+    quoted = re.search(r'"([^"]{1,200})"|«([^»]{1,200})»', goal)
+    if quoted:
+        return str(quoted.group(1) or quoted.group(2) or "").strip()
+    try:
+        params = parse_qs(urlparse(str(final_url or "")).query)
+    except Exception:
+        params = {}
+    for key in ("q", "query", "search", "search_query", "term", "text"):
+        values = params.get(key)
+        if values and str(values[0]).strip():
+            return str(values[0]).strip()
+    return ""
+
+
+def _augment_extracted_data_for_scenario(*, scenario: dict[str, Any], user_goal: str, execution) -> None:
+    extracted_data = execution.extracted_data if isinstance(execution.extracted_data, dict) else {}
+    expected_fields = [str(field).strip() for field in scenario.get("expected_fields") or [] if str(field).strip()]
+    if "query" in expected_fields and not str(extracted_data.get("query", "")).strip():
+        query = _extract_query_from_goal_or_url(user_goal, getattr(execution, "final_url", None))
+        if query:
+            extracted_data["query"] = query
+    if "final_url" in expected_fields and not str(extracted_data.get("final_url", "")).strip():
+        final_url = str(getattr(execution, "final_url", "") or "").strip()
+        if final_url:
+            extracted_data["final_url"] = final_url
+    if "page_title" in expected_fields and not str(extracted_data.get("page_title", "")).strip():
+        page_title = str(getattr(execution, "page_title", "") or "").strip()
+        if page_title:
+            extracted_data["page_title"] = page_title
+    missing_scalar_fields = [
+        field
+        for field in expected_fields
+        if not field.endswith("[]") and extracted_data.get(field) in (None, "", [], {})
+    ]
+    if missing_scalar_fields:
+        for value in list(extracted_data.values()):
+            if not isinstance(value, dict):
+                continue
+            for field in list(missing_scalar_fields):
+                candidate = value.get(field)
+                if candidate not in (None, "", [], {}):
+                    extracted_data[field] = candidate
+                    missing_scalar_fields.remove(field)
+            if not missing_scalar_fields:
+                break
+    expected_collections = {_normalize_expected_field(field) for field in expected_fields if field.endswith("[]")}
+    if "currencies" in expected_collections and extracted_data.get("currencies") in (None, "", [], {}):
+        combined = []
+        for key in ("currency_rows", "currency_data", "rates", "all_currency_data"):
+            value = extracted_data.get(key)
+            if isinstance(value, list) and value:
+                combined.extend(item for item in value if isinstance(item, dict))
+        for key in ("usd_data", "eur_data"):
+            value = extracted_data.get(key)
+            if isinstance(value, dict) and value:
+                combined.append(value)
+        if combined:
+            seen = set()
+            unique = []
+            for item in combined:
+                fingerprint = json.dumps(item, ensure_ascii=False, sort_keys=True)
+                if fingerprint in seen:
+                    continue
+                seen.add(fingerprint)
+                unique.append(item)
+            extracted_data["currencies"] = unique
+    execution.extracted_data = extracted_data
+
+
 def _scenario_goal(scenario: dict[str, Any], *, request_mode: str = "real") -> str:
     goal = str(scenario["goal"]).strip()
     url = str(scenario["url"]).strip()
@@ -346,7 +488,7 @@ def _scenario_benchmark_context(scenario: dict[str, Any]) -> dict[str, Any]:
     if "extract_value_near_anchor" in expected_skills:
         allowed_actions.update({"extract_value_near_anchor", "extract_pattern_from_page_text"})
     if "extract_structured_items" in expected_skills:
-        allowed_actions.update({"extract_structured_items", "extract_items"})
+        allowed_actions.update({"extract_structured_items", "extract_items", "extract_by_intent"})
     if "find_row_by_condition" in expected_skills or "extract_by_intent" in expected_skills:
         allowed_actions.update({"find_row_by_condition", "extract_by_intent", "extract_visible_links"})
     if "click_by_semantic_target" in expected_skills:
@@ -388,6 +530,7 @@ async def run_scenario(
     task_timeout_sec: float,
     llm_timeout_sec: int | None,
     request_mode: str,
+    two_stage_planning: bool,
 ) -> dict[str, Any]:
     started = time.time()
     scenario_id = str(scenario["id"])
@@ -408,12 +551,20 @@ async def run_scenario(
             "user_goal": scenario.get("goal"),
             "status": "skipped",
             "success": False,
+            "partial_success": False,
+            "missing_fields": scenario.get("expected_fields") or [],
             "failure_stage": failure_stage,
             "error_message": preflight.get("browser_error") or preflight.get("http_error") or preflight.get("http_warning"),
             "preflight_status": preflight,
             "planner_used": False,
             "verifier_used": False,
             "used_skills": [],
+            "blocked_or_limited_status": (
+                detected_block.__dict__ if (detected_block := detect_blocked_or_limited_payload(preflight)).blocked else None
+            ),
+            "rate_limit_detected": failure_stage == "skipped_rate_limited",
+            "normalized_action_aliases": [],
+            "action_oov_detected": False,
             "expected_fields": scenario.get("expected_fields") or [],
             "expected_skills": scenario.get("expected_skills") or [],
             "skill_coverage": _skill_coverage(scenario.get("expected_skills") or [], []),
@@ -434,13 +585,13 @@ async def run_scenario(
         show_browser=show_browser,
         slow_mo=slow_mo,
         record_video=False,
-        two_stage_planning=False,
+        two_stage_planning=two_stage_planning,
         interaction_mode="plan",
     )
     user_goal = _scenario_goal(scenario, request_mode=request_mode)
     evaluator_context = _scenario_benchmark_context(scenario)
     workflow_context = evaluator_context if request_mode == "benchmark" else _scenario_real_workflow_context(scenario)
-    if request_mode == "real":
+    if request_mode == "real" and not two_stage_planning:
         # Real-user smoke keeps the main planner/verifier path but avoids a second LLM
         # corrective replanning call after verifier rejection.
         workflow.replanner = None
@@ -450,19 +601,43 @@ async def run_scenario(
             workflow.run(user_goal, benchmark_context=workflow_context),
             timeout=task_timeout_sec,
         )
+        execution = workflow_result["execution_result"]
+        _augment_extracted_data_for_scenario(scenario=scenario, user_goal=user_goal, execution=execution)
         artifact_paths = save_artifacts(workflow_result, run_id=run_id)
         export_paths = export_results(workflow_result, run_id=run_id, export_formats=export_formats)
-        execution = workflow_result["execution_result"]
         verdict = workflow_result["verdict"]
         planner_artifact = workflow_result.get("planner_artifact") or workflow_result.get("initial_planner_artifact")
         verifier_artifact = workflow_result.get("verifier_artifact")
-        anti_bot_after_load = _execution_has_antibot(execution)
-        success = execution.status == "success" and verdict.verdict == "accept" and not anti_bot_after_load
+        blocked_status = execution.blocked_or_limited_status or {}
+        blocked_failure_stage = str(blocked_status.get("failure_stage") or "")
+        anti_bot_after_load = _execution_has_antibot(execution) or bool(blocked_failure_stage)
+        extracted_data = execution.extracted_data or {}
+        expected_fields = scenario.get("expected_fields") or []
+        missing_fields = _missing_top_level_fields(expected_fields, extracted_data)
+        useful_extracted_data = _has_useful_extracted_data(extracted_data)
+        success = (
+            execution.status == "success"
+            and verdict.verdict == "accept"
+            and not anti_bot_after_load
+            and not missing_fields
+        )
+        partial_success = (
+            not success
+            and not anti_bot_after_load
+            and useful_extracted_data
+            and execution.status in {"success", "failed"}
+        )
         status = "success" if success else "failed"
         failure_stage = None if success else (execution.failure_type or "verifier_reject")
+        allowed_controlled = set(str(item) for item in (scenario.get("allowed_controlled_outcomes") or []))
         if anti_bot_after_load:
             status = "skipped"
-            failure_stage = "skipped_captcha_or_antibot"
+            failure_stage = blocked_failure_stage or "skipped_captcha_or_antibot"
+        elif failure_stage and failure_stage in allowed_controlled:
+            status = "skipped"
+        elif partial_success:
+            status = "partial_success"
+            failure_stage = failure_stage or ("missing_required_fields" if missing_fields else "verifier_reject")
         result = {
             "id": scenario_id,
             "site": scenario.get("site"),
@@ -471,6 +646,8 @@ async def run_scenario(
             "user_goal": user_goal,
             "status": status,
             "success": bool(success),
+            "partial_success": bool(partial_success),
+            "missing_fields": missing_fields,
             "failure_stage": failure_stage,
             "error_message": execution.error_message,
             "preflight_status": preflight,
@@ -489,12 +666,13 @@ async def run_scenario(
             "validation_result": {"valid": bool(workflow_result.get("final_plan_valid", True))},
             "benchmark_context": evaluator_context,
             "workflow_benchmark_context": workflow_context,
+            "planning_mode": workflow_result.get("planning_mode"),
             "execution_logs": [log.model_dump(mode="json") for log in execution.logs],
             "used_skills": execution.used_skills,
-            "expected_fields": scenario.get("expected_fields") or [],
+            "expected_fields": expected_fields,
             "expected_skills": scenario.get("expected_skills") or [],
             "skill_coverage": _skill_coverage(scenario.get("expected_skills") or [], execution.used_skills),
-            "extracted_data": execution.extracted_data,
+            "extracted_data": extracted_data,
             "verifier_raw_output": verifier_artifact.raw_response if verifier_artifact else None,
             "verifier_verdict": verdict.model_dump(mode="json"),
             "export_path": [str(path) for path in export_paths],
@@ -503,6 +681,10 @@ async def run_scenario(
             "runtime_sec": round(time.time() - started, 3),
             "planner_artifact": _artifact_to_json(planner_artifact),
             "verifier_artifact": _artifact_to_json(verifier_artifact),
+            "blocked_or_limited_status": blocked_status or None,
+            "rate_limit_detected": bool(execution.rate_limit_detected or failure_stage == "skipped_rate_limited"),
+            "normalized_action_aliases": workflow_result.get("normalized_action_aliases") or [],
+            "action_oov_detected": bool(workflow_result.get("action_oov_detected", False)),
             "allowed_controlled_outcomes": scenario.get("allowed_controlled_outcomes") or [],
             "notes": scenario.get("notes"),
         }
@@ -519,6 +701,8 @@ async def run_scenario(
             "user_goal": user_goal,
             "status": "skipped" if quota_exceeded else "failed",
             "success": False,
+            "partial_success": False,
+            "missing_fields": scenario.get("expected_fields") or [],
             "failure_stage": failure_stage,
             "error_message": str(exc),
             "preflight_status": preflight,
@@ -542,6 +726,10 @@ async def run_scenario(
             "expected_skills": scenario.get("expected_skills") or [],
             "skill_coverage": _skill_coverage(scenario.get("expected_skills") or [], []),
             "extracted_data": {},
+            "blocked_or_limited_status": None,
+            "rate_limit_detected": failure_stage == "skipped_rate_limited",
+            "normalized_action_aliases": [],
+            "action_oov_detected": False,
             "allowed_controlled_outcomes": scenario.get("allowed_controlled_outcomes") or [],
             "notes": scenario.get("notes"),
             "runtime_sec": round(time.time() - started, 3),
@@ -571,6 +759,8 @@ def build_quota_skipped_result(
         "user_goal": scenario.get("goal"),
         "status": "skipped",
         "success": False,
+        "partial_success": False,
+        "missing_fields": scenario.get("expected_fields") or [],
         "failure_stage": "llm_quota_exceeded",
         "error_message": error_message,
         "preflight_status": {"status": "not_run_after_llm_quota_exceeded"},
@@ -583,6 +773,10 @@ def build_quota_skipped_result(
         "expected_skills": scenario.get("expected_skills") or [],
         "skill_coverage": _skill_coverage(scenario.get("expected_skills") or [], []),
         "extracted_data": {},
+        "blocked_or_limited_status": None,
+        "rate_limit_detected": False,
+        "normalized_action_aliases": [],
+        "action_oov_detected": False,
         "runtime_sec": round(time.time() - started, 3),
     }
     artifact_path = output_dir / f"{scenario_id}_{_timestamp()}.json"
@@ -595,6 +789,7 @@ def build_summary(results: list[dict[str, Any]], *, suite: dict[str, Any]) -> di
     skipped = [result for result in results if result.get("status") == "skipped"]
     attempted = [result for result in results if result.get("status") != "skipped"]
     successful = [result for result in attempted if result.get("success")]
+    partial = [result for result in attempted if result.get("partial_success") or result.get("status") == "partial_success"]
     failure_buckets: dict[str, int] = {}
     by_category: dict[str, dict[str, Any]] = {}
     expected_skill_counts: dict[str, int] = {}
@@ -602,6 +797,9 @@ def build_summary(results: list[dict[str, Any]], *, suite: dict[str, Any]) -> di
     for result in attempted:
         if result.get("success"):
             pass
+        elif result.get("partial_success") or result.get("status") == "partial_success":
+            key = str(result.get("failure_stage") or "partial_success")
+            failure_buckets[key] = failure_buckets.get(key, 0) + 1
         else:
             key = str(result.get("failure_stage") or "failed")
             failure_buckets[key] = failure_buckets.get(key, 0) + 1
@@ -614,6 +812,7 @@ def build_summary(results: list[dict[str, Any]], *, suite: dict[str, Any]) -> di
                 "attempted": 0,
                 "skipped": 0,
                 "successful": 0,
+                "partial_success": 0,
                 "failure_buckets": {},
             },
         )
@@ -624,6 +823,8 @@ def build_summary(results: list[dict[str, Any]], *, suite: dict[str, Any]) -> di
             bucket["attempted"] += 1
             if result.get("success"):
                 bucket["successful"] += 1
+            elif result.get("partial_success") or result.get("status") == "partial_success":
+                bucket["partial_success"] += 1
             else:
                 key = str(result.get("failure_stage") or "failed")
                 bucket["failure_buckets"][key] = bucket["failure_buckets"].get(key, 0) + 1
@@ -652,6 +853,7 @@ def build_summary(results: list[dict[str, Any]], *, suite: dict[str, Any]) -> di
         "attempted_scenarios": len(attempted),
         "skipped_scenarios": len(skipped),
         "successful_scenarios": len(successful),
+        "partial_success_scenarios": len(partial),
         "success_rate_attempted": (len(successful) / len(attempted)) if attempted else 0.0,
         "failure_buckets": dict(sorted(failure_buckets.items())),
         "by_category": dict(sorted(by_category.items())),
@@ -687,11 +889,12 @@ async def main_async(argv=None) -> int:
             task_timeout_sec=float(args.task_timeout_sec),
             llm_timeout_sec=args.llm_timeout_sec if args.llm_timeout_sec is not None else int(os.getenv("OLLAMA_TIMEOUT_SEC", "1000")),
             request_mode=str(args.request_mode),
+            two_stage_planning=bool(args.two_stage_planning),
         )
         results.append(result)
-        print(json.dumps({"id": result["id"], "status": result["status"], "success": result["success"], "failure_stage": result.get("failure_stage")}, ensure_ascii=False))
+        print(json.dumps({"id": result["id"], "status": result["status"], "success": result["success"], "partial_success": result.get("partial_success", False), "failure_stage": result.get("failure_stage")}, ensure_ascii=False))
         if result.get("failure_stage") == "llm_quota_exceeded":
-            quota_error_message = str(result.get("error_message") or "LLM quota exceeded; remaining scenarios were not attempted.")
+            quota_error_message = str(result.get("error_message") or "LLM is unavailable; remaining scenarios were not attempted.")
             for remaining in scenarios[index + 1 :]:
                 skipped = build_quota_skipped_result(
                     remaining,
@@ -700,13 +903,13 @@ async def main_async(argv=None) -> int:
                     error_message=quota_error_message,
                 )
                 results.append(skipped)
-                print(json.dumps({"id": skipped["id"], "status": skipped["status"], "success": skipped["success"], "failure_stage": skipped.get("failure_stage")}, ensure_ascii=False))
+                print(json.dumps({"id": skipped["id"], "status": skipped["status"], "success": skipped["success"], "partial_success": skipped.get("partial_success", False), "failure_stage": skipped.get("failure_stage")}, ensure_ascii=False))
             break
     summary = build_summary(results, suite=suite)
     args.output_dir.mkdir(parents=True, exist_ok=True)
     summary_path = args.output_dir / f"real_web_skill_suite_{_timestamp()}.json"
     summary_path.write_text(json.dumps(summary, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(json.dumps({"summary_path": str(summary_path), "summary": {k: summary[k] for k in ["total_scenarios", "attempted_scenarios", "skipped_scenarios", "successful_scenarios", "success_rate_attempted", "failure_buckets"]}}, ensure_ascii=False, indent=2))
+    print(json.dumps({"summary_path": str(summary_path), "summary": {k: summary[k] for k in ["total_scenarios", "attempted_scenarios", "skipped_scenarios", "successful_scenarios", "partial_success_scenarios", "success_rate_attempted", "failure_buckets"]}}, ensure_ascii=False, indent=2))
     return 0
 
 

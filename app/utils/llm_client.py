@@ -26,6 +26,7 @@ class LLMClient:
         backend: Optional[str] = None,
         planner_model: Optional[str] = None,
         verifier_model: Optional[str] = None,
+        vision_model: Optional[str] = None,
         ollama_base_url: Optional[str] = None,
         temperature: float = 0.1,
         timeout_sec: Optional[int] = None,
@@ -41,9 +42,19 @@ class LLMClient:
         default_model = os.getenv("OLLAMA_MODEL", "qwen3-vl:4b")
         self.planner_model = planner_model or os.getenv("OLLAMA_PLANNER_MODEL", default_model)
         self.verifier_model = verifier_model or os.getenv("OLLAMA_VERIFIER_MODEL", default_model)
+        self.vision_model = (
+            vision_model
+            or os.getenv("OLLAMA_VISION_MODEL", os.getenv("OLLAMA_VERIFIER_VISION_MODEL", ""))
+        ).strip()
         self.temperature = temperature
         self.timeout_sec = timeout_sec if timeout_sec is not None else self._resolve_timeout_sec()
         self.ollama_api_key = os.getenv("OLLAMA_API_KEY", "").strip()
+        self.retry_on_timeout = os.getenv("OLLAMA_RETRY_ON_TIMEOUT", "0").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
 
         self.session = requests.Session()
         self.session.trust_env = False
@@ -96,16 +107,17 @@ class LLMClient:
                 images_base64=self._normalize_images_base64(images_base64, image_base64),
             )
             parsed = self._safe_parse_json(raw_text, stage=stage, diagnostics=self.last_chat_diagnostics)
-        except LLMClientError:
+        except LLMClientError as exc:
             response_mode = self.last_chat_diagnostics.get("content_source", "unknown")
             if response_mode == "empty_content_with_thinking":
                 response_mode = "non_json_thinking_response"
-            logger.exception(
-                "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s)",
+            logger.warning(
+                "Planner generation failed at stage=%s (system_prompt_len=%d, user_prompt_len=%d, response_mode=%s): %s",
                 stage,
                 len(system_prompt or ""),
                 len(user_prompt or ""),
                 response_mode,
+                exc,
             )
             raise
         fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
@@ -147,21 +159,49 @@ class LLMClient:
         images_base64: Optional[list[str]] = None,
         image_base64: Optional[str] = None,
     ) -> LLMArtifact:
-        raw_text = self._ollama_chat(
-            model=self.verifier_model,
-            system_prompt=system_prompt,
-            user_prompt=user_prompt,
-            image_path=image_path,
-            images_base64=self._normalize_images_base64(images_base64, image_base64),
-        )
+        normalized_images = self._normalize_images_base64(images_base64, image_base64)
+        has_image_input = bool(image_path or normalized_images)
+        selected_model = self.vision_model if has_image_input and self.vision_model else self.verifier_model
+        used_model = selected_model
+        image_retry_used = False
+        try:
+            raw_text = self._ollama_chat(
+                model=selected_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_path=image_path,
+                images_base64=normalized_images,
+            )
+        except LLMClientError as exc:
+            message = str(exc).lower()
+            if not has_image_input or "does not support image input" not in message:
+                raise
+            image_retry_used = True
+            logger.warning(
+                "Verifier model rejected image input; retrying verifier without image payload (model=%s)",
+                selected_model,
+            )
+            used_model = self.verifier_model
+            raw_text = self._ollama_chat(
+                model=used_model,
+                system_prompt=system_prompt,
+                user_prompt=user_prompt,
+                image_path=None,
+                images_base64=None,
+            )
+            self.last_chat_diagnostics["image_input_omitted_after_model_reject"] = True
+        self.last_chat_diagnostics["verifier_model"] = self.verifier_model
+        self.last_chat_diagnostics["vision_model"] = self.vision_model
+        self.last_chat_diagnostics["selected_verifier_model"] = used_model
+        self.last_chat_diagnostics["vision_model_used"] = bool(has_image_input and used_model == self.vision_model)
         parsed = self._safe_parse_json(raw_text, stage=stage, diagnostics=self.last_chat_diagnostics)
-        fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False))
+        fallback_used = bool(self.last_chat_diagnostics.get("used_thinking_fallback", False) or image_retry_used)
         return LLMArtifact(
             raw_response=raw_text,
             parsed_response=parsed,
             generation=GenerationMetadata(
                 backend=self.backend,
-                model=self.verifier_model,
+                model=used_model,
                 source="llm",
                 fallback_used=fallback_used,
             ),
@@ -218,7 +258,7 @@ class LLMClient:
                     f"{backend_hint} request timed out after {self.timeout_sec}s "
                     f"(url={url}, model={model}). Increase OLLAMA_TIMEOUT_SEC or simplify the prompt."
                 )
-                if attempt == 0:
+                if self.retry_on_timeout and attempt == 0:
                     retry_used = True
                     retry_reason = "timeout"
                     logger.warning("LLM transport retry scheduled due to timeout (model=%s, url=%s)", model, url)

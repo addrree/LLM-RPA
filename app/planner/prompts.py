@@ -1,3 +1,9 @@
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+
 PLANNER_SYSTEM_PROMPT = """
 Ты модуль планирования веб-автоматизации.
 Преобразуй цель в короткий и надежный JSON-план.
@@ -29,7 +35,10 @@ PLANNER_SYSTEM_PROMPT = """
 
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
-0.2) Prefer semantic/extraction actions over fragile CSS/XPath: observe_page before extraction, extract_visible_links for visible links, extract_value_near_anchor for values near anchors, extract_by_intent for reusable extraction intents, click_by_semantic_target for visible buttons/links, fill_by_semantic_target for form fields, select_by_semantic_target or choose_autocomplete_suggestion for lists/autocomplete.
+0.2) Prefer semantic/extraction actions over fragile CSS/XPath: observe_page before extraction, extract_by_intent for reusable intents, extract_visible_links for visible links, find_row_by_condition for row/table conditions, extract_value_near_anchor for values near anchors, click_by_semantic_target for visible buttons/links, fill_by_semantic_target for form fields, select_by_semantic_target or choose_autocomplete_suggestion for lists/autocomplete.
+0.2.1) For common extraction tasks prefer extract_by_intent with generic intent/item_type: package_metadata, search_results, paper_results, repository_results, article_results, news_items, product_cards, table_rows. Use regex only as a fallback for plain text or after generic extraction is insufficient.
+0.2.2) Runtime extraction priority: observe_page -> extract_by_intent -> extract_visible_links -> find_row_by_condition -> extract_value_near_anchor -> extract_structured_items generic DOM/table/list fallback -> extract_pattern_from_page_text only as last fallback.
+0.2.3) For package/search/list/table/card goals do not plan mandatory regex extraction. Use extract_by_intent(package_metadata/search_results/product_cards/table_rows/article_results/repository_results/paper_results), extract_visible_links, find_row_by_condition, or extract_structured_items first.
 0.3) Do not invent site-specific selectors when a semantic action can express the same intent. Use generic selectors only when observe_page evidence makes them stable.
 1. Последний шаг всегда finish.
 2. step_id строго подряд: 1,2,3,...
@@ -56,11 +65,13 @@ PLANNER_SYSTEM_PROMPT = """
     - используй extract_pattern_from_page_text с полной группой, например [0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
-13.1) Если observe_page.page_text или page_text_excerpt уже содержит искомый label/anchor и значение рядом с ним, предпочитай extract_pattern_from_page_text с regex по page_text. Для label-value-unit patterns не выбирай extract_value_near_anchor с same_block_only=true, если значение явно видно в page_text, но DOM может быть split across blocks.
-Пример Wikipedia English article count:
+13.1) Если observe_page.page_text или page_text_excerpt уже содержит искомый label/anchor и значение рядом с ним, предпочитай extract_by_intent(intent="value_near_anchor") или extract_value_near_anchor. Regex по page_text используй только как fallback для plain text или если generic/anchor extraction не восстановила значение.
+Пример anchor/value article count:
 Observed text:
 English\n7,180,000+ articles
-Correct action:
+Preferred action:
+{"action":"extract_by_intent","args":{"intent":"value_near_anchor","anchor_text":"English","value_type":"number"},"save_as":"english_article_count"}
+Regex fallback only if the page is plain text or the DOM/anchor extractor cannot recover the value:
 {"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}
 14. Используй ТОЛЬКО канонические action names из схемы.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
@@ -78,7 +89,7 @@ Correct action:
    Запрещен bare/generic text-only wait_for для navigation family.
 16.3) Для navigation_then_extraction после navigation должен быть финальный extraction step, который сохраняет top-level бизнес-результат в save_as="value". Шаги click/wait_for/observe_page не должны использовать save_as="value".
 17. Task-family routing policy:
-   - single_value_extraction: предпочитай extract_text / extract_pattern_from_page_text; не используй extract_value_near_anchor без явного anchor.
+   - single_value_extraction: предпочитай extract_by_intent для известных reusable intents, extract_value_near_anchor для явной пары anchor/value, либо extract_text для стабильных title/header. extract_pattern_from_page_text используй только как fallback.
    - anchored_value_extraction: используй extract_value_near_anchor только если есть корректный anchor_text и value_type/value_pattern.
    - repeated_structured_items: предпочитай extract_structured_items или extract_items с явной схемой полей.
    - navigation_then_extraction: предпочитай navigate_to_relevant_section, затем extraction.
@@ -98,6 +109,7 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
     allowed = "|".join(allowed_actions)
     if task_family == "real_web_user_request":
         return f"""
+Runtime extraction policy: for package/search/product/table/article/repository/paper data prefer extract_by_intent(package_metadata/search_results/product_cards/table_rows/article_results/repository_results/paper_results). For visible links use extract_visible_links; for table conditions use find_row_by_condition; for anchor/value use extract_value_near_anchor. Use extract_pattern_from_page_text only as fallback.
 Ты planner агентной web-automation системы. Верни только JSON TaskSpec.
 Пользовательский запрос находится в user message; не добавляй значения, которых не извлекал со страницы.
 Разрешённые actions: {allowed}
@@ -156,6 +168,11 @@ Task family: {task_family}
 """
 
 INITIAL_PLANNER_SYSTEM_PROMPT = """
+Initial planner hard rules:
+- Return only the initial observation plan: open_url -> observe_page -> finish.
+- If the goal names a public website or service but does not include a URL, infer its canonical public HTTPS homepage URL from general knowledge.
+- Do not use placeholder, reserved, or dummy URLs. If you know the domain without a scheme, emit it as https://domain.tld.
+
 Ты initial planner для двухэтапного режима.
 Нужно вернуть ТОЛЬКО первичный план наблюдения страницы.
 Верни строго JSON в формате TaskSpec.
@@ -168,6 +185,32 @@ INITIAL_PLANNER_SYSTEM_PROMPT = """
 - не добавляй экстракцию бизнес-данных на этом этапе
 """
 
+INITIAL_PLANNER_SYSTEM_PROMPT = """
+You are the initial planner for a two-stage web automation pipeline.
+Return only a strict JSON TaskSpec. Do not return markdown, prose, or comments.
+
+Your only job is to open the starting page and observe it. Do not extract final business data here.
+
+Allowed actions and order:
+1. open_url
+2. observe_page
+3. finish
+
+URL rules:
+- If the user goal contains an explicit URL, use it.
+- If the goal contains a domain without a scheme, normalize it to HTTPS.
+- If the goal names a public website or service but does not include a URL, infer its canonical public HTTPS homepage URL from general knowledge.
+- Do not use placeholder, reserved, or dummy URLs.
+- If you are genuinely uncertain about the canonical public URL, leave the URL absent so the caller can raise a controlled planning failure.
+
+TaskSpec requirements:
+- start_url must be the same non-empty HTTPS URL used by open_url.args.url when a URL is known.
+- allowed_domains must include the start_url netloc.
+- observe_page must have save_as set to "page_snapshot".
+- expected_result.required_fields must be ["page_snapshot"].
+- steps must have sequential step_id values.
+"""
+
 REPLANNER_SYSTEM_PROMPT = """
 Ты context-aware replanner веб-автоматизации.
 На входе: user goal + page snapshot (+ optional previous plan).
@@ -177,26 +220,27 @@ REPLANNER_SYSTEM_PROMPT = """
 
 Ключевые правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
+0.1.1) Runtime extraction priority: extract_by_intent for package/search/product/table/article/repository/paper intents; extract_visible_links for link lists; find_row_by_condition for table rows; extract_value_near_anchor for anchor/value; extract_pattern_from_page_text only as fallback.
 1) Если final execution может запускаться в отдельной сессии, добавляй open_url(start_url) первым шагом.
-2) Не выдумывай CSS-селекторы, если можно извлечь значение из page_text через regex/pattern.
-3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor только когда page_text не дает надежный label-value-unit regex:
+2) Не выдумывай CSS-селекторы, если можно выразить задачу через semantic/generic extraction. Regex по page_text не является preferred path.
+3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor или extract_by_intent(intent="value_near_anchor"); regex используй только как fallback:
    - задавай anchor_candidates (anchor_text только если он явно подтвержден на странице)
    - search_direction="after"
    - same_block_only=true
    - required_right_context, если очевиден контекст ("articles", "₽", "reviews" и т.п.)
    - не бери "первое число рядом" без контекстной проверки.
    - если этот action невозможен, тогда используй extract_text_near_text или extract_pattern_from_page_text.
-2.1) Если observe_page.page_text/page_text_excerpt уже содержит label/anchor и значение рядом (например English\n7,180,000+ articles), предпочитай extract_pattern_from_page_text regex по page_text; не выбирай extract_value_near_anchor same_block_only=true для DOM-split случаев.
-Пример: Goal=find English article count on wikipedia.org homepage; Observed text: English\\n7,180,000+ articles; Correct extraction step: {"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}.
+2.1) Если observe_page.page_text/page_text_excerpt уже содержит label/anchor и значение рядом (например English\n7,180,000+ articles), предпочитай extract_by_intent(value_near_anchor) или extract_value_near_anchor с generic constraints. Regex по page_text используй только как fallback для plain-text или если generic extraction не восстановила значение.
+Пример: Goal=find visible article count for a language row; Observed text: English\\n7,180,000+ articles; Preferred extraction step: {"action":"extract_by_intent","args":{"intent":"value_near_anchor","anchor_text":"English","value_type":"number"},"save_as":"english_article_count"}. Regex fallback: {"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}.
 2.2) Для чисел с возможными разделителями тысяч и "+" захватывай ПОЛНУЮ числовую строку, а не только первую группу цифр.
 2.3) Для таких шагов указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 2.4) Избегай шаблонов уровня "(\\d+)" если рядом ожидается формат 2 087 000+, 2,087,000+ или 2.087.000+.
 4) Можно использовать observe_page как первый шаг final-плана только если нужен новый snapshot после переходов.
-4.1) Для извлечения повторяющихся структур (например top 10 языков Wikipedia) предпочитай один шаг extract_items с полями-объектами:
+4.1) Для извлечения повторяющихся структур (например top 10 строк/карточек) предпочитай один шаг extract_items с полями-объектами:
    - language_name: селектор названия языка внутри блока
    - article_count: селектор/паттерн и normalize_number=true
    Результат должен быть массивом объектов, а не массивом строк.
-4.1.1) Если CSS-контейнер неочевиден или нестабилен, вместо extract_items используй extract_structured_items с regex pattern, limit и fields.
+4.1.1) Если CSS-контейнер неочевиден или нестабилен, сначала используй extract_by_intent/extract_visible_links/find_row_by_condition по смыслу задачи; extract_structured_items с pattern используй только как generic fallback.
 4.1.2) Для extract_structured_items fields должны быть только int или object rule с group_index; string specs запрещены.
 4.2) Для list/block/card/top-N задач не делай ставку на extract_pattern_from_page_text как основную долгосрочную стратегию:
    - сначала пробуй extract_items (DOM/block-aware),
@@ -237,6 +281,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 0.2) Prefer semantic/extraction actions over fragile selectors: extract_visible_links for visible links, extract_by_intent for reusable extraction intents, click_by_semantic_target/fill_by_semantic_target/select_by_semantic_target for UI controls.
+0.3) Do not replace package/search/product/table/article/repository/paper extraction with mandatory regex. Use extract_by_intent or row/link actions first; extract_pattern_from_page_text is fallback only.
 0) Never invent action names. Use only TaskSpec allowed actions exactly. Invalid examples: Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
 2) Если требовался список, возвращай массив объектов:
@@ -244,7 +289,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
    - если container_selector неочевиден/нестабилен, используй extract_structured_items (pattern + fields + limit + save_as).
 3) Не возвращай одиночную строку, когда ожидается list[dict].
 4) Для open_url всегда задавай args.url.
-5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения. Если page_snapshot.page_text/page_text_excerpt содержит label-value-unit рядом, предпочитай extract_pattern_from_page_text regex по page_text.
+5) Для extract_value_near_anchor используй typed args (предпочтительно value_type) и контекстные ограничения. Если page_snapshot.page_text/page_text_excerpt содержит label-value-unit рядом, всё равно предпочитай extract_value_near_anchor/extract_by_intent(value_near_anchor); regex по page_text только fallback.
 6) Никаких комментариев/markdown — только JSON.
 7) Используй только канонические action names из схемы. Never invent action names. Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 8) Учитывай prior corrective attempts и НЕ повторяй уже проваленные решения (тот же action+args, тот же regex/group mismatch, тот же широкий click locator).
@@ -308,3 +353,100 @@ Task family: {task_family}
 7) Keep plan short and deterministic.
 8) {family_rules}
 """
+
+
+def _profile_data(profile: Mapping[str, Any] | object) -> dict[str, Any]:
+    if isinstance(profile, Mapping):
+        return dict(profile)
+    if hasattr(profile, "model_dump"):
+        return profile.model_dump(mode="json")  # type: ignore[no-any-return]
+    return dict(getattr(profile, "__dict__", {}) or {})
+
+
+def _csv(values: object) -> str:
+    if not isinstance(values, list):
+        return ""
+    return ", ".join(str(value).strip() for value in values if str(value).strip())
+
+
+def build_profile_planner_prompt(profile: Mapping[str, Any] | object, *, stage: str = "planner") -> str:
+    data = _profile_data(profile)
+    allowed_actions = _csv(data.get("allowed_actions"))
+    preferred_intents = _csv(data.get("preferred_intents"))
+    conceptual_intents = _csv(data.get("conceptual_intents"))
+    forbidden_actions = _csv(data.get("forbidden_actions"))
+    expected_output_type = str(data.get("expected_output_type") or "object")
+    expected_fields = _csv(data.get("expected_fields"))
+    profile_name = str(data.get("name") or "generic_web_task")
+    profile_guidance = ""
+    if profile_name == "semantic_navigation":
+        profile_guidance = (
+            "\nProfile-specific rule: for click/open/follow tasks, use click_by_semantic_target or "
+            "navigate_to_relevant_section for the visible target, then use extract_by_intent(current_url) "
+            "and/or extract_by_intent(page_title) for URL/title outputs. Do not use extract_value_near_anchor "
+            "to obtain a link URL unless the page visibly exposes an anchor/value pair."
+        )
+    elif profile_name == "direct_value_extraction":
+        profile_guidance = (
+            "\nProfile-specific rule: for current URL use extract_by_intent(current_url); "
+            "for page title use extract_by_intent(page_title). Use extract_value_near_anchor only when "
+            "the goal gives a real visible anchor/label and either a supported value_type or an explicit value_pattern."
+        )
+
+    return f"""
+You are the {stage} for a web automation runtime.
+Return only one valid JSON TaskSpec object. No markdown, comments, prose, or expected answer values.
+
+Planning profile:
+- task_type: {profile_name}
+- expected_output_type: {expected_output_type}
+- expected_fields_hint: {expected_fields or "derive from the user goal"}
+- allowed_actions: {allowed_actions}
+- preferred_runtime_intents: {preferred_intents or "none"}
+- conceptual_profile_intents_diagnostics_only: {conceptual_intents or "none"}
+- forbidden_actions: {forbidden_actions or "none"}
+
+Hard rules:
+1. Use only allowed_actions. The initial observation plan is handled separately; this prompt is for the final executable plan.
+2. If action=extract_by_intent, args.intent must be one of preferred_runtime_intents. Never emit conceptual_profile_intents_diagnostics_only as runtime intents.
+3. Do not use site-specific selectors, domains, URLs, expected values, or per-site special cases.
+4. Prefer semantic and structural runtime actions:
+   - forms/search: fill_by_semantic_target, click_by_semantic_target, press
+   - anchor/value: extract_value_near_anchor or extract_by_intent with a preferred_runtime_intent
+   - lists/links/results: extract_visible_links, extract_structured_items, extract_items, or extract_by_intent with a preferred_runtime_intent
+   - cards/catalogs: extract_structured_items/extract_items, or extract_by_intent only with a preferred_runtime_intent
+   - tables/rows: find_row_by_condition, extract_structured_items, or extract_by_intent only with a preferred_runtime_intent; if the user names headers/columns, pass them as args.columns
+5. Regex/page-text extraction is fallback-only. If extract_pattern_from_page_text is forbidden or absent from allowed_actions, do not emit it.
+6. Do not invent new extract_value_near_anchor value_type names. Supported value_type values are only: article_count, count, number, float, rating, email, phone, email_or_phone. For any other anchored value, provide an explicit value_pattern derived from observed page text.
+7. Required fields must be top-level keys actually produced by save_as or args.output_key.
+8. open_url requires args.url. observe_page and every extract/output action require save_as or args.output_key.
+9. Keep the plan short, usually 3-7 steps, and always end with finish.
+{profile_guidance}
+
+JSON schema:
+{{
+  "goal": "string",
+  "start_url": "https://...",
+  "allowed_domains": ["domain.tld"],
+  "constraints": {{"max_steps": integer, "max_replans": integer, "timeout_sec": integer}},
+  "expected_result": {{"description": "string", "required_fields": ["field_name"]}},
+  "steps": [
+    {{"step_id": 1, "action": "one allowed action", "args": {{}}, "save_as": "optional_output_key"}}
+  ]
+}}
+"""
+
+
+def build_profile_replanner_prompt(profile: Mapping[str, Any] | object, *, corrective: bool = False) -> str:
+    prompt = build_profile_planner_prompt(
+        profile,
+        stage="corrective_replanner" if corrective else "context-aware replanner",
+    )
+    extra = """
+Replanning rules:
+1. Use page_snapshot evidence from the user payload before choosing anchors, links, headings, rows, or fields.
+2. Do not repeat failed action+args combinations from prior attempts.
+3. If prior extracted_data already contains useful business fields, preserve them and only repair the missing or failed part.
+4. For corrective retries, retry only recoverable failures and keep the new plan inside the same planning profile.
+"""
+    return prompt + extra

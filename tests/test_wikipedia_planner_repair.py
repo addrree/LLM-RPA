@@ -2,10 +2,12 @@ from app.planner.prompts import PLANNER_SYSTEM_PROMPT, REPLANNER_SYSTEM_PROMPT, 
 from app.planner.replanner import Replanner
 
 
-def test_planner_prompts_contain_wikipedia_page_text_example():
+def test_planner_prompts_prefer_generic_anchor_extraction_with_regex_fallback():
     assert "Wikipedia English article count" in PLANNER_SYSTEM_PROMPT
     assert "English\\n7,180,000+ articles" in REPLANNER_SYSTEM_PROMPT
+    assert "extract_by_intent" in REPLANNER_SYSTEM_PROMPT
     assert "extract_pattern_from_page_text" in REPLANNER_SYSTEM_PROMPT
+    assert "Regex fallback" in REPLANNER_SYSTEM_PROMPT
 
 
 def test_corrective_prompt_forbids_unsupported_extract_value():

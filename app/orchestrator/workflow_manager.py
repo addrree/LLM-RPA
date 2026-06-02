@@ -11,6 +11,7 @@ from app.interaction.page_candidates import PageCandidateExtractor
 from app.interaction.action_grounder import ActionGrounder
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
+from app.planner.task_router import TaskRoute
 from app.schemas.execution import ExecutionResult, StepLog
 from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.verification import VerificationVerdict
@@ -529,6 +530,21 @@ def normalize_benchmark_plan(
         for field in required_fields
         if str(field).strip() and str(field).strip() != "page_snapshot"
     ]
+    normalized_required = [
+        field[:-2] if field.endswith("[]") else field
+        for field in normalized_required
+    ]
+    required_aliases = {
+        "url": "final_url",
+        "current_url": "final_url",
+        "title": "page_title",
+        "current_title": "page_title",
+    }
+    normalized_required = [
+        required_aliases.get(field.lower(), field)
+        for field in normalized_required
+    ]
+    normalized_required = list(dict.fromkeys(normalized_required))
     normalized_required = _fallback_required_fields(normalized_required=normalized_required, task_family=task_family)
     fallback_save_as = normalized_required[0] if len(normalized_required) == 1 else None
 
@@ -585,6 +601,36 @@ def normalize_benchmark_plan(
         fallback_save_as=fallback_save_as,
         page_snapshot=page_snapshot,
     )
+    produced_fields = {
+        str(step.get("save_as", "") or "").strip()
+        for step in normalized_steps
+        if str(step.get("save_as", "") or "").strip()
+    }
+    if "clicked_text" in normalized_required and "clicked_text" not in produced_fields:
+        for step in normalized_steps:
+            if str(step.get("action", "")).strip() == "click_by_semantic_target":
+                step["save_as"] = "clicked_text"
+                produced_fields.add("clicked_text")
+                break
+    metadata_fields = [
+        field
+        for field in normalized_required
+        if field in {"final_url", "page_title"} and field not in produced_fields
+    ]
+    if metadata_fields and (not allowed_actions or "extract_by_intent" in allowed_actions):
+        insert_index = next(
+            (idx for idx, step in enumerate(normalized_steps) if str(step.get("action", "")).strip() == "finish"),
+            len(normalized_steps),
+        )
+        metadata_steps = [
+            {
+                "action": "extract_by_intent",
+                "args": {"intent": "current_url" if field == "final_url" else "page_title"},
+                "save_as": field,
+            }
+            for field in metadata_fields
+        ]
+        normalized_steps[insert_index:insert_index] = metadata_steps
 
     if not any(str(step.get("action")) == "finish" for step in normalized_steps):
         normalized_steps.append({"action": "finish", "args": {}})
@@ -711,6 +757,7 @@ class WorkflowManager:
         replanner: Replanner | None = None,
         two_stage_planning: bool = False,
         interaction_mode: str = "plan",
+        max_corrective_retries: int | None = None,
     ):
         self.planner = planner
         self.validator = validator
@@ -721,6 +768,9 @@ class WorkflowManager:
         if interaction_mode not in {"plan", "observe_action"}:
             raise ValueError("interaction_mode must be 'plan' or 'observe_action'")
         self.interaction_mode = interaction_mode
+        if max_corrective_retries is not None and int(max_corrective_retries) < 0:
+            raise ValueError("max_corrective_retries must be >= 0")
+        self.max_corrective_retries = int(max_corrective_retries) if max_corrective_retries is not None else None
         self.candidate_extractor = PageCandidateExtractor()
         self.action_grounder = ActionGrounder()
 
@@ -755,6 +805,7 @@ class WorkflowManager:
         initial_plan_valid: bool | None = None
         final_plan_valid: bool | None = None
         action_oov_detected = False
+        normalized_action_aliases: list[dict[str, str]] = []
         planning_time_sec = 0.0
         execution_time_sec = 0.0
         verification_time_sec = 0.0
@@ -767,18 +818,26 @@ class WorkflowManager:
             "correction_attempt_count": 0,
             "planning_timeout_retry_count": 0,
         }
+        task_route = self._route_user_goal(user_goal=user_goal, benchmark_context=benchmark_context)
+        if task_route is not None:
+            planning_diagnostics.update(task_route.diagnostics())
 
         if not self.two_stage_planning:
             planning_started = perf_counter()
             try:
-                plan = self._planner_build_plan(user_goal=user_goal, benchmark_context=benchmark_context)
+                plan = self._planner_build_plan(
+                    user_goal=user_goal,
+                    benchmark_context=benchmark_context,
+                    task_route=task_route,
+                )
             except Exception as exc:  # noqa: BLE001
                 raise WorkflowStageError("planning", str(exc)) from exc
             plan = self._normalize_plan_for_validation(plan)
             plan = self._normalize_benchmark_plan(plan=plan, benchmark_context=benchmark_context)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
+            normalized_action_aliases.extend(getattr(self.planner, "last_normalized_action_aliases", []) or [])
             try:
-                self._validator_validate(plan=plan, benchmark_context=benchmark_context)
+                self._validator_validate(plan=plan, benchmark_context=benchmark_context, task_route=task_route)
                 initial_plan_valid = True
                 final_plan_valid = True
             except PlanValidationError as exc:
@@ -804,6 +863,7 @@ class WorkflowManager:
                 runtime_state=None,
                 page_snapshot=None,
                 benchmark_context=benchmark_context,
+                task_route=task_route,
             )
             execution_time_sec += float(loop_runtime_diagnostics.get("execution_time_sec", 0.0))
             verification_time_sec += float(loop_runtime_diagnostics.get("verification_time_sec", 0.0))
@@ -819,6 +879,7 @@ class WorkflowManager:
                 raise WorkflowStageError("planning", str(exc)) from exc
             initial_plan = self._normalize_plan_for_validation(initial_plan)
             action_oov_detected = bool(getattr(self.planner, "last_action_oov_detected", False))
+            normalized_action_aliases.extend(getattr(self.planner, "last_normalized_action_aliases", []) or [])
             try:
                 self._validator_validate(
                     plan=initial_plan,
@@ -863,11 +924,14 @@ class WorkflowManager:
                         "page_snapshot": shared_page_snapshot,
                         "corrective_retry_used": False,
                         "corrective_retry_count": 0,
+                        "action_oov_detected": action_oov_detected,
+                        "normalized_action_aliases": normalized_action_aliases,
                         "runtime_diagnostics": {
                             "planning_time_sec": round(perf_counter() - planning_started, 3),
                             "execution_time_sec": round(execution_time_sec, 3),
                             "verification_time_sec": round(verification_time_sec, 3),
                             "correction_time_sec": 0.0,
+                            **planning_diagnostics,
                         },
                     }
 
@@ -884,10 +948,12 @@ class WorkflowManager:
                     page_snapshot=page_snapshot,
                     previous_plan=initial_plan,
                     benchmark_context=benchmark_context,
+                    task_route=task_route,
                 )
                 action_oov_detected = action_oov_detected or bool(
                     getattr(self.replanner, "last_action_oov_detected", False)
                 )
+                normalized_action_aliases.extend(getattr(self.replanner, "last_normalized_action_aliases", []) or [])
                 replanner_artifact = self.replanner.last_artifact
                 final_plan = self._normalize_plan_for_validation(final_plan)
                 final_plan = self._normalize_benchmark_plan(
@@ -896,7 +962,7 @@ class WorkflowManager:
                     page_snapshot=page_snapshot,
                 )
                 try:
-                    self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
+                    self._validator_validate(plan=final_plan, benchmark_context=benchmark_context, task_route=task_route)
                     final_plan_valid = True
                 except PlanValidationError as first_error:
                     final_plan_valid = False
@@ -908,10 +974,12 @@ class WorkflowManager:
                         validation_error=str(first_error),
                         invalid_plan=invalid_plan_dump,
                         benchmark_context=benchmark_context,
+                        task_route=task_route,
                     )
                     action_oov_detected = action_oov_detected or bool(
                         getattr(self.replanner, "last_action_oov_detected", False)
                     )
+                    normalized_action_aliases.extend(getattr(self.replanner, "last_normalized_action_aliases", []) or [])
                     replanner_artifact = self.replanner.last_artifact
                     final_plan = self._normalize_plan_for_validation(repaired_plan)
                     final_plan = self._normalize_benchmark_plan(
@@ -920,7 +988,7 @@ class WorkflowManager:
                         page_snapshot=page_snapshot,
                     )
                     try:
-                        self._validator_validate(plan=final_plan, benchmark_context=benchmark_context)
+                        self._validator_validate(plan=final_plan, benchmark_context=benchmark_context, task_route=task_route)
                         final_plan_valid = True
                     except PlanValidationError as second_error:
                         self._persist_final_plan_repair_failure(
@@ -949,6 +1017,7 @@ class WorkflowManager:
                     runtime_state=shared_runtime_state,
                     page_snapshot=page_snapshot,
                     benchmark_context=benchmark_context,
+                    task_route=task_route,
                 )
                 execution_time_sec += float(loop_runtime_diagnostics.get("execution_time_sec", 0.0))
                 verification_time_sec += float(loop_runtime_diagnostics.get("verification_time_sec", 0.0))
@@ -978,7 +1047,9 @@ class WorkflowManager:
             "initial_plan_valid": initial_plan_valid,
             "final_plan_valid": final_plan_valid,
             "action_oov_detected": action_oov_detected,
+            "normalized_action_aliases": normalized_action_aliases,
             "runtime_diagnostics": {
+                **planning_diagnostics,
                 "planning_time_sec": round(planning_time_sec, 3),
                 "execution_time_sec": round(execution_time_sec, 3),
                 "verification_time_sec": round(verification_time_sec, 3),
@@ -1179,6 +1250,7 @@ class WorkflowManager:
         runtime_state,
         page_snapshot: PageSnapshot | None,
         benchmark_context: dict | None,
+        task_route: TaskRoute | None = None,
     ):
         runtime_state = runtime_state if runtime_state is not None else {}
         runtime_state["benchmark_context"] = benchmark_context or {}
@@ -1186,6 +1258,8 @@ class WorkflowManager:
         current_plan = initial_plan
         max_retries = self._effective_max_retries(current_plan.constraints.max_verification_retries)
         max_retries = self._effective_max_retries_for_context(max_retries=max_retries, benchmark_context=benchmark_context)
+        if self.max_corrective_retries is not None:
+            max_retries = min(max_retries, self.max_corrective_retries)
         corrective_attempt_count = 0
         corrective_plan_valid_count = 0
         corrective_plan_invalid_count = 0
@@ -1285,6 +1359,7 @@ class WorkflowManager:
                     previous_attempt_signatures=sorted(prior_signatures),
                     disallowed_next_patterns=self._build_disallowed_patterns(prior_corrective_attempts),
                     benchmark_context=benchmark_context,
+                    task_route=task_route,
                 )
             except Exception as corrective_error:  # noqa: BLE001
                 logger.error("Corrective plan generation failed: %s", corrective_error)
@@ -1379,7 +1454,11 @@ class WorkflowManager:
                 continue
 
             try:
-                self._validator_validate(plan=corrective_plan, benchmark_context=benchmark_context)
+                self._validator_validate(
+                    plan=corrective_plan,
+                    benchmark_context=benchmark_context,
+                    task_route=task_route,
+                )
             except PlanValidationError as validation_error:
                 corrective_plan_invalid_count += 1
                 offending_step = self._identify_offending_step(
@@ -1434,9 +1513,28 @@ class WorkflowManager:
             return None
         return {str(action) for action in allowed if str(action).strip()}
 
-    def _planner_build_plan(self, *, user_goal: str, benchmark_context: dict | None):
+    def _route_user_goal(self, *, user_goal: str, benchmark_context: dict | None) -> TaskRoute | None:
+        route_goal = getattr(self.planner, "route_goal", None)
+        if not callable(route_goal):
+            return None
         try:
-            return self.planner.build_plan(user_goal, benchmark_context=benchmark_context)
+            return route_goal(user_goal, benchmark_context=benchmark_context)
+        except TypeError:
+            return route_goal(user_goal)
+
+    def _planner_build_plan(
+        self,
+        *,
+        user_goal: str,
+        benchmark_context: dict | None,
+        task_route: TaskRoute | None = None,
+    ):
+        try:
+            return self.planner.build_plan(
+                user_goal,
+                benchmark_context=benchmark_context,
+                task_route=task_route,
+            )
         except TypeError:
             return self.planner.build_plan(user_goal)
 
@@ -1447,6 +1545,7 @@ class WorkflowManager:
             return self.replanner.revise_plan(**kwargs)
         except TypeError:
             kwargs.pop("benchmark_context", None)
+            kwargs.pop("task_route", None)
             return self.replanner.revise_plan(**kwargs)
 
     def _replanner_build_corrective_plan(self, **kwargs):
@@ -1456,6 +1555,7 @@ class WorkflowManager:
             return self.replanner.build_corrective_plan(**kwargs)
         except TypeError:
             kwargs.pop("benchmark_context", None)
+            kwargs.pop("task_route", None)
             return self.replanner.build_corrective_plan(**kwargs)
 
     def _validator_validate(
@@ -1464,13 +1564,23 @@ class WorkflowManager:
         plan: TaskSpec,
         benchmark_context: dict | None,
         allowed_actions_override: set[str] | None = None,
+        task_route: TaskRoute | None = None,
     ) -> None:
-        allowed_actions = allowed_actions_override or self._allowed_actions(benchmark_context)
+        benchmark_allowed_actions = self._allowed_actions(benchmark_context)
+        profile_allowed_actions = set(task_route.profile.allowed_actions) if task_route is not None else None
+        use_profile = allowed_actions_override is None and benchmark_allowed_actions is None and task_route is not None
+        allowed_actions = allowed_actions_override or benchmark_allowed_actions or profile_allowed_actions
+        allowed_intents = set(task_route.profile.preferred_runtime_intents) if use_profile and task_route is not None else None
+        forbidden_actions = set(task_route.profile.forbidden_actions) if use_profile and task_route is not None else None
+        profile_diagnostics = task_route.diagnostics() if use_profile and task_route is not None else None
         benchmark_contract_context = benchmark_context if allowed_actions_override is None else None
         try:
             self.validator.validate(
                 plan,
                 allowed_actions=allowed_actions,
+                allowed_intents=allowed_intents,
+                forbidden_actions=forbidden_actions,
+                profile_diagnostics=profile_diagnostics,
                 benchmark_context=benchmark_contract_context,
             )
         except TypeError:
@@ -1653,6 +1763,13 @@ class WorkflowManager:
             "planner_model": planner_model,
             "planning_timeout_retry_count": timeout_retry_count,
         }
+        profile_diagnostics = {}
+        if self.replanner is not None:
+            profile_diagnostics = getattr(self.replanner, "last_profile_diagnostics", {}) or {}
+        if not profile_diagnostics:
+            profile_diagnostics = getattr(self.planner, "last_profile_diagnostics", {}) or {}
+        if isinstance(profile_diagnostics, dict):
+            payload.update(profile_diagnostics)
         logger.info("planning_diagnostics=%s", payload)
         return payload
 
@@ -1746,7 +1863,10 @@ class WorkflowManager:
         normalized = WorkflowManager._ensure_open_url_for_final_plan(plan)
         payload = normalized.model_dump(mode="json")
         changed = False
-        for step in payload.get("steps", []):
+        for idx, step in enumerate(payload.get("steps", []), start=1):
+            if step.get("step_id") != idx:
+                step["step_id"] = idx
+                changed = True
             if step.get("action") == "observe_page":
                 save_as = step.get("save_as")
                 if not isinstance(save_as, str) or not save_as.strip():

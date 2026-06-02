@@ -10,13 +10,17 @@ from app.interaction.action_grounder import ActionGrounder
 from app.observer.page_observer import PageObserver
 from app.orchestrator.workflow_manager import WorkflowManager, normalize_benchmark_plan
 from app.planner.planner import Planner
+from app.planner.replanner import Replanner
 from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.task_spec import Constraints, ExpectedResult, TaskSpec
 from app.validator.plan_validator import PlanValidator
 from scripts.run_real_web_skill_suite import (
     _controlled_preflight_failure_stage,
     _execution_has_antibot,
+    _augment_extracted_data_for_scenario,
+    _extract_query_from_goal_or_url,
     _is_llm_quota_error,
+    _missing_top_level_fields,
     _preflight_status,
     _scenario_real_workflow_context,
     _scenario_goal,
@@ -395,6 +399,36 @@ def test_real_web_summary_excludes_skipped_from_attempted_rate():
     assert summary["failure_buckets"] == {"runtime": 1}
 
 
+def test_real_web_expected_field_check_accepts_semantic_output_aliases():
+    assert _missing_top_level_fields(["links[]"], {"language_links": [{"text": "English"}]}) == []
+    assert _missing_top_level_fields(["articles[]"], {"article_results": [{"title": "Post"}]}) == []
+    assert _missing_top_level_fields(["currencies[]"], {"currency_data": [{"currency": "USD"}]}) == []
+    assert _missing_top_level_fields(["papers[]"], {"articles": [{"title": "Paper"}]}) == []
+    assert _missing_top_level_fields(["products[]"], {"links": [{"text": "Not a product"}]}) == ["products[]"]
+
+
+def test_real_web_query_is_recovered_from_goal_or_final_url():
+    assert _extract_query_from_goal_or_url('Открой arXiv и найди "web agents".') == "web agents"
+    assert _extract_query_from_goal_or_url("Search site", "https://example.com/search?q=asyncio") == "asyncio"
+
+
+def test_real_web_extracted_data_augmentation_lifts_nested_scalar_fields():
+    class _Execution:
+        final_url = "https://pypi.org/project/playwright/"
+        extracted_data = {"package": {"package_name": "playwright", "version": "1.2.3", "description": "Browser automation"}}
+
+    execution = _Execution()
+    _augment_extracted_data_for_scenario(
+        scenario={"expected_fields": ["package_name", "version", "description"]},
+        user_goal='Открой PyPI и найди пакет "playwright".',
+        execution=execution,
+    )
+
+    assert execution.extracted_data["package_name"] == "playwright"
+    assert execution.extracted_data["version"] == "1.2.3"
+    assert execution.extracted_data["description"] == "Browser automation"
+
+
 def test_real_web_quota_detection_and_skipped_artifact(tmp_path):
     assert _is_llm_quota_error("Ollama request failed (status_code=429): reached your session usage limit")
 
@@ -710,6 +744,116 @@ def test_planner_normalizes_metadata_extraction_aliases_from_llm_plan():
     assert any(step.get("save_as") == "final_url" for step in metadata_steps)
 
 
+def test_replanner_normalizes_metadata_aliases_and_inserts_extractors():
+    snapshot = PageSnapshot(
+        url="https://wiki.openstreetmap.org/",
+        title="OpenStreetMap Wiki",
+        screenshot_path="",
+        page_text_excerpt="Help Wiki",
+        timestamp=datetime.now(timezone.utc),
+    )
+    normalized = Replanner.normalize_final_plan(
+        raw_plan={
+            "steps": [
+                {"action": "open_url", "args": {"url": "https://wiki.openstreetmap.org/"}},
+                {"action": "click_by_semantic_target", "args": {"target": "Help"}},
+                {"action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                {"action": "finish", "args": {}},
+            ],
+            "expected_result": {"required_fields": ["url", "title"]},
+        },
+        user_goal="Open OSM Wiki, click Help, then return URL and title.",
+        previous_plan=None,
+        page_snapshot=snapshot,
+    )
+
+    assert normalized["expected_result"]["required_fields"] == ["final_url", "page_title"]
+    assert normalized["steps"][1]["args"]["target_text"] == "Help"
+    metadata_steps = [step for step in normalized["steps"] if step["action"] == "extract_by_intent"]
+    assert {"intent": "current_url"} in [step["args"] for step in metadata_steps]
+    assert {"intent": "page_title"} in [step["args"] for step in metadata_steps]
+    assert any(step.get("save_as") == "final_url" for step in metadata_steps)
+    assert any(step.get("save_as") == "page_title" for step in metadata_steps)
+
+
+def test_replanner_rewrites_current_url_anchor_extraction_to_metadata_intent():
+    snapshot = PageSnapshot(
+        url="https://wiki.openstreetmap.org/",
+        title="OpenStreetMap Wiki",
+        screenshot_path="",
+        page_text_excerpt="Help Wiki",
+        timestamp=datetime.now(timezone.utc),
+    )
+    normalized = Replanner.normalize_final_plan(
+        raw_plan={
+            "steps": [
+                {"action": "open_url", "args": {"url": "https://wiki.openstreetmap.org/"}},
+                {"action": "click_by_semantic_target", "args": {"text": "Wiki or Help"}},
+                {"action": "observe_page"},
+                {"action": "extract_text", "args": {"selector": "title"}, "save_as": "title"},
+                {"action": "extract_value_near_anchor", "args": {"anchor_text": "Current URL"}, "save_as": "url"},
+                {"action": "finish", "args": {}},
+            ],
+            "expected_result": {"required_fields": ["url", "title"]},
+        },
+        user_goal="Открой сайт OpenStreetMap Wiki и нажми Wiki или Help, затем верни текущий URL и заголовок страницы.",
+        previous_plan=None,
+        page_snapshot=snapshot,
+    )
+
+    click_step = next(step for step in normalized["steps"] if step["action"] == "click_by_semantic_target")
+    metadata_steps = [step for step in normalized["steps"] if step["action"] == "extract_by_intent"]
+
+    assert click_step["save_as"] == "clicked_text"
+    assert click_step["args"]["target_candidates"] == ["Wiki", "Help"]
+    assert {"intent": "current_url"} in [step["args"] for step in metadata_steps]
+    assert {"intent": "page_title"} in [step["args"] for step in metadata_steps]
+    assert normalized["expected_result"]["required_fields"] == ["final_url", "page_title"]
+
+
+def test_replanner_converts_selector_structured_items_to_generic_intent():
+    snapshot = PageSnapshot(
+        url="https://habr.com/ru/articles/",
+        title="All articles",
+        screenshot_path="",
+        page_text_excerpt="Article title Author Time",
+        timestamp=datetime.now(timezone.utc),
+    )
+    normalized = Replanner.normalize_final_plan(
+        raw_plan={
+            "steps": [
+                {"action": "open_url", "args": {"url": "https://habr.com/ru/articles/"}},
+                {
+                    "action": "extract_structured_items",
+                    "args": {
+                        "pattern": "article.tm-articles-list__item",
+                        "item_type": "article",
+                        "fields": {
+                            "title": "h2.tm-title_h2 a.tm-title__link",
+                            "url": "h2.tm-title_h2 a.tm-title__link",
+                            "author": "span.tm-user-info__username",
+                        },
+                    },
+                    "save_as": "articles",
+                },
+                {"action": "finish", "args": {}},
+            ],
+            "expected_result": {"required_fields": ["articles"]},
+        },
+        user_goal="Open Habr and extract visible articles.",
+        previous_plan=None,
+        page_snapshot=snapshot,
+    )
+
+    extract_step = normalized["steps"][1]
+    assert extract_step["action"] == "extract_by_intent"
+    assert extract_step["args"]["intent"] == "article_results"
+    assert extract_step["args"]["item_type"] == "article"
+    assert extract_step["args"]["output_key"] == "articles"
+    assert extract_step["args"]["limit"] == 20
+    assert extract_step["save_as"] == "articles"
+
+
 def test_planner_simplifies_generic_result_link_click_targets():
     normalized = Planner._normalize_plan_envelope(
         {
@@ -730,6 +874,116 @@ def test_repository_results_requested_for_repo_search_goal():
         args={"output_key": "repositories"},
         runtime_state={"user_goal": "Find repositories for browser automation python"},
     )
+
+
+def test_action_aliases_map_to_semantic_and_intent_actions():
+    from app.planner.action_vocab import normalize_plan_action_aliases
+
+    payload, oov = normalize_plan_action_aliases(
+        {
+            "steps": [
+                {"action": "fill_input", "args": {"target": "search", "value": "requests"}},
+                {"action": "click_link", "args": {"text": "Help"}},
+                {"action": "extract_package_info", "args": {"output_key": "package"}},
+                {"action": "extract_product_cards", "args": {"output_key": "products"}},
+            ]
+        }
+    )
+
+    assert oov is False
+    assert [step["action"] for step in payload["steps"]] == [
+        "fill_by_semantic_target",
+        "click_by_semantic_target",
+        "extract_by_intent",
+        "extract_by_intent",
+    ]
+    assert payload["steps"][2]["args"]["intent"] == "package_metadata"
+    assert payload["steps"][3]["args"]["intent"] == "product_cards"
+    assert payload["_normalized_action_aliases"] == [
+        {"from": "fill_input", "to": "fill_by_semantic_target"},
+        {"from": "click_link", "to": "click_by_semantic_target"},
+        {"from": "extract_package_info", "to": "extract_by_intent"},
+        {"from": "extract_product_cards", "to": "extract_by_intent"},
+    ]
+
+
+def test_extract_by_intent_routes_generic_search_and_product_intents():
+    handler = ActionHandlers()
+
+    async def _search(*, page, args, runtime_state=None):
+        return [{"title": "Result", "href": "https://example.com"}]
+
+    async def _products(*, page, args, runtime_state=None):
+        return [{"title": "SSD", "price_value": 6900}]
+
+    async def _not_blocked(*_args, **_kwargs):
+        return None
+
+    handler._collect_search_results_by_intent = _search  # type: ignore[method-assign]
+    handler._collect_product_cards_generic = _products  # type: ignore[method-assign]
+    handler._raise_if_page_blocked_or_limited = _not_blocked  # type: ignore[method-assign]
+
+    result = asyncio.run(handler.extract_by_intent(object(), {"intent": "search_results"}, {}))
+    products = asyncio.run(handler.extract_by_intent(object(), {"intent": "product_cards"}, {}))
+
+    assert result[0]["title"] == "Result"
+    assert products[0]["price_value"] == 6900
+
+
+def test_product_price_normalization_and_budget_detection():
+    assert ActionHandlers._normalize_price_token("7 000 ₽") == 7000
+    assert ActionHandlers._normalize_price_token("7000 руб.") == 7000
+    assert ActionHandlers._extract_budget_from_goal_or_args(
+        args={},
+        runtime_state={"user_goal": "найди SSD до 7000 рублей"},
+    ) == 7000
+
+
+def test_table_rows_filter_by_condition_uses_generic_terms():
+    rows = [
+        {"currency": "USD", "name": "Доллар США", "cells": ["USD", "Доллар США"], "text": "USD Доллар США"},
+        {"currency": "CNY", "name": "Юань", "cells": ["CNY", "Юань"], "text": "CNY Юань"},
+    ]
+
+    matched = ActionHandlers._filter_structured_rows_by_condition(rows=rows, condition={"code": ["USD", "EUR"]})
+
+    assert matched == [rows[0]]
+
+
+def test_currency_table_rows_intent_does_not_default_to_usd_eur():
+    handler = ActionHandlers()
+    rows = [
+        {"currency": "USD", "name": "Dollar", "cells": ["USD", "Dollar"], "text": "USD Dollar"},
+        {"currency": "CNY", "name": "Yuan", "cells": ["CNY", "Yuan"], "text": "CNY Yuan"},
+    ]
+
+    async def _rows(*, page, limit):
+        return list(rows)
+
+    async def _not_blocked(*_args, **_kwargs):
+        return None
+
+    handler._extract_table_rows_as_dicts = _rows  # type: ignore[method-assign]
+    handler._raise_if_page_blocked_or_limited = _not_blocked  # type: ignore[method-assign]
+
+    all_rows = asyncio.run(handler.extract_by_intent(object(), {"intent": "currency_table_rows"}, {}))
+    usd_only = asyncio.run(
+        handler.extract_by_intent(object(), {"intent": "currency_table_rows", "condition": {"code": "USD"}}, {})
+    )
+
+    assert all_rows == rows
+    assert usd_only == [rows[0]]
+
+
+def test_preflight_classifies_rate_limit_as_controlled_skip():
+    preflight = {"http_status": 429, "title": "Rate exceeded", "body_text_excerpt": "Rate exceeded."}
+
+    assert _controlled_preflight_failure_stage(preflight) == "skipped_rate_limited"
+
+
+def test_real_web_suite_defaults_to_two_stage_planning():
+    assert parse_args([]).two_stage_planning is True
+    assert parse_args(["--two-stage-planning", "false"]).two_stage_planning is False
 
 
 def test_planner_moves_root_step_parameters_into_args():
@@ -779,6 +1033,29 @@ def test_planner_normalizes_actions_key_and_structured_without_pattern_to_links(
     assert normalized["steps"][1]["args"]["output_key"] == "articles"
     assert normalized["steps"][1]["save_as"] == "articles"
     assert normalized["expected_result"]["required_fields"] == ["articles"]
+
+
+def test_planner_canonicalizes_structured_item_type_to_supported_intent():
+    normalized = Planner._normalize_plan_envelope(
+        {
+            "steps": [
+                {"action": "open_url", "args": {"url": "https://habr.com/ru/articles/"}},
+                {
+                    "action": "extract_structured_items",
+                    "args": {"item_type": "article", "output_key": "articles"},
+                    "save_as": "articles",
+                },
+                {"action": "finish"},
+            ],
+            "expected_result": {"required_fields": ["articles"]},
+        },
+        "Open Habr and extract article cards.",
+        benchmark_context={"allowed_actions": ["open_url", "extract_by_intent", "finish"]},
+    )
+
+    assert normalized["steps"][1]["action"] == "extract_by_intent"
+    assert normalized["steps"][1]["args"]["intent"] == "article_results"
+    assert normalized["steps"][1]["args"]["item_type"] == "article"
 
 
 def test_planner_normalizes_tasks_and_action_params():

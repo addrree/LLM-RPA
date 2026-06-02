@@ -3,13 +3,26 @@ import re
 from typing import Any
 from urllib.parse import urlparse
 
-from app.planner.action_vocab import normalize_plan_action_aliases
+from app.planner.action_vocab import (
+    canonical_structured_intent,
+    coalesce_package_metadata_steps,
+    item_type_args_for_intent,
+    looks_like_css_selector,
+    normalize_plan_action_aliases,
+    normalize_required_field_aliases,
+    normalize_intent_alias,
+    PlannerValidationFailed,
+    raise_for_invalid_plan_actions,
+    semantic_intent_for_structured_step,
+)
 from app.planner.prompts import (
     INITIAL_PLANNER_SYSTEM_PROMPT,
     PLANNER_SYSTEM_PROMPT,
+    build_profile_planner_prompt,
     build_benchmark_planner_prompt,
 )
-from app.schemas.execution import LLMArtifact
+from app.planner.task_router import TaskRoute, TaskRouter
+from app.schemas.execution import GenerationMetadata, LLMArtifact
 from app.schemas.task_spec import TaskSpec
 from app.utils.llm_client import LLMClient
 
@@ -20,19 +33,34 @@ class Planner:
         self.last_artifact: LLMArtifact | None = None
         self.last_initial_artifact: LLMArtifact | None = None
         self.last_action_oov_detected = False
+        self.last_normalized_action_aliases: list[dict[str, str]] = []
+        self.task_router = TaskRouter()
+        self.last_task_route: TaskRoute | None = None
+        self.last_profile_diagnostics: dict[str, Any] = {}
+
+    def route_goal(self, user_goal: str, benchmark_context: dict | None = None) -> TaskRoute:
+        route = self.task_router.route(user_goal, benchmark_context=benchmark_context)
+        self.last_task_route = route
+        self.last_profile_diagnostics = route.diagnostics()
+        return route
 
     def build_plan(
         self,
         user_goal: str,
         benchmark_context: dict | None = None,
         images_base64: list[str] | None = None,
+        task_route: TaskRoute | None = None,
     ) -> TaskSpec:
-        system_prompt = PLANNER_SYSTEM_PROMPT
+        route = task_route or self.route_goal(user_goal, benchmark_context=benchmark_context)
+        system_prompt = build_profile_planner_prompt(route.profile, stage="planner")
         if benchmark_context:
             system_prompt = build_benchmark_planner_prompt(
                 task_family=str(benchmark_context.get("task_family", "unknown")),
                 allowed_actions=list(benchmark_context.get("allowed_actions", [])),
             )
+        route.profile.profile_prompt_length = len(system_prompt)
+        self.last_task_route = route
+        self.last_profile_diagnostics = route.diagnostics()
         artifact = self.llm_client.generate_planner_artifact(
             system_prompt=system_prompt,
             user_prompt=user_goal,
@@ -41,47 +69,169 @@ class Planner:
         )
         self.last_artifact = artifact
         normalized, action_oov_detected = normalize_plan_action_aliases(artifact.parsed_response)
+        self.last_normalized_action_aliases = list(normalized.get("_normalized_action_aliases") or [])
+        raise_for_invalid_plan_actions(
+            normalized,
+            profile_diagnostics=self.last_profile_diagnostics,
+            allowed_actions=route.profile.allowed_actions,
+        )
         normalized = self._normalize_plan_envelope(normalized, user_goal, benchmark_context=benchmark_context)
         normalized = self._normalize_required_fields_against_steps(normalized)
         self.last_action_oov_detected = action_oov_detected
+        raise_for_invalid_plan_actions(
+            normalized,
+            profile_diagnostics=self.last_profile_diagnostics,
+            allowed_actions=route.profile.allowed_actions,
+        )
         return TaskSpec.model_validate(normalized)
 
     def build_initial_plan(self, user_goal: str) -> TaskSpec:
-        artifact = self.llm_client.generate_planner_artifact(
-            system_prompt=INITIAL_PLANNER_SYSTEM_PROMPT,
-            user_prompt=user_goal,
-            stage="initial_planner",
-        )
+        try:
+            artifact = self.llm_client.generate_planner_artifact(
+                system_prompt=INITIAL_PLANNER_SYSTEM_PROMPT,
+                user_prompt=user_goal,
+                stage="initial_planner",
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                artifact = self._retry_initial_generation_after_error(user_goal=user_goal, error=str(exc))
+            except Exception as retry_exc:  # noqa: BLE001
+                fallback = self._build_initial_fallback(user_goal=user_goal)
+                artifact = LLMArtifact(
+                    raw_response=json.dumps(
+                        {
+                            "fallback_reason": "initial_planner_generation_failed",
+                            "error": str(exc),
+                            "retry_error": str(retry_exc),
+                            "plan": fallback,
+                        },
+                        ensure_ascii=False,
+                    ),
+                    parsed_response=fallback,
+                    generation=GenerationMetadata(
+                        backend="local",
+                        model="initial_planner_fallback",
+                        source="fallback",
+                        fallback_used=True,
+                    ),
+                )
         self.last_initial_artifact = artifact
 
         parsed = artifact.parsed_response
         # Fail-safe for non-compliant outputs.
         if not self._is_valid_initial_shape(parsed):
-            fallback = self._build_initial_fallback(user_goal)
-            self.last_initial_artifact = LLMArtifact(
-                raw_response=json.dumps(fallback, ensure_ascii=False),
-                parsed_response=fallback,
-                generation=artifact.generation,
+            parsed = self._repair_initial_plan(
+                user_goal=user_goal,
+                invalid_payload=parsed,
+                artifact=artifact,
             )
-            parsed = fallback
         normalized = self._normalize_initial_plan(parsed, user_goal)
         normalized, action_oov_detected = normalize_plan_action_aliases(normalized)
+        self.last_normalized_action_aliases = list(normalized.get("_normalized_action_aliases") or [])
         self.last_action_oov_detected = action_oov_detected
+        raise_for_invalid_plan_actions(normalized)
         return TaskSpec.model_validate(normalized)
+
+    def _retry_initial_generation_after_error(self, *, user_goal: str, error: str) -> LLMArtifact:
+        repair_payload = {
+            "user_goal": user_goal,
+            "previous_error": error,
+            "repair_request": (
+                "Return only one valid JSON TaskSpec object for initial observation. "
+                "Use exactly open_url, observe_page, finish. If the goal names a public website/service "
+                "without a URL, infer its canonical public HTTPS homepage from general knowledge. "
+                "Do not use placeholder or dummy URLs."
+            ),
+        }
+        return self.llm_client.generate_planner_artifact(
+            system_prompt=INITIAL_PLANNER_SYSTEM_PROMPT,
+            user_prompt=json.dumps(repair_payload, ensure_ascii=False),
+            stage="initial_planner_repair",
+        )
 
     @staticmethod
     def _is_valid_initial_shape(payload: dict) -> bool:
         try:
             steps = payload.get("steps", [])
             actions = [s.get("action") for s in steps]
-            return actions == ["open_url", "observe_page", "finish"]
+            return actions == ["open_url", "observe_page", "finish"] and bool(Planner._extract_first_url(payload))
         except Exception:
             return False
 
+    def _repair_initial_plan(self, *, user_goal: str, invalid_payload: dict, artifact: LLMArtifact) -> dict:
+        try:
+            fallback = self._build_initial_fallback(user_goal=user_goal, candidate_payload=invalid_payload)
+            self.last_initial_artifact = LLMArtifact(
+                raw_response=json.dumps(fallback, ensure_ascii=False),
+                parsed_response=fallback,
+                generation=artifact.generation,
+            )
+            return fallback
+        except PlannerValidationFailed:
+            pass
+
+        repair_payload = {
+            "user_goal": user_goal,
+            "invalid_initial_plan": invalid_payload,
+            "repair_request": (
+                "Return a valid initial observation TaskSpec only. It must have exactly these actions in order: "
+                "open_url, observe_page, finish. Infer start_url from the user goal if a public site/service is named. "
+                "Use its canonical public HTTPS homepage from general knowledge, and never use placeholder or dummy URLs. "
+                "Do not extract final data in this initial plan."
+            ),
+        }
+        try:
+            repaired = self.llm_client.generate_planner_artifact(
+                system_prompt=INITIAL_PLANNER_SYSTEM_PROMPT,
+                user_prompt=json.dumps(repair_payload, ensure_ascii=False, indent=2),
+                stage="initial_planner_repair",
+            )
+        except Exception as exc:  # noqa: BLE001
+            try:
+                fallback = self._build_initial_fallback(user_goal=user_goal, candidate_payload=invalid_payload)
+            except PlannerValidationFailed as fallback_exc:
+                details = dict(fallback_exc.diagnostics)
+                details["repair_error"] = str(exc)
+                raise PlannerValidationFailed(details) from exc
+            self.last_initial_artifact = LLMArtifact(
+                raw_response=json.dumps(
+                    {
+                        "fallback_reason": "initial_planner_repair_failed",
+                        "repair_error": str(exc),
+                        "plan": fallback,
+                    },
+                    ensure_ascii=False,
+                ),
+                parsed_response=fallback,
+                generation=artifact.generation,
+            )
+            return fallback
+        self.last_initial_artifact = repaired
+        if self._is_valid_initial_shape(repaired.parsed_response):
+            return repaired.parsed_response
+        fallback = self._build_initial_fallback(
+            user_goal=user_goal,
+            candidate_payload=repaired.parsed_response,
+        )
+        self.last_initial_artifact = LLMArtifact(
+            raw_response=json.dumps(fallback, ensure_ascii=False),
+            parsed_response=fallback,
+            generation=repaired.generation,
+        )
+        return fallback
+
     @staticmethod
-    def _build_initial_fallback(user_goal: str) -> dict:
-        match = re.search(r"https?://[^\s\"'<>]+", user_goal)
-        url = (match.group(0).rstrip(".,)") if match else "https://www.wikipedia.org")
+    def _build_initial_fallback(user_goal: str, candidate_payload: dict | None = None) -> dict:
+        url = Planner._extract_first_url(candidate_payload) or Planner._extract_first_url(user_goal)
+        url = Planner._normalize_url_candidate(url)
+        if not url:
+            raise PlannerValidationFailed(
+                {
+                    "failure_stage": "planner_validation_failed",
+                    "reason": "missing_start_url",
+                    "message": "Cannot build fallback plan without an explicit URL from the model, goal, or context.",
+                }
+            )
         domain = re.sub(r"^https?://", "", url).split("/")[0]
         return {
             "goal": user_goal,
@@ -98,6 +248,78 @@ class Planner:
                 {"step_id": 3, "action": "finish", "args": {}},
             ],
         }
+
+    @staticmethod
+    def _extract_first_url(value: object) -> str:
+        if isinstance(value, str):
+            return Planner._normalize_url_candidate(value)
+        if isinstance(value, dict):
+            for key in ("start_url", "url"):
+                found = Planner._extract_first_url(value.get(key))
+                if found:
+                    return found
+            steps = value.get("steps")
+            if isinstance(steps, list):
+                for step in steps:
+                    found = Planner._extract_first_url(step)
+                    if found:
+                        return found
+            args = value.get("args")
+            if isinstance(args, dict):
+                found = Planner._extract_first_url(args)
+                if found:
+                    return found
+        if isinstance(value, list):
+            for item in value:
+                found = Planner._extract_first_url(item)
+                if found:
+                    return found
+        return ""
+
+    @staticmethod
+    def _normalize_url_candidate(value: object) -> str:
+        if not isinstance(value, str):
+            return ""
+        text = value.strip()
+        if not text:
+            return ""
+
+        explicit = re.search(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
+        if explicit:
+            candidate = explicit.group(0).rstrip(".,);]")
+            parsed = urlparse(candidate)
+            if Planner._is_valid_url_host(parsed.netloc):
+                return candidate
+            return ""
+
+        domain_like = re.search(
+            r"(?<![@\w.-])(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?:/[^\s\"'<>]*)?",
+            text,
+            flags=re.IGNORECASE,
+        )
+        if not domain_like:
+            return ""
+
+        candidate = domain_like.group(0).rstrip(".,);]")
+        host = candidate.split("/", 1)[0].lower()
+        labels = host.split(".")
+        if len(labels) < 2 or any(not label or label.startswith("-") or label.endswith("-") for label in labels):
+            return ""
+        tld = labels[-1]
+        if not (2 <= len(tld) <= 24 and tld.isalpha()):
+            return ""
+        return f"https://{candidate}"
+
+    @staticmethod
+    def _is_valid_url_host(netloc: str) -> bool:
+        host = str(netloc or "").split("@")[-1].split(":", 1)[0].strip().strip(".")
+        if not host or host != str(netloc or "").split("@")[-1].split(":", 1)[0].strip():
+            return False
+        labels = host.split(".")
+        if len(labels) < 2 or any(not label or label.startswith("-") or label.endswith("-") for label in labels):
+            return False
+        tld = labels[-1]
+        return bool(2 <= len(tld) <= 24 and tld.isalpha())
 
     @staticmethod
     def _normalize_initial_plan(raw_plan: dict, user_goal: str) -> dict:
@@ -161,13 +383,31 @@ class Planner:
                     if candidate_url:
                         start_url = candidate_url
                         break
+        start_url = Planner._normalize_url_candidate(start_url)
 
         if not start_url:
-            start_url = "https://www.wikipedia.org"
+            raise PlannerValidationFailed(
+                {
+                    "failure_stage": "planner_validation_failed",
+                    "reason": "missing_start_url",
+                    "message": "Initial plan has no start_url and no open_url step with args.url.",
+                }
+        )
+
+        for step in normalized_steps:
+            if step.get("action") == "open_url":
+                url = Planner._normalize_url_candidate(step.get("args", {}).get("url") or start_url)
+                if url:
+                    step.setdefault("args", {})["url"] = url
+                break
 
         allowed_domains = plan.get("allowed_domains")
-        if not isinstance(allowed_domains, list) or not allowed_domains:
-            netloc = urlparse(str(start_url)).netloc
+        netloc = urlparse(str(start_url)).netloc
+        if (
+            not isinstance(allowed_domains, list)
+            or not allowed_domains
+            or (netloc and netloc not in {str(domain).strip() for domain in allowed_domains})
+        ):
             allowed_domains = [netloc] if netloc else []
 
         constraints = plan.get("constraints")
@@ -246,21 +486,6 @@ class Planner:
                 normalized[field_name] = {"group_index": index}
         return normalized
 
-    @staticmethod
-    def _normalize_required_field_aliases(fields: list[str]) -> list[str]:
-        aliases = {
-            "url": "final_url",
-            "current_url": "final_url",
-            "title": "page_title",
-            "current_title": "page_title",
-        }
-        normalized: list[str] = []
-        for field in fields:
-            key = aliases.get(str(field).strip().lower(), str(field).strip())
-            if key and key not in normalized:
-                normalized.append(key)
-        return normalized
-
     @classmethod
     def _normalize_extract_item_fields(cls, fields: object) -> object:
         if not isinstance(fields, dict):
@@ -297,18 +522,32 @@ class Planner:
         return text
 
     @staticmethod
-    def _looks_like_css_selector(value: object) -> bool:
-        selector = str(value or "").strip()
-        if not selector:
+    def _goal_requests_clicked_text(user_goal: str) -> bool:
+        folded = str(user_goal or "").casefold()
+        if not folded:
             return False
-        if re.search(r"[#.\[>:,*+~]", selector):
-            return True
-        if re.fullmatch(r"[a-zA-Z][a-zA-Z0-9_-]*", selector):
-            return True
-        return False
+        return any(token in folded for token in ("click", "clicked", "press", "open link", "нажм", "клик", "перейд"))
 
     @staticmethod
     def _infer_collection_output_key(*, user_goal: str, args: dict[str, Any], required_fields: list[str]) -> str:
+        explicit_output = str(args.get("output_key", "") or "").strip()
+        if explicit_output:
+            return explicit_output
+        explicit_type = " ".join(str(args.get(key, "")) for key in ("intent", "item_type", "type")).casefold()
+        if any(token in explicit_type for token in ("product", "products", "product_cards")):
+            return "products"
+        if any(token in explicit_type for token in ("repository", "repositories", "repo")):
+            return "repositories"
+        if any(token in explicit_type for token in ("paper", "papers", "preprint")):
+            return "papers"
+        if any(token in explicit_type for token in ("news", "news_items")):
+            return "news"
+        if any(token in explicit_type for token in ("article", "articles")):
+            return "articles"
+        if any(token in explicit_type for token in ("package", "package_metadata", "package_info", "library_metadata")):
+            return "package"
+        if any(token in explicit_type for token in ("language", "languages")):
+            return "languages"
         text = " ".join(
             [
                 str(user_goal or ""),
@@ -317,17 +556,17 @@ class Planner:
                 " ".join(required_fields),
             ]
         ).casefold()
-        if any(token in text for token in ("product", "products", "товар", "товары")):
+        if any(token in text for token in ("products[]", "product", "products", "товар")):
             return "products"
-        if any(token in text for token in ("repository", "repositories", "repo", "github", "репозитор")):
+        if any(token in text for token in ("repositories[]", "repository", "repositories", "repo", "репозитор")):
             return "repositories"
-        if any(token in text for token in ("paper", "papers", "arxiv", "preprint", "препринт", "научн")):
+        if any(token in text for token in ("papers[]", "paper", "papers", "preprint", "препринт", "научн")):
             return "papers"
-        if any(token in text for token in ("news", "новост")):
+        if any(token in text for token in ("news[]", "news", "новост")):
             return "news"
-        if any(token in text for token in ("article", "articles", "habr", "стать")):
+        if any(token in text for token in ("articles[]", "article", "articles", "стать")):
             return "articles"
-        if any(token in text for token in ("language", "languages", "язык")):
+        if any(token in text for token in ("languages[]", "language", "languages", "язык", "языков")):
             return "languages"
         return "results"
 
@@ -374,7 +613,7 @@ class Planner:
             context_fields = benchmark_context.get("required_fields")
             if isinstance(context_fields, list):
                 required_fields = [str(field).strip() for field in context_fields if str(field).strip()]
-        required_fields = cls._normalize_required_field_aliases(required_fields)
+        required_fields = normalize_required_field_aliases(required_fields)
 
         normalized_steps: list[dict] = []
         for index, step in enumerate(steps, start=1):
@@ -403,7 +642,7 @@ class Planner:
             if "output_key" not in current["args"] and current.get("output_key") is not None:
                 current["args"]["output_key"] = current.pop("output_key")
             if isinstance(current.get("save_as"), str) and current["save_as"].strip():
-                save_aliases = cls._normalize_required_field_aliases([current["save_as"].strip()])
+                save_aliases = normalize_required_field_aliases([current["save_as"].strip()])
                 if save_aliases:
                     current["save_as"] = save_aliases[0]
             if "target" not in current["args"] and "target_text" not in current["args"] and current["args"].get("semantic_target") is not None:
@@ -419,12 +658,44 @@ class Planner:
                 allowed_actions = set()
                 if isinstance(benchmark_context, dict) and isinstance(benchmark_context.get("allowed_actions"), list):
                     allowed_actions = {str(item).strip() for item in benchmark_context.get("allowed_actions", [])}
-                item_selector = current["args"].get("item_selector") or current["args"].get("container_selector")
-                if (
+                extract_by_intent_allowed = not allowed_actions or "extract_by_intent" in allowed_actions
+                extract_items_allowed = not allowed_actions or "extract_items" in allowed_actions
+                visible_links_allowed = not allowed_actions or "extract_visible_links" in allowed_actions
+                row_condition_allowed = not allowed_actions or "find_row_by_condition" in allowed_actions
+                explicit_structured_intent = str(
+                    current["args"].get("intent", "") or current["args"].get("item_type", "") or ""
+                ).strip()
+                structured_intent = (
+                    canonical_structured_intent(explicit_structured_intent)
+                    or semantic_intent_for_structured_step(current)
+                )
+                if structured_intent and extract_by_intent_allowed:
+                    action = "extract_by_intent"
+                    current["action"] = action
+                    output_key = current["args"].get("output_key") or cls._infer_collection_output_key(
+                        user_goal=user_goal,
+                        args=current["args"],
+                        required_fields=required_fields,
+                    )
+                    current["args"] = {
+                        "intent": structured_intent,
+                        **(
+                            {"item_type": current["args"].get("item_type")}
+                            if current["args"].get("item_type")
+                            else item_type_args_for_intent(structured_intent)
+                        ),
+                        **({"output_key": output_key} if output_key else {}),
+                        "limit": current["args"]["limit"] if isinstance(current["args"].get("limit"), int) and current["args"]["limit"] > 0 else 20,
+                    }
+                    if output_key and not str(current.get("save_as", "") or "").strip():
+                        current["save_as"] = str(output_key)
+                elif (
+                    item_selector := (current["args"].get("item_selector") or current["args"].get("container_selector"))
+                ) and (
                     item_selector
-                    and cls._looks_like_css_selector(item_selector)
+                    and looks_like_css_selector(item_selector)
                     and isinstance(current["args"].get("fields"), dict)
-                    and "extract_items" in allowed_actions
+                    and extract_items_allowed
                 ):
                     action = "extract_items"
                     current["action"] = action
@@ -436,7 +707,7 @@ class Planner:
                     }
                 elif (
                     any(key in current["args"] for key in ("filter", "condition", "conditions", "where"))
-                    and "find_row_by_condition" in allowed_actions
+                    and row_condition_allowed
                 ):
                     action = "find_row_by_condition"
                     current["action"] = action
@@ -464,14 +735,14 @@ class Planner:
                     }
                     if output_key and not str(current.get("save_as", "") or "").strip():
                         current["save_as"] = str(output_key)
-                elif "extract_visible_links" in allowed_actions:
+                elif "pattern" in current["args"] and (
+                    not isinstance(current["args"].get("limit"), int) or current["args"].get("limit") <= 0
+                ):
+                    current["args"]["limit"] = 20
+                elif visible_links_allowed:
                     action = "extract_visible_links"
                     current["action"] = action
-                    output_key = current["args"].get("output_key") or cls._infer_collection_output_key(
-                        user_goal=user_goal,
-                        args=current["args"],
-                        required_fields=required_fields,
-                    )
+                    output_key = current["args"].get("output_key") or "links"
                     current["args"] = {
                         key: value
                         for key, value in current["args"].items()
@@ -502,6 +773,8 @@ class Planner:
                     current["args"] = {"intent": "current_url"}
             if action == "extract_by_intent" and "intent" not in current["args"] and isinstance(current["args"].get("intents"), list):
                 current["args"]["intent"] = "row_fields"
+            if action == "extract_by_intent" and str(current["args"].get("intent", "") or "").strip():
+                current["args"]["intent"] = normalize_intent_alias(current["args"].get("intent"))
             if action == "extract_text":
                 save_as = str(current.get("save_as", "") or "").strip()
                 selector_hint = str(current["args"].get("selector", "") or "").strip().casefold()
@@ -520,7 +793,7 @@ class Planner:
                 if simplified_target and simplified_target != target_text:
                     current["args"]["target_text"] = simplified_target
                     target_text = simplified_target
-                option_match = re.search(r"\b([A-Za-z][\w-]{1,30})\s+or\s+([A-Za-z][\w-]{1,30})\b", target_text)
+                option_match = re.search(r"\b([A-Za-z][\w-]{1,30})\s+(?:or|или)\s+([A-Za-z][\w-]{1,30})\b", target_text, flags=re.IGNORECASE)
                 if option_match and "target_candidates" not in current["args"]:
                     current["args"]["target_candidates"] = [option_match.group(1), option_match.group(2)]
                 if "|" in target_text and "target_candidates" not in current["args"]:
@@ -534,10 +807,62 @@ class Planner:
                 current["save_as"] = "page_snapshot"
             if (
                 action == "click_by_semantic_target"
-                and "clicked_text" in required_fields
+                and ("clicked_text" in required_fields or cls._goal_requests_clicked_text(user_goal))
                 and not str(current.get("save_as", "") or "").strip()
             ):
                 current["save_as"] = "clicked_text"
+            collection_like_action = action in {
+                "extract_items",
+                "extract_structured_items",
+                "extract_visible_links",
+                "find_row_by_condition",
+            }
+            if action == "extract_by_intent":
+                intent = str(current["args"].get("intent", "") or "").strip().casefold()
+                collection_like_action = intent in {
+                    "",
+                    "visible_links",
+                    "extract_visible_links",
+                    "links",
+                    "search_results",
+                    "results",
+                    "result_list",
+                    "paper_results",
+                    "papers",
+                    "repository_results",
+                    "repositories",
+                    "repo_results",
+                    "article_results",
+                    "articles",
+                    "news_items",
+                    "news",
+                    "product_cards",
+                    "products",
+                    "table_rows",
+                    "rows",
+                    "currency_table_rows",
+                    "currency_rows",
+                    "package_metadata",
+                    "package_info",
+                    "library_metadata",
+                }
+            if (
+                collection_like_action
+                and not str(current.get("save_as", "") or "").strip()
+                and not str(current["args"].get("output_key", "") or "").strip()
+            ):
+                inferred_output_key = (
+                    "links"
+                    if action == "extract_visible_links"
+                    else cls._infer_collection_output_key(
+                        user_goal=user_goal,
+                        args=current["args"],
+                        required_fields=required_fields,
+                    )
+                )
+                if inferred_output_key:
+                    current["args"]["output_key"] = inferred_output_key
+                    current["save_as"] = inferred_output_key
             if (
                 action in {
                     "extract_text",
@@ -559,11 +884,18 @@ class Planner:
                 current["save_as"] = required_fields[0]
             normalized_steps.append(current)
 
+        normalized_steps = coalesce_package_metadata_steps(
+            normalized_steps,
+            goal=user_goal,
+            required_fields=required_fields,
+        )
+
         produced_fields = {
             str(step.get("save_as", "") or "").strip()
             for step in normalized_steps
             if str(step.get("save_as", "") or "").strip()
         }
+
         business_produced_fields = sorted(
             field for field in produced_fields if field not in {"page_snapshot", "clicked_text", "final_url", "page_title"}
         )
@@ -593,11 +925,24 @@ class Planner:
             start_url = str(benchmark_context.get("start_url") or "").strip()
         if not start_url:
             match = re.search(r"https?://[^\s\"'<>]+", user_goal or "")
-            start_url = match.group(0).rstrip(".,)") if match else "https://www.wikipedia.org"
+            if match:
+                start_url = match.group(0).rstrip(".,)")
+        if not start_url:
+            raise PlannerValidationFailed(
+                {
+                    "failure_stage": "planner_validation_failed",
+                    "reason": "missing_start_url",
+                    "message": "Final plan has no start_url, benchmark start_url, or URL in the user goal.",
+                }
+            )
 
         allowed_domains = plan.get("allowed_domains")
-        if not isinstance(allowed_domains, list) or not allowed_domains:
-            netloc = urlparse(start_url).netloc
+        netloc = urlparse(start_url).netloc
+        if (
+            not isinstance(allowed_domains, list)
+            or not allowed_domains
+            or (netloc and netloc not in {str(domain).strip() for domain in allowed_domains})
+        ):
             allowed_domains = [netloc] if netloc else []
 
         constraints = plan.get("constraints")
