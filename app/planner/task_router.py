@@ -6,6 +6,8 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
+from app.planner.action_vocab import goal_requests_semantic_region_fields, infer_semantic_region_required_fields
+
 
 TaskType = Literal[
     "single_entity_metadata",
@@ -34,6 +36,7 @@ SUPPORTED_RUNTIME_INTENTS = {
     "repository_results",
     "paper_results",
     "news_items",
+    "semantic_region_fields",
 }
 
 COMMON_RUNTIME_INTENTS = ["current_url", "page_title"]
@@ -161,7 +164,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_structured_items",
             "extract_items",
         ],
-        preferred_intents=_runtime_intents("package_metadata", "value_near_anchor"),
+        preferred_intents=_runtime_intents("package_metadata", "value_near_anchor", "semantic_region_fields"),
         conceptual_intents=["entity_metadata"],
         expected_output_type="object",
         required_skill_groups=["semantic_form_fill", "entity_metadata_extraction"],
@@ -269,7 +272,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_by_intent",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents("current_url", "page_title", "package_metadata"),
+        preferred_intents=_runtime_intents("current_url", "page_title", "package_metadata", "semantic_region_fields"),
         conceptual_intents=["semantic_navigation"],
         expected_output_type="navigation",
         required_skill_groups=["semantic_navigation"],
@@ -423,11 +426,15 @@ class TaskRouter:
             text,
             ["where", "whose", "contains", "containing", "filter", "condition", "matching", "в заголов", "котор", "содерж"],
         )
+        contact_region_fields = goal_requests_semantic_region_fields(text)
+        contact_page_link_request = contact_region_fields and self._has_any(text, ["contact page", "contacts page", "contact link", "ссылк", "страниц"])
 
         # Keep a normalized Cyrillic pass because some legacy token literals above are mojibake.
         search_required = search_required or self._has_any(text, ["найди", "поиск", "искать"])
         has_extract = has_extract or self._has_any(text, ["выгрузи", "извлеки", "верни", "получи", "собери"])
         list_output = list_output or self._has_any(text, ["список", "результат", "ссылк", "все", "топ"])
+        if contact_page_link_request:
+            list_output = False
         has_table = has_table or self._has_any(text, ["таблиц", "строк", "колон", "ячей"])
         cards_like = cards_like or self._has_any(text, ["карточ", "каталог", "витрин"])
         product_detail_hint = product_detail_hint or self._has_any(text, ["товар", "цен", "рейтинг", "атрибут"])
@@ -495,6 +502,15 @@ class TaskRouter:
             if cards_like:
                 scores["catalog_or_card_extraction"] += 0.08
 
+        if contact_region_fields:
+            signals.append("semantic_region_fields")
+            scores["single_entity_metadata"] += 0.84
+            scores["semantic_navigation"] += 0.2
+            scores["repeated_items_extraction"] -= 0.5
+            scores["search_results_extraction"] -= 0.2
+            if contact_page_link_request or navigation_required:
+                scores["semantic_navigation"] += 0.58
+
         if has_form:
             signals.append("requires_form_fill")
             for task_type in ("single_entity_metadata", "search_results_extraction", "catalog_or_card_extraction"):
@@ -533,6 +549,8 @@ class TaskRouter:
 
         profile = PROFILES[best_type].model_copy(deep=True)
         expected_fields = self._infer_expected_fields(text)
+        if contact_region_fields:
+            expected_fields = infer_semantic_region_required_fields(text, expected_fields)
         profile.expected_fields = expected_fields
         route = TaskRoute(
             task_type=best_type,  # type: ignore[arg-type]
@@ -593,6 +611,8 @@ class TaskRouter:
             ("rating", ["rating", "рейтинг"]),
             ("email", ["email", "mail", "почт"]),
             ("phone", ["phone", "телефон"]),
+            ("address", ["address", "адрес"]),
+            ("contact_page_url", ["contact page", "contacts page", "contact link", "ссылк", "страниц"]),
         ]
         for field, tokens in checks:
             if cls._has_any(text, tokens):

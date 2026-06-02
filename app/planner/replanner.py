@@ -6,7 +6,9 @@ from urllib.parse import urlparse
 
 from app.planner.action_vocab import (
     PACKAGE_METADATA_FIELDS,
+    build_semantic_region_fields_args,
     coalesce_package_metadata_steps,
+    goal_requests_semantic_region_fields,
     default_output_key_for_intent,
     normalize_plan_action_aliases,
     normalize_required_field_alias,
@@ -563,6 +565,15 @@ class Replanner:
         if not isinstance(steps, list):
             steps = []
 
+        raw_expected_result = plan.get("expected_result") if isinstance(plan.get("expected_result"), dict) else {}
+        required_fields = [
+            str(field).strip()
+            for field in (raw_expected_result.get("required_fields") if isinstance(raw_expected_result, dict) else [] or [])
+            if str(field).strip()
+        ]
+        if not required_fields and previous_plan is not None:
+            required_fields = list(previous_plan.expected_result.required_fields)
+
         normalized_steps: list[dict] = []
         logger = logging.getLogger(__name__)
         for idx, step in enumerate(steps, start=1):
@@ -660,6 +671,16 @@ class Replanner:
                         current["args"]["condition"] = condition
                 if not str(current.get("save_as", "") or "").strip():
                     current["save_as"] = "row_action"
+            if (
+                action == "extract_structured_items"
+                and goal_requests_semantic_region_fields(user_goal, required_fields)
+                and ("fields" not in current["args"] or not current["args"].get("fields"))
+            ):
+                output_key = str(current["args"].get("output_key") or current.get("save_as") or "contact_info").strip()
+                current["action"] = "extract_by_intent"
+                current["args"] = build_semantic_region_fields_args(user_goal, required_fields, output_key=output_key)
+                current["save_as"] = output_key
+                action = "extract_by_intent"
             if action == "extract_structured_items":
                 semantic_intent = semantic_intent_for_structured_step(current)
                 if semantic_intent:

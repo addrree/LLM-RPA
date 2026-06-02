@@ -1505,6 +1505,13 @@ class ActionHandlers:
             return page.url
         if intent in {"page_title", "title"}:
             return await page.title()
+        if intent in {"semantic_region_fields", "field_schema", "region_fields"}:
+            result = await self._extract_semantic_region_fields(page=page, args=args, runtime_state=runtime_state)
+            args["_executor_note"] = (
+                f"extract_by_intent intent=semantic_region_fields status={result.get('status')}; "
+                f"found_fields={result.get('found_fields', [])}"
+            )
+            return result
         if intent in {"row_fields", "row_details", "structured_row_details", "currency_details"}:
             row = (runtime_state or {}).get("last_row_by_condition")
             if isinstance(row, dict):
@@ -1686,6 +1693,165 @@ class ActionHandlers:
             message=f"No generic extraction decision for intent={intent!r}.",
             details={"intent": intent, "reason": "unsupported_intent"},
         )
+
+
+    async def _extract_semantic_region_fields(self, *, page, args: dict, runtime_state=None) -> dict[str, Any]:
+        fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
+        if not fields:
+            raise StructuredExtractionError(
+                code="semantic_region_fields_missing_schema",
+                message="semantic_region_fields extraction requires a non-empty fields schema.",
+                details={"intent": args.get("intent")},
+            )
+        candidates = [str(item).strip() for item in args.get("region_candidates", []) if str(item).strip()]
+        hint = str(args.get("region_hint", "") or "").strip()
+        if hint:
+            candidates.extend(part for part in re.split(r"[/,|]+", hint) if part.strip())
+        candidates = self._unique_preserve_order(candidates)
+
+        navigated = await self._navigate_to_semantic_region_link(page=page, candidates=candidates)
+        if navigated:
+            await self._wait_after_possible_navigation(page)
+            if runtime_state is not None:
+                runtime_state.pop("last_page_text", None)
+
+        source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=navigated)
+        region_text = self._select_semantic_region_text(source_text=source_text, candidates=candidates) or source_text
+        href_values = await self._extract_typed_href_values(page)
+        payload: dict[str, Any] = {}
+
+        for field_name, rule in fields.items():
+            field = str(field_name or "").strip()
+            if not field:
+                continue
+            rule_dict = rule if isinstance(rule, dict) else {"type": str(rule or "text")}
+            field_type = str(rule_dict.get("type", "text") or "text").strip().casefold()
+            anchors = [str(item).strip() for item in rule_dict.get("anchors", []) if str(item).strip()] if isinstance(rule_dict.get("anchors"), list) else []
+            value = None
+            if field_type in {"current_url", "final_url", "url"}:
+                value = getattr(page, "url", "")
+            elif field_type == "email":
+                value = self._first_email_candidate(region_text, href_values.get("mailto", []))
+            elif field_type == "phone":
+                value = self._first_phone_candidate(region_text, href_values.get("tel", []))
+            else:
+                value = self._text_field_candidate(region_text=region_text, anchors=anchors, field_type=field_type)
+            if value not in (None, "", [], {}):
+                payload[field] = value
+
+        requested = [str(field).strip() for field in fields if str(field).strip()]
+        found = [field for field in requested if field in payload and payload[field] not in (None, "", [], {})]
+        payload["status"] = "success" if len(found) == len(requested) else ("partial_success" if found else "not_found")
+        payload["found_fields"] = found
+        payload["missing_fields"] = [field for field in requested if field not in found]
+        return payload
+
+    @staticmethod
+    def _unique_preserve_order(items: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in items:
+            key = item.casefold()
+            if key and key not in seen:
+                result.append(item)
+                seen.add(key)
+        return result
+
+    async def _navigate_to_semantic_region_link(self, *, page, candidates: list[str]) -> bool:
+        if not candidates:
+            return False
+        folded_candidates = [candidate.casefold() for candidate in candidates]
+        try:
+            links = await page.locator("a").evaluate_all(
+                """els => els.slice(0, 200).map(a => ({text: (a.innerText || a.textContent || '').trim(), href: a.href || ''}))"""
+            )
+        except Exception:
+            return False
+        if not isinstance(links, list):
+            return False
+        for link in links:
+            if not isinstance(link, dict):
+                continue
+            text = str(link.get("text", "") or "").strip()
+            href = str(link.get("href", "") or "").strip()
+            folded = f"{text} {href}".casefold()
+            if href and any(candidate in folded for candidate in folded_candidates):
+                try:
+                    await page.goto(href, wait_until="domcontentloaded", timeout=20000)
+                    return True
+                except Exception:
+                    return False
+        return False
+
+    @staticmethod
+    def _select_semantic_region_text(*, source_text: str, candidates: list[str]) -> str:
+        lines = [line.strip() for line in str(source_text or "").splitlines() if line.strip()]
+        if not lines or not candidates:
+            return ""
+        folded_candidates = [candidate.casefold() for candidate in candidates]
+        for index, line in enumerate(lines):
+            if any(candidate in line.casefold() for candidate in folded_candidates):
+                start = max(0, index - 2)
+                end = min(len(lines), index + 12)
+                return "\n".join(lines[start:end])
+        return ""
+
+    async def _extract_typed_href_values(self, page) -> dict[str, list[str]]:
+        result = {"mailto": [], "tel": []}
+        try:
+            hrefs = await page.locator("a[href]").evaluate_all("els => els.slice(0, 300).map(a => a.getAttribute('href') || '')")
+        except Exception:
+            return result
+        if not isinstance(hrefs, list):
+            return result
+        for href in hrefs:
+            value = str(href or "").strip()
+            folded = value.casefold()
+            if folded.startswith("mailto:"):
+                result["mailto"].append(value.split(":", 1)[1].split("?", 1)[0])
+            elif folded.startswith("tel:"):
+                result["tel"].append(value.split(":", 1)[1])
+        return result
+
+    @staticmethod
+    def _first_email_candidate(text: str, href_values: list[str]) -> str:
+        for value in href_values:
+            match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", value, flags=re.IGNORECASE)
+            if match:
+                return match.group(0)
+        match = re.search(r"[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}", text, flags=re.IGNORECASE)
+        return match.group(0) if match else ""
+
+    @staticmethod
+    def _first_phone_candidate(text: str, href_values: list[str]) -> str:
+        for value in href_values:
+            cleaned = re.sub(r"[^0-9+() -]", "", value).strip()
+            if len(re.sub(r"\D", "", cleaned)) >= 7:
+                return cleaned
+        for match in re.finditer(r"(?:\+?\d[\d ()-]{6,}\d)", text):
+            value = re.sub(r"\s+", " ", match.group(0)).strip()
+            digits = re.sub(r"\D", "", value)
+            if 7 <= len(digits) <= 16:
+                return value
+        return ""
+
+    @staticmethod
+    def _text_field_candidate(*, region_text: str, anchors: list[str], field_type: str) -> str:
+        lines = [line.strip() for line in str(region_text or "").splitlines() if line.strip()]
+        folded_anchors = [anchor.casefold() for anchor in anchors]
+        for index, line in enumerate(lines):
+            folded = line.casefold()
+            if folded_anchors and any(anchor in folded for anchor in folded_anchors):
+                after_separator = re.split(r"[:：—-]", line, maxsplit=1)
+                if len(after_separator) > 1 and after_separator[1].strip():
+                    return after_separator[1].strip()
+                if index + 1 < len(lines):
+                    return lines[index + 1].strip()
+        if field_type in {"text", "address"}:
+            for line in lines:
+                if re.search(r"\b\d{5,6}\b", line) or re.search(r"\b(street|avenue|road|building|suite|office|ул\.|улица|проспект|дом|офис)\b", line, flags=re.IGNORECASE):
+                    return line
+        return ""
 
     @staticmethod
     def _intent_field_alias(field: str) -> str:
