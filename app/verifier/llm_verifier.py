@@ -1,5 +1,6 @@
 import json
 import os
+from copy import deepcopy
 
 from app.schemas.execution import ExecutionResult, LLMArtifact
 from app.schemas.task_spec import TaskSpec
@@ -66,11 +67,15 @@ class LLMVerifier:
         semantic_required_fields = [
             field for field in plan.expected_result.required_fields if field not in TECHNICAL_REQUIRED_FIELDS
         ]
+        verifier_extracted_data = self._normalized_extracted_data_for_verifier(
+            required_fields=semantic_required_fields,
+            result=result,
+        )
         deterministic_issues = self._validate_structured_compare_contract(result.extracted_data)
         deterministic_issues.extend(
             self._validate_semantic_value_quality(
                 required_fields=semantic_required_fields,
-                extracted_data=result.extracted_data,
+                extracted_data=verifier_extracted_data,
                 goal=plan.goal,
             )
         )
@@ -102,6 +107,7 @@ class LLMVerifier:
             plan=plan,
             result=result,
             required_fields=semantic_required_fields,
+            extracted_data=verifier_extracted_data,
             benchmark_context=benchmark_context or {},
         )
         if fast_path_verdict is not None:
@@ -112,7 +118,7 @@ class LLMVerifier:
             user_goal=plan.goal,
             expected_result_description=plan.expected_result.description,
             required_fields=semantic_required_fields,
-            extracted_data=result.extracted_data,
+            extracted_data=verifier_extracted_data,
             final_url=result.final_url,
             page_title=result.page_title,
             page_text_excerpt=result.page_text_excerpt,
@@ -356,9 +362,12 @@ class LLMVerifier:
         plan: TaskSpec,
         result: ExecutionResult,
         required_fields: list[str],
+        extracted_data: dict | None = None,
         benchmark_context: dict,
     ) -> VerificationVerdict | None:
-        extracted_data = result.extracted_data if isinstance(result.extracted_data, dict) else {}
+        extracted_data = extracted_data if isinstance(extracted_data, dict) else (
+            result.extracted_data if isinstance(result.extracted_data, dict) else {}
+        )
         normalized_required = [str(field).strip() for field in required_fields if str(field).strip()]
         if not normalized_required:
             return None
@@ -382,6 +391,45 @@ class LLMVerifier:
                     verdict="accept",
                     issues=[],
                     summary="Deterministic verifier accepted populated page metadata fields.",
+                )
+
+        object_metadata_fields = {
+            "name",
+            "title",
+            "page_title",
+            "current_title",
+            "description",
+            "summary",
+            "snippet",
+            "url",
+            "final_url",
+            "current_url",
+        }
+        if set(normalized_required).issubset(object_metadata_fields):
+            present_fields = [
+                field
+                for field in normalized_required
+                if cls._has_meaningful_value(cls._value_for_required_field(field, result, extracted_data))
+            ]
+            missing_fields = [field for field in normalized_required if field not in present_fields]
+            if not missing_fields:
+                return VerificationVerdict(
+                    task_completed=True,
+                    confidence=0.91,
+                    verdict="accept",
+                    issues=[],
+                    summary="Deterministic verifier accepted populated object metadata fields.",
+                )
+            if present_fields:
+                return VerificationVerdict(
+                    task_completed=False,
+                    confidence=0.58,
+                    verdict="uncertain",
+                    issues=[
+                        "Partial required fields satisfied; missing: "
+                        + ", ".join(missing_fields)
+                    ],
+                    summary="Verifier saw partial success for object metadata fields.",
                 )
 
         structured_outputs = {
@@ -413,6 +461,22 @@ class LLMVerifier:
                     verdict="accept",
                     issues=[],
                     summary="Deterministic verifier accepted populated structured extraction fields.",
+                )
+
+        count_fields = [field for field in normalized_required if field == "count" or field.endswith("_count")]
+        if count_fields and len(count_fields) == len(normalized_required):
+            missing_or_invalid = [
+                field
+                for field in count_fields
+                if not isinstance(extracted_data.get(field), (int, float)) or extracted_data.get(field) < 0
+            ]
+            if not missing_or_invalid:
+                return VerificationVerdict(
+                    task_completed=True,
+                    confidence=0.93,
+                    verdict="accept",
+                    issues=[],
+                    summary="Deterministic verifier accepted populated count fields.",
                 )
 
         task_family = str(benchmark_context.get("task_family", "")).strip().lower()
@@ -466,14 +530,87 @@ class LLMVerifier:
             )
         return None
 
+    @classmethod
+    def _normalized_extracted_data_for_verifier(
+        cls,
+        *,
+        required_fields: list[str],
+        result: ExecutionResult,
+    ) -> dict:
+        source = result.extracted_data if isinstance(result.extracted_data, dict) else {}
+        normalized = deepcopy(source)
+        if not isinstance(normalized, dict):
+            normalized = {}
+
+        if result.final_url:
+            normalized.setdefault("final_url", result.final_url)
+        if result.page_title:
+            normalized.setdefault("page_title", result.page_title)
+
+        for field in required_fields:
+            field_name = str(field or "").strip()
+            if not field_name:
+                continue
+            value = cls._value_for_required_field(field_name, result, normalized)
+            if cls._has_meaningful_value(value):
+                normalized.setdefault(field_name, value)
+
+        for aliases in cls._field_alias_groups():
+            value = cls._first_meaningful_value_for_aliases(aliases, normalized)
+            if not cls._has_meaningful_value(value):
+                continue
+            for alias in aliases:
+                normalized.setdefault(alias, value)
+        return normalized
+
     @staticmethod
     def _value_for_required_field(field: str, result: ExecutionResult, extracted_data: dict) -> object:
         normalized = str(field or "").strip().lower()
+        aliases = LLMVerifier._aliases_for_field(normalized)
+        value = LLMVerifier._first_meaningful_value_for_aliases(aliases, extracted_data)
+        if LLMVerifier._has_meaningful_value(value):
+            return value
         if normalized in {"final_url", "current_url", "url"}:
-            return extracted_data.get(field) or result.final_url
-        if normalized in {"page_title", "current_title", "title"}:
-            return extracted_data.get(field) or result.page_title
+            return result.final_url
+        if normalized in {"page_title", "current_title", "title", "name"}:
+            return result.page_title
         return extracted_data.get(field)
+
+    @staticmethod
+    def _aliases_for_field(field: str) -> tuple[str, ...]:
+        normalized = str(field or "").strip().lower()
+        for aliases in LLMVerifier._field_alias_groups():
+            if normalized in aliases:
+                return aliases
+        return (normalized,)
+
+    @staticmethod
+    def _field_alias_groups() -> tuple[tuple[str, ...], ...]:
+        return (
+            ("title", "name", "page_title", "current_title"),
+            ("url", "final_url", "current_url"),
+            ("description", "summary", "snippet"),
+        )
+
+    @classmethod
+    def _first_meaningful_value_for_aliases(cls, aliases: tuple[str, ...], data: object) -> object:
+        if not isinstance(data, dict):
+            return None
+        lower_aliases = {alias.lower() for alias in aliases}
+        for key, value in data.items():
+            if str(key).strip().lower() in lower_aliases and cls._has_meaningful_value(value):
+                return value
+        for value in data.values():
+            if isinstance(value, dict):
+                nested = cls._first_meaningful_value_for_aliases(aliases, value)
+                if cls._has_meaningful_value(nested):
+                    return nested
+            elif isinstance(value, list):
+                for item in value:
+                    nested = cls._first_meaningful_value_for_aliases(aliases, item)
+                    if cls._has_meaningful_value(nested):
+                        return nested
+        return None
 
     @staticmethod
     def _has_meaningful_value(value: object) -> bool:

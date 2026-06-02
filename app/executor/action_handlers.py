@@ -204,6 +204,21 @@ class ActionHandlers:
         target_candidates = args.get("target_candidates")
         if not isinstance(target_candidates, list) or not target_candidates:
             target_candidates = [request.get("target_text")]
+        first_result_navigation_request = self._looks_like_first_result_navigation_request(request)
+        if first_result_navigation_request:
+            opened_result = await self._click_first_result_like_link(page, args, runtime_state)
+            if opened_result:
+                self._mark_used_skill(runtime_state, "semantic_click")
+                args["_executor_note"] = (
+                    f"click_by_semantic_target target={request.get('target_text')!r}; "
+                    "strategy=first_result_link_fallback"
+                )
+                return opened_result
+            raise StructuredExtractionError(
+                code="target_link_not_found",
+                message=f"first result link not found for target: {request.get('target_text')!r}",
+                details={"target_text": request.get("target_text"), "reason": "no_result_like_link_found"},
+            )
         result = None
         last_error = None
         fallback_clicked_text = None
@@ -315,6 +330,58 @@ class ActionHandlers:
             except Exception:
                 continue
         return None
+
+    @staticmethod
+    def _looks_like_first_result_navigation_request(request: dict[str, Any]) -> bool:
+        text = " ".join(str(request.get(key, "") or "") for key in ("target_text", "role", "scope")).casefold()
+        if not any(token in text for token in ("result", "results", "item", "link")):
+            return False
+        return any(token in text for token in ("first", "top", "best", "relevant", "1st"))
+
+    @staticmethod
+    def _result_item_type_from_target(target_text: str) -> str:
+        text = str(target_text or "").casefold()
+        checks = [
+            ("repository", ("repository", "repositories", "repo")),
+            ("paper", ("paper", "papers", "preprint", "publication")),
+            ("article", ("article", "articles", "news", "post")),
+        ]
+        for item_type, tokens in checks:
+            if any(token in text for token in tokens):
+                return item_type
+        return ""
+
+    async def _click_first_result_like_link(self, page, args: dict, runtime_state=None) -> str:
+        target_text = str(args.get("target_text") or args.get("text") or args.get("target") or "")
+        delegated = {
+            "intent": "search_results",
+            "output_key": "search_results",
+            "limit": int(args.get("limit", 5) or 5),
+        }
+        item_type = self._result_item_type_from_target(target_text)
+        if item_type:
+            delegated["item_type"] = item_type
+        items = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            href = str(item.get("href") or item.get("link") or "").strip()
+            selector = str(item.get("selector") or "").strip()
+            if href:
+                await page.goto(href, wait_until="domcontentloaded", timeout=int(args.get("navigation_timeout_ms", 20000)))
+                await self._wait_after_possible_navigation(page)
+                await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="after_first_result_navigation")
+                if runtime_state is not None:
+                    runtime_state["last_opened_result"] = item
+                return str(item.get("title") or item.get("text") or href).strip()
+            if selector:
+                await page.locator(selector).first.click(no_wait_after=True)
+                await self._wait_after_possible_navigation(page)
+                await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="after_first_result_click")
+                if runtime_state is not None:
+                    runtime_state["last_opened_result"] = item
+                return str(item.get("title") or item.get("text") or selector).strip()
+        return ""
 
     @staticmethod
     async def _page_has_antibot_challenge(page) -> bool:
@@ -1232,6 +1299,17 @@ class ActionHandlers:
         ).casefold()
         return any(token in text for token in ["search result", "search_results", "results", "результат"])
 
+    @staticmethod
+    def _card_items_requested(*, args: dict, runtime_state=None) -> bool:
+        explicit = " ".join(
+            str(args.get(key, ""))
+            for key in ("intent", "item_type", "type", "output_key")
+        ).casefold()
+        if any(token in explicit for token in ["card", "cards", "card_items", "catalog", "listing", "listings"]):
+            return True
+        goal = str((runtime_state or {}).get("user_goal", "") if isinstance(runtime_state, dict) else "").casefold()
+        return any(token in goal for token in ["card", "cards", "catalog", "listing", "listings", "карточ", "каталог"])
+
     async def _direct_search_result_from_current_page(self, *, page, args: dict, runtime_state=None) -> dict[str, Any] | None:
         if not self._search_results_requested(args=args, runtime_state=runtime_state):
             return None
@@ -1345,6 +1423,79 @@ class ActionHandlers:
             score += 50
         return score
 
+    @staticmethod
+    def _append_executor_note(args: dict, note: str | None) -> None:
+        note = str(note or "").strip()
+        if not note:
+            return
+        existing = str(args.get("_executor_note", "") or "").strip()
+        args["_executor_note"] = f"{existing}; {note}" if existing else note
+
+    @classmethod
+    def _confident_filter_condition(cls, *, args: dict, allow_target: bool = False) -> tuple[Any | None, bool]:
+        hint_present = False
+        for key in ("condition", "filter", "where"):
+            if key not in args:
+                continue
+            hint_present = True
+            value = args.get(key)
+            if cls._condition_term_groups(value):
+                return value, True
+        if "target" in args:
+            hint_present = True
+            target = args.get("target")
+            target_is_condition = allow_target or any(
+                bool(args.get(flag))
+                for flag in ("filter_by_target", "target_is_condition", "condition_from_target")
+            )
+            if target_is_condition and cls._condition_term_groups(target):
+                return target, True
+        return None, hint_present
+
+    @staticmethod
+    def _record_condition_filter_diagnostic(runtime_state, *, output_key: str, reason: str, condition: Any) -> None:
+        if runtime_state is None:
+            return
+        diagnostics = runtime_state.setdefault("condition_filter_diagnostics", [])
+        diagnostics.append(
+            {
+                "output_key": output_key,
+                "reason": reason,
+                "condition": condition,
+            }
+        )
+
+    @classmethod
+    def _apply_confident_item_filter(
+        cls,
+        *,
+        items: list[dict[str, Any]],
+        args: dict,
+        runtime_state=None,
+        output_key: str,
+    ) -> tuple[list[dict[str, Any]], str]:
+        condition, filter_hint_present = cls._confident_filter_condition(args=args, allow_target=False)
+        if not condition:
+            if filter_hint_present:
+                cls._record_condition_filter_diagnostic(
+                    runtime_state,
+                    output_key=output_key,
+                    reason="condition_not_applied",
+                    condition=args.get("condition") or args.get("filter") or args.get("where") or args.get("target"),
+                )
+                return items, "condition_not_applied"
+            return items, ""
+        filtered = cls._filter_structured_rows_by_condition(rows=items, condition=condition)
+        if not filtered:
+            cls._record_condition_filter_diagnostic(
+                runtime_state,
+                output_key=output_key,
+                reason="no_matching_items",
+                condition=condition,
+            )
+            return [], "no_matching_items"
+        return filtered, "filter_applied"
+
     async def extract_by_intent(self, page, args, runtime_state=None):
         intent = str(args.get("intent", "")).strip().lower()
         item_type = str(args.get("item_type", "") or args.get("type", "")).strip().lower()
@@ -1374,50 +1525,142 @@ class ActionHandlers:
             args["_executor_note"] = "extract_by_intent intent=package_metadata extractor=generic_package_metadata"
             return result
         if intent in {"search_results", "results", "result_list"}:
-            result = await self._collect_search_results_by_intent(page=page, args=args, runtime_state=runtime_state)
+            if self._card_items_requested(args=args, runtime_state=runtime_state):
+                result = await self._collect_card_items_generic(page=page, args=args, runtime_state=runtime_state)
+                intent_note = "card_items"
+            else:
+                result = await self._collect_search_results_by_intent(page=page, args=args, runtime_state=runtime_state)
+                intent_note = f"search_results item_type={item_type or 'generic'}"
+            result, filter_note = self._apply_confident_item_filter(
+                items=result,
+                args=args,
+                runtime_state=runtime_state,
+                output_key=str(args.get("output_key", "") or "results"),
+            )
             args["_executor_note"] = (
-                f"extract_by_intent intent=search_results item_type={item_type or 'generic'} "
+                f"extract_by_intent intent={intent_note} "
                 f"selected_count={len(result)}"
             )
+            self._append_executor_note(args, filter_note)
             return result
         if intent in {"paper_results", "papers"}:
             delegated = dict(args)
             delegated["item_type"] = "paper"
             result = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+            result, filter_note = self._apply_confident_item_filter(
+                items=result,
+                args=args,
+                runtime_state=runtime_state,
+                output_key=str(args.get("output_key", "") or "papers"),
+            )
             args["_executor_note"] = f"extract_by_intent intent=paper_results selected_count={len(result)}"
+            self._append_executor_note(args, filter_note)
             return result
         if intent in {"repository_results", "repositories", "repo_results"}:
             delegated = dict(args)
             delegated["item_type"] = "repository"
             result = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+            result, filter_note = self._apply_confident_item_filter(
+                items=result,
+                args=args,
+                runtime_state=runtime_state,
+                output_key=str(args.get("output_key", "") or "repositories"),
+            )
             args["_executor_note"] = f"extract_by_intent intent=repository_results selected_count={len(result)}"
+            self._append_executor_note(args, filter_note)
             return result
         if intent in {"article_results", "articles", "news_items", "news"}:
             delegated = dict(args)
             delegated["item_type"] = "news" if intent in {"news_items", "news"} else "article"
             result = await self._collect_search_results_by_intent(page=page, args=delegated, runtime_state=runtime_state)
+            result, filter_note = self._apply_confident_item_filter(
+                items=result,
+                args=args,
+                runtime_state=runtime_state,
+                output_key=str(args.get("output_key", "") or ("news" if intent in {"news_items", "news"} else "articles")),
+            )
             args["_executor_note"] = f"extract_by_intent intent={intent} selected_count={len(result)}"
+            self._append_executor_note(args, filter_note)
+            return result
+        if intent in {"card_items", "cards"}:
+            result = await self._collect_card_items_generic(page=page, args=args, runtime_state=runtime_state)
+            result, filter_note = self._apply_confident_item_filter(
+                items=result,
+                args=args,
+                runtime_state=runtime_state,
+                output_key=str(args.get("output_key", "") or "cards"),
+            )
+            args["_executor_note"] = f"extract_by_intent intent=card_items selected_count={len(result)}"
+            self._append_executor_note(args, filter_note)
             return result
         if intent in {"product_cards", "products"}:
             result = await self._collect_product_cards_generic(page=page, args=args, runtime_state=runtime_state)
+            result, filter_note = self._apply_confident_item_filter(
+                items=result,
+                args=args,
+                runtime_state=runtime_state,
+                output_key=str(args.get("output_key", "") or "products"),
+            )
             args["_executor_note"] = f"extract_by_intent intent=product_cards selected_count={len(result)}"
+            self._append_executor_note(args, filter_note)
             return result
         if intent in {"table_rows", "rows"}:
             rows = await self._extract_table_rows_as_dicts(page=page, limit=int(args.get("limit", 80)))
             requested_headers = self._requested_table_headers(args=args, runtime_state=runtime_state)
             if requested_headers:
                 rows = self._filter_table_rows_by_requested_headers(rows=rows, requested_headers=requested_headers)
-            condition = args.get("condition") or args.get("target")
+            condition, filter_hint_present = self._confident_filter_condition(args=args, allow_target=True)
             if condition:
                 rows = self._filter_structured_rows_by_condition(rows=rows, condition=condition)
+                filter_note = "filter_applied"
+                if not rows:
+                    filter_note = "no_matching_items"
+                    self._record_condition_filter_diagnostic(
+                        runtime_state,
+                        output_key=str(args.get("output_key", "") or "rows"),
+                        reason=filter_note,
+                        condition=condition,
+                    )
+            elif filter_hint_present:
+                filter_note = "condition_not_applied"
+                self._record_condition_filter_diagnostic(
+                    runtime_state,
+                    output_key=str(args.get("output_key", "") or "rows"),
+                    reason=filter_note,
+                    condition=args.get("condition") or args.get("filter") or args.get("where") or args.get("target"),
+                )
+            else:
+                filter_note = ""
             header_note = f" requested_headers={requested_headers}" if requested_headers else ""
             args["_executor_note"] = f"extract_by_intent intent=table_rows selected_count={len(rows)}{header_note}"
+            self._append_executor_note(args, filter_note)
             return rows
         if intent in {"currency_table_rows", "currency_rows"}:
             rows = await self._extract_table_rows_as_dicts(page=page, limit=int(args.get("limit", 120)))
-            condition = args.get("condition") or args.get("target")
-            rows = self._filter_structured_rows_by_condition(rows=rows, condition=condition) if condition else rows
+            condition, filter_hint_present = self._confident_filter_condition(args=args, allow_target=True)
+            if condition:
+                rows = self._filter_structured_rows_by_condition(rows=rows, condition=condition)
+                filter_note = "filter_applied"
+                if not rows:
+                    filter_note = "no_matching_items"
+                    self._record_condition_filter_diagnostic(
+                        runtime_state,
+                        output_key=str(args.get("output_key", "") or "rows"),
+                        reason=filter_note,
+                        condition=condition,
+                    )
+            elif filter_hint_present:
+                filter_note = "condition_not_applied"
+                self._record_condition_filter_diagnostic(
+                    runtime_state,
+                    output_key=str(args.get("output_key", "") or "rows"),
+                    reason=filter_note,
+                    condition=args.get("condition") or args.get("filter") or args.get("where") or args.get("target"),
+                )
+            else:
+                filter_note = ""
             args["_executor_note"] = f"extract_by_intent intent=currency_table_rows selected_count={len(rows)}"
+            self._append_executor_note(args, filter_note)
             return rows
         if intent in {"value_near_anchor", "extract_value_near_anchor", "anchor_value"}:
             delegated = dict(args)
@@ -1468,13 +1711,9 @@ class ActionHandlers:
 
         for terms in term_groups:
             matched_payload = None
-            for row in rows:
-                text = str(row.get("text", "")).casefold()
-                cells_text = " ".join(str(cell) for cell in row.get("cells", [])).casefold()
-                haystack = f"{text} {cells_text}"
-                if all(term.casefold() in haystack for term in terms):
-                    matched_payload = self._build_row_payload(row)
-                    break
+            row = self._best_matching_row_by_terms(rows=rows, terms=terms)
+            if row is not None:
+                matched_payload = self._build_row_payload(row)
             if matched_payload is None:
                 missing_groups.append(terms)
             else:
@@ -1510,23 +1749,68 @@ class ActionHandlers:
             return matched_payloads
 
         terms = term_groups[0]
-        for row in rows:
-            text = str(row.get("text", "")).casefold()
-            cells_text = " ".join(str(cell) for cell in row.get("cells", [])).casefold()
-            haystack = f"{text} {cells_text}"
-            if all(term.casefold() in haystack for term in terms):
-                payload = self._build_row_payload(row)
-                if runtime_state is not None:
-                    runtime_state["last_row_ref"] = payload
-                    runtime_state["last_row_by_condition"] = payload
-                    self._mark_used_skill(runtime_state, "row_list_email_action")
-                args["_executor_note"] = f"find_row_by_condition matched terms={terms}; selector={payload.get('selector')!r}"
-                return payload
+        row = self._best_matching_row_by_terms(rows=rows, terms=terms)
+        if row is not None:
+            payload = self._build_row_payload(row)
+            if runtime_state is not None:
+                runtime_state["last_row_ref"] = payload
+                runtime_state["last_row_by_condition"] = payload
+                self._mark_used_skill(runtime_state, "row_list_email_action")
+            args["_executor_note"] = f"find_row_by_condition matched terms={terms}; selector={payload.get('selector')!r}"
+            return payload
         raise StructuredExtractionError(
             code="row_not_found",
             message=f"No row matched condition terms={terms}",
             details={"terms": terms, "rows_checked": len(rows)},
         )
+
+    @classmethod
+    def _best_matching_row_by_terms(cls, *, rows: list[dict[str, Any]], terms: list[str]) -> dict[str, Any] | None:
+        best: tuple[int, int, dict[str, Any]] | None = None
+        for index, row in enumerate(rows):
+            text = str(row.get("text", "")).casefold()
+            cells_text = " ".join(str(cell) for cell in row.get("cells", [])).casefold()
+            haystack = f"{text} {cells_text}"
+            if not all(term.casefold() in haystack for term in terms):
+                continue
+            score = cls._row_match_score(row=row, terms=terms)
+            if best is None or (score, index) < (best[0], best[1]):
+                best = (score, index, row)
+        return best[2] if best else None
+
+    @staticmethod
+    def _row_match_score(*, row: dict[str, Any], terms: list[str]) -> int:
+        text = str(row.get("text", "") or "")
+        tag = str(row.get("tag", "") or "").casefold()
+        role = str(row.get("role", "") or "").casefold()
+        cells = row.get("cells") if isinstance(row.get("cells"), list) else []
+        score = min(len(text), 5000)
+        if tag in {"tr", "li"} or role in {"row", "listitem"}:
+            score -= 1200
+        if cells:
+            score -= 300
+        folded_text = text.casefold()
+        normalized_terms = [term.casefold() for term in terms if str(term).strip()]
+        if normalized_terms and any(folded_text.strip() == term for term in normalized_terms):
+            score -= 600
+        if normalized_terms and all(any(term in str(cell).casefold() for cell in cells) for term in normalized_terms):
+            score -= 400
+        return score
+
+    @staticmethod
+    def _row_action_control_matches(*, haystack: str, target_words: list[str]) -> bool:
+        text = str(haystack or "").casefold()
+        for word in target_words:
+            token = str(word or "").casefold().strip()
+            if not token:
+                continue
+            if token == "×":
+                if token in text:
+                    return True
+                continue
+            if re.search(rf"(?<![a-z0-9_]){re.escape(token)}(?![a-z0-9_])", text):
+                return True
+        return False
 
     async def click_row_action(self, page, args, runtime_state=None):
         row_ref = args.get("row_ref") or (runtime_state or {}).get("last_row_ref")
@@ -1542,11 +1826,15 @@ class ActionHandlers:
         else:
             target_words = {
                 "star": ["star", "important", "favorite"],
-                "trash": ["trash", "delete", "remove"],
-                "delete": ["delete", "trash", "remove"],
+                "trash": ["trash", "delete", "remove", "close", "×"],
+                "delete": ["delete", "trash", "remove", "close", "×"],
                 "reply": ["reply"],
             }[action_name]
-            locator = row.locator("button,a,[role='button'],input,[title],[aria-label]")
+            locator = row.locator(
+                "button,a,[role='button'],input,[title],[aria-label],"
+                "[class*='delete' i],[class*='remove' i],[class*='close' i],"
+                "[id*='delete' i],[id*='remove' i],[id*='close' i]"
+            )
             count = await locator.count()
             selected = None
             for index in range(count):
@@ -1559,7 +1847,7 @@ class ActionHandlers:
                     await item.get_attribute("id") or "",
                 ]
                 haystack = " ".join(text_parts).casefold()
-                if any(word in haystack for word in target_words):
+                if self._row_action_control_matches(haystack=haystack, target_words=target_words):
                     selected = item
                     break
             if selected is None:
@@ -1590,6 +1878,12 @@ class ActionHandlers:
         count = counts.get(target)
         if count is None and target.endswith("s"):
             count = counts.get(target[:-1])
+        if count is None:
+            dom_count = await self._count_visible_dom_objects_by_geometry(page=page, target=target, args=args)
+            if dom_count is not None:
+                self._mark_used_skill(runtime_state, "visual_dom_geometry")
+                args["_executor_note"] = f"visual_extract_object_count target={target!r}; dom_geometry_count={dom_count}"
+                return dom_count
         if count is None:
             raise StructuredExtractionError(
                 code="visual_spatial_no_decision",
@@ -2916,7 +3210,10 @@ class ActionHandlers:
                 const haystack = `${title} ${description} ${path}`.toLowerCase();
                 return queryTerms.some((term) => haystack.includes(term));
               };
-              const uiLabel = (title) => /^(skip to .+|search|results?|login|sign in|sign up|menu|next|previous|read more|about|careers?|advertise|community|privacy|legal|settings|rss feed)$/i.test(title);
+              const uiLabel = (title) => {
+                const label = norm(title).replace(/^[«‹<\\s]+|[»›>\\s]+$/g, "");
+                return /^(skip to .+|search|results?|login|sign in|sign up|menu|next|previous|read more|about|careers?|advertise|community|privacy|legal|settings|rss feed)$/i.test(label);
+              };
               const seen = new Set();
               const results = [];
               const resultContainers = Array.from(document.querySelectorAll('main li, [role="main"] li, main article, [role="main"] article, main section, [role="main"] section, [class*="result" i], [class*="search-result" i], [class*="item" i]')).filter((node) => isVisible(node) && !inIgnoredRegion(node));
@@ -2935,7 +3232,7 @@ class ActionHandlers:
                 const anchor = Array.from(node.querySelectorAll('a[href]')).find((link) => {
                   const label = norm(link.innerText || link.textContent || link.getAttribute("aria-label") || link.getAttribute("title") || "");
                   const href = link.href || link.getAttribute("href") || "";
-                  return href && !samePageJump(href) && !/^(next|previous|login|sign in|sign up|search)$/i.test(label);
+                  return href && !samePageJump(href) && !uiLabel(label);
                 });
                 const href = anchor ? (anchor.href || anchor.getAttribute("href") || "") : "";
                 const description = descriptionFrom(node, title);
@@ -2960,7 +3257,7 @@ class ActionHandlers:
                 const title = norm(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "");
                 if (!href || !title || title.length < 4 || title.length > 220) continue;
                 if (samePageJump(href)) continue;
-                if (/^(login|sign in|sign up|menu|next|previous|read more)$/i.test(title)) continue;
+                if (uiLabel(title)) continue;
                 if (seen.has(href)) continue;
                 const container = anchor.closest('article,li,section,div[class*="result" i],div[class*="item" i],div[class*="card" i],div[class*="search" i]') || anchor.parentElement || anchor;
                 if (inIgnoredRegion(container)) continue;
@@ -3437,6 +3734,102 @@ class ActionHandlers:
                 return value
         return ""
 
+    async def _collect_card_items_generic(self, *, page, args: dict, runtime_state=None) -> list[dict[str, Any]]:
+        limit = int(args.get("limit", 20))
+        payload = await page.evaluate(
+            """
+            ({ limit }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const inIgnoredRegion = (el) => !!el.closest('nav, header, footer, aside, [role="navigation"], [aria-hidden="true"], [class*="footer" i], [class*="menu" i]');
+              const cssEscape = (value) => {
+                if (window.CSS && CSS.escape) return CSS.escape(value);
+                return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+              };
+              const cssPath = (el) => {
+                if (!el || !el.tagName) return "";
+                if (el.id) return `#${cssEscape(el.id)}`;
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.body && parts.length < 6) {
+                  const tag = cur.tagName.toLowerCase();
+                  let part = tag;
+                  const cls = Array.from(cur.classList || []).slice(0, 2).map(cssEscape);
+                  if (cls.length) part += "." + cls.join(".");
+                  const parent = cur.parentElement;
+                  if (parent) {
+                    const siblings = Array.from(parent.children).filter((sib) => sib.tagName === cur.tagName);
+                    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(cur) + 1})`;
+                  }
+                  parts.unshift(part);
+                  cur = parent;
+                }
+                return parts.join(" > ");
+              };
+              const titleFrom = (node, lines) => {
+                const heading = node.querySelector('h1,h2,h3,h4,[role="heading"],[class*="title" i],[class*="name" i]');
+                const headingText = norm(heading?.innerText || heading?.textContent || "");
+                if (headingText && headingText.length >= 3 && headingText.length <= 220) return headingText;
+                const anchor = node.querySelector('a[href]');
+                const anchorText = norm(anchor?.innerText || anchor?.textContent || anchor?.getAttribute("aria-label") || anchor?.getAttribute("title") || "");
+                if (anchorText && anchorText.length >= 3 && anchorText.length <= 220) return anchorText;
+                return lines.find((line) => line.length >= 3 && line.length <= 220 && !/^(menu|navigation|search|login|sign in|next|previous|read more)$/i.test(line)) || "";
+              };
+              const descriptionFrom = (lines, title) => {
+                for (const line of lines) {
+                  if (!line || line === title) continue;
+                  if (line.length < 18 || line.length > 420) continue;
+                  if (/^(menu|navigation|search|login|sign in|next|previous|read more)$/i.test(line)) continue;
+                  return line;
+                }
+                return "";
+              };
+              const candidates = Array.from(document.querySelectorAll(
+                'main article, [role="main"] article, main li, [role="main"] li, main section, [role="main"] section, [role="listitem"], main div[class*="card" i], main div[class*="item" i], main div[class*="listing" i], main div[class*="tile" i], main div[class*="story" i], main div[class*="entry" i], main div[class*="summary" i], div[class*="card" i], div[class*="item" i], div[class*="listing" i], div[class*="tile" i]'
+              )).filter((node) => isVisible(node) && !inIgnoredRegion(node));
+              const seen = new Set();
+              const cards = [];
+              for (const node of candidates) {
+                const raw = String(node.innerText || node.textContent || "");
+                const text = norm(raw);
+                if (!text || text.length < 18 || text.length > 2200) continue;
+                const lines = raw.split(/\\n+/).map(norm).filter(Boolean);
+                if (lines.length < 2 && !node.querySelector('a[href]')) continue;
+                const title = titleFrom(node, lines);
+                if (!title) continue;
+                const description = descriptionFrom(lines, title);
+                const anchor = node.querySelector('a[href]');
+                const href = anchor ? (anchor.href || anchor.getAttribute('href') || "") : "";
+                const key = href || `${title}|${description}`;
+                if (!key || seen.has(key)) continue;
+                seen.add(key);
+                cards.push({
+                  title,
+                  name: title,
+                  description,
+                  href,
+                  link: href,
+                  selector: cssPath(node),
+                  raw_text: text
+                });
+                if (cards.length >= Math.max(limit, 1)) break;
+              }
+              return cards;
+            }
+            """,
+            {"limit": max(limit, 1)},
+        )
+        cards = [dict(item) for item in payload or [] if isinstance(item, dict)]
+        if not cards:
+            cards = await self._collect_result_like_items_generic(page=page, limit=limit)
+        if cards:
+            self._mark_used_skill(runtime_state, "row_list_extraction")
+        return cards[: max(limit, 1)]
+
     async def _collect_product_cards_generic(self, *, page, args: dict, runtime_state=None) -> list[dict[str, Any]]:
         limit = int(args.get("limit", 20))
         payload = await page.evaluate(
@@ -3776,9 +4169,17 @@ class ActionHandlers:
                 if (!table) return [];
                 return Array.from(table.querySelectorAll("thead th,thead [role='columnheader'],tr:first-child th,tr:first-child [role='columnheader']")).map((cell) => norm(cell.innerText || cell.textContent || "")).filter(Boolean);
               };
-              return Array.from(document.querySelectorAll("tr,[role='row'],li,article,[class*='row'],[class*='item'],[class*='card']"))
+              const specificRows = Array.from(document.querySelectorAll("tr,[role='row'],li,[role='listitem'],article"));
+              const broadRows = Array.from(document.querySelectorAll("[class*='row'],[class*='item'],[class*='card']"));
+              const seen = new Set();
+              const candidates = [];
+              for (const el of [...specificRows, ...broadRows]) {
+                if (!el || seen.has(el)) continue;
+                seen.add(el);
+                candidates.push(el);
+              }
+              return candidates
                 .filter(isVisible)
-                .slice(0, limit)
                 .map((el, index) => ({
                   row_id: `row_${index + 1}`,
                   tag: (el.tagName || "").toLowerCase(),
@@ -3790,7 +4191,8 @@ class ActionHandlers:
                   cells: Array.from(el.querySelectorAll("th,td,[role='cell'],[role='gridcell']")).map((cell) => norm(cell.innerText || cell.textContent || "")).filter(Boolean),
                   links: Array.from(el.querySelectorAll("a[href]")).map((a) => ({ text: norm(a.innerText || a.textContent || ""), href: a.href || a.getAttribute("href") || "" })).filter((link) => link.text && link.href)
                 }))
-                .filter((row) => row.text);
+                .filter((row) => row.text)
+                .slice(0, limit);
             }
             """,
             {"limit": max(limit, 1)},
@@ -3818,11 +4220,119 @@ class ActionHandlers:
         )
         return dict(payload or {}) if isinstance(payload, dict) else {"shape_counts": {}, "shapes": []}
 
+    async def _count_visible_dom_objects_by_geometry(self, *, page, target: str, args: dict) -> int | None:
+        target_text = str(target or "").casefold()
+        countable_targets = {
+            "link": ("link", "links", "anchor", "anchors"),
+            "button": ("button", "buttons"),
+            "input": ("input", "inputs", "field", "fields"),
+            "item": ("item", "items", "card", "cards", "row", "rows"),
+        }
+        target_kind = ""
+        for kind, tokens in countable_targets.items():
+            if any(token in target_text for token in tokens):
+                target_kind = kind
+                break
+        if not target_kind:
+            return None
+
+        payload = await page.evaluate(
+            """
+            ({ targetKind, region }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const viewport = { width: window.innerWidth || 0, height: window.innerHeight || 0 };
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style
+                  && style.visibility !== "hidden"
+                  && style.display !== "none"
+                  && Number(style.opacity || 1) !== 0
+                  && rect.width > 0
+                  && rect.height > 0
+                  && rect.bottom >= 0
+                  && rect.right >= 0
+                  && rect.top <= viewport.height
+                  && rect.left <= viewport.width;
+              };
+              const selectors = {
+                link: "a[href],[role='link']",
+                button: "button,[role='button'],input[type='button'],input[type='submit']",
+                input: "input,textarea,select,[contenteditable='true']",
+                item: "li,article,[role='listitem'],[class*='item' i],[class*='card' i],[class*='row' i]"
+              };
+              const normalizeRegion = (raw) => {
+                if (!raw || typeof raw !== "object") return null;
+                let x = Number(raw.x);
+                let y = Number(raw.y);
+                let width = Number(raw.width);
+                let height = Number(raw.height);
+                if (![x, y, width, height].every(Number.isFinite) || width <= 0 || height <= 0) return null;
+                const ratioLike = Math.max(Math.abs(x), Math.abs(y), Math.abs(width), Math.abs(height)) <= 1.5;
+                if (ratioLike) {
+                  const pad = 0.08;
+                  x = Math.max(0, x - pad) * viewport.width;
+                  y = Math.max(0, y - pad) * viewport.height;
+                  width = Math.min(1, width + pad * 2) * viewport.width;
+                  height = Math.min(1, height + pad * 2) * viewport.height;
+                }
+                return { x, y, width, height };
+              };
+              const regionBox = normalizeRegion(region);
+              const inRegion = (rect) => {
+                if (!regionBox) return true;
+                const cx = rect.left + rect.width / 2;
+                const cy = rect.top + rect.height / 2;
+                return cx >= regionBox.x
+                  && cx <= regionBox.x + regionBox.width
+                  && cy >= regionBox.y
+                  && cy <= regionBox.y + regionBox.height;
+              };
+              const seen = new Set();
+              const items = [];
+              for (const el of Array.from(document.querySelectorAll(selectors[targetKind] || selectors.item))) {
+                if (!isVisible(el)) continue;
+                const rect = el.getBoundingClientRect();
+                if (!inRegion(rect)) continue;
+                const text = norm(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || "");
+                if (targetKind !== "input" && !text) continue;
+                const key = `${Math.round(rect.left)}:${Math.round(rect.top)}:${Math.round(rect.width)}:${Math.round(rect.height)}:${text}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                items.push({ text, bbox: { x: rect.left, y: rect.top, width: rect.width, height: rect.height } });
+              }
+              return { count: items.length, items: items.slice(0, 20) };
+            }
+            """,
+            {"targetKind": target_kind, "region": args.get("region")},
+        )
+        if not isinstance(payload, dict):
+            return None
+        count = payload.get("count")
+        if isinstance(count, int) and count >= 0:
+            return count
+        return None
+
     @staticmethod
     def _condition_terms(condition: Any) -> list[str]:
         if isinstance(condition, dict):
             values = []
-            for key in ("text", "contains", "value", "equals", "name", "code", "currency", "anchor", "target"):
+            for key in (
+                "text",
+                "contains",
+                "value",
+                "equals",
+                "name",
+                "title",
+                "description",
+                "snippet",
+                "href",
+                "link",
+                "code",
+                "currency",
+                "anchor",
+                "target",
+            ):
                 value = condition.get(key)
                 values.extend(ActionHandlers._flatten_condition_values(value))
             if isinstance(condition.get("all"), list):
@@ -3878,7 +4388,22 @@ class ActionHandlers:
 
         required_terms: list[str] = []
         alternative_terms: list[str] = []
-        for key in ("text", "contains", "value", "equals", "name", "code", "currency", "anchor", "target"):
+        for key in (
+            "text",
+            "contains",
+            "value",
+            "equals",
+            "name",
+            "title",
+            "description",
+            "snippet",
+            "href",
+            "link",
+            "code",
+            "currency",
+            "anchor",
+            "target",
+        ):
             value = condition.get(key)
             terms = cls._flatten_condition_values(value)
             if not terms:

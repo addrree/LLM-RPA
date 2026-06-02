@@ -287,6 +287,10 @@ class Planner:
         explicit = re.search(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
         if explicit:
             candidate = explicit.group(0).rstrip(".,);]")
+            if text.casefold().startswith(("http://", "https://")):
+                remainder = text[len(explicit.group(0)):].strip()
+                if remainder and not re.fullmatch(r"[.,);\\]]+", remainder):
+                    return ""
             parsed = urlparse(candidate)
             if Planner._is_valid_url_host(parsed.netloc):
                 return candidate
@@ -397,8 +401,7 @@ class Planner:
         for step in normalized_steps:
             if step.get("action") == "open_url":
                 url = Planner._normalize_url_candidate(step.get("args", {}).get("url") or start_url)
-                if url:
-                    step.setdefault("args", {})["url"] = url
+                step.setdefault("args", {})["url"] = url or start_url
                 break
 
         allowed_domains = plan.get("allowed_domains")
@@ -536,6 +539,8 @@ class Planner:
         explicit_type = " ".join(str(args.get(key, "")) for key in ("intent", "item_type", "type")).casefold()
         if any(token in explicit_type for token in ("product", "products", "product_cards")):
             return "products"
+        if any(token in explicit_type for token in ("card", "cards", "card_items", "catalog", "listing", "listings")):
+            return "cards"
         if any(token in explicit_type for token in ("repository", "repositories", "repo")):
             return "repositories"
         if any(token in explicit_type for token in ("paper", "papers", "preprint")):
@@ -558,6 +563,8 @@ class Planner:
         ).casefold()
         if any(token in text for token in ("products[]", "product", "products", "товар")):
             return "products"
+        if any(token in text for token in ("cards[]", "card", "cards", "card_items", "catalog", "listing", "listings", "карточ", "каталог")):
+            return "cards"
         if any(token in text for token in ("repositories[]", "repository", "repositories", "repo", "репозитор")):
             return "repositories"
         if any(token in text for token in ("papers[]", "paper", "papers", "preprint", "препринт", "научн")):
@@ -838,6 +845,8 @@ class Planner:
                     "news",
                     "product_cards",
                     "products",
+                    "card_items",
+                    "cards",
                     "table_rows",
                     "rows",
                     "currency_table_rows",
@@ -920,13 +929,11 @@ class Planner:
         for index, step in enumerate(normalized_steps, start=1):
             step["step_id"] = index
 
-        start_url = str(plan.get("start_url") or "").strip()
+        start_url = Planner._normalize_url_candidate(str(plan.get("start_url") or "").strip())
         if not start_url and isinstance(benchmark_context, dict):
-            start_url = str(benchmark_context.get("start_url") or "").strip()
+            start_url = Planner._normalize_url_candidate(str(benchmark_context.get("start_url") or "").strip())
         if not start_url:
-            match = re.search(r"https?://[^\s\"'<>]+", user_goal or "")
-            if match:
-                start_url = match.group(0).rstrip(".,)")
+            start_url = Planner._normalize_url_candidate(user_goal or "")
         if not start_url:
             raise PlannerValidationFailed(
                 {

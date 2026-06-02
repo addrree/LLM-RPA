@@ -1,6 +1,7 @@
 import json
 import logging
 import re
+from typing import Any
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import (
@@ -25,6 +26,46 @@ from app.schemas.execution import GenerationMetadata, LLMArtifact
 from app.schemas.page_snapshot import PageSnapshot
 from app.schemas.task_spec import TaskSpec
 from app.utils.llm_client import LLMClient
+
+
+def _is_valid_url_host(netloc: str) -> bool:
+    host = str(netloc or "").split("@")[-1].split(":", 1)[0].strip().strip(".")
+    if not host or host != str(netloc or "").split("@")[-1].split(":", 1)[0].strip():
+        return False
+    labels = host.split(".")
+    if len(labels) < 2 or any(not label or label.startswith("-") or label.endswith("-") for label in labels):
+        return False
+    tld = labels[-1]
+    return bool(2 <= len(tld) <= 24 and tld.isalpha())
+
+
+def _normalize_url_candidate(value: object) -> str:
+    if not isinstance(value, str):
+        return ""
+    text = value.strip()
+    if not text:
+        return ""
+    explicit = re.search(r"https?://[^\s\"'<>]+", text, flags=re.IGNORECASE)
+    if explicit:
+        candidate = explicit.group(0).rstrip(".,);]")
+        if text.casefold().startswith(("http://", "https://")):
+            remainder = text[len(explicit.group(0)):].strip()
+            if remainder and not re.fullmatch(r"[.,);\\]]+", remainder):
+                return ""
+        parsed = urlparse(candidate)
+        return candidate if _is_valid_url_host(parsed.netloc) else ""
+    domain_like = re.search(
+        r"(?<![@\w.-])(?:www\.)?[a-z0-9][a-z0-9-]*(?:\.[a-z0-9][a-z0-9-]*)+(?:/[^\s\"'<>]*)?",
+        text,
+        flags=re.IGNORECASE,
+    )
+    if not domain_like:
+        return ""
+    candidate = domain_like.group(0).rstrip(".,);]")
+    host = candidate.split("/", 1)[0].lower()
+    if not _is_valid_url_host(host):
+        return ""
+    return f"https://{candidate}"
 
 
 class Replanner:
@@ -99,6 +140,7 @@ class Replanner:
                 user_goal=user_goal,
                 previous_plan=previous_plan,
                 page_snapshot=page_snapshot,
+                preferred_runtime_intents=route.profile.preferred_runtime_intents,
             )
             self.last_artifact = LLMArtifact(
                 raw_response=json.dumps(normalized, ensure_ascii=False),
@@ -130,6 +172,7 @@ class Replanner:
             user_goal=user_goal,
             previous_plan=previous_plan,
             page_snapshot=page_snapshot,
+            preferred_runtime_intents=route.profile.preferred_runtime_intents,
         )
         raise_for_invalid_plan_actions(
             normalized,
@@ -494,13 +537,19 @@ class Replanner:
         user_goal: str,
         previous_plan: TaskSpec | None,
         page_snapshot: PageSnapshot,
+        preferred_runtime_intents: list[str] | None = None,
     ) -> dict:
         plan = dict(raw_plan) if isinstance(raw_plan, dict) else {}
-        context_start_url = (
-            str(plan.get("start_url") or "")
-            or (str(previous_plan.start_url) if previous_plan else "")
-            or page_snapshot.url
-        )
+        preferred_intents = {str(intent).strip().casefold() for intent in preferred_runtime_intents or [] if str(intent).strip()}
+        context_start_url = ""
+        for candidate in (
+            plan.get("start_url"),
+            str(previous_plan.start_url) if previous_plan else "",
+            page_snapshot.url,
+        ):
+            context_start_url = _normalize_url_candidate(candidate)
+            if context_start_url:
+                break
         if not context_start_url:
             raise PlannerValidationFailed(
                 {
@@ -538,9 +587,27 @@ class Replanner:
 
             if action == "open_url" and "url" not in current["args"] and current.get("url") is not None:
                 current["args"]["url"] = current.pop("url")
-            if action == "open_url" and not str(current["args"].get("url", "")).strip():
-                logger.warning("Malformed open_url from model: missing args.url. Applying start_url normalization.")
-                current["args"]["url"] = context_start_url
+            if action == "open_url":
+                raw_url_candidate = current["args"].get("url")
+                normalized_url = _normalize_url_candidate(current["args"].get("url"))
+                if Replanner._should_rewrite_result_open_url_to_click(
+                    goal=user_goal,
+                    raw_url=raw_url_candidate,
+                    normalized_url=normalized_url,
+                    context_start_url=context_start_url,
+                    prior_steps=normalized_steps,
+                ):
+                    current["action"] = "click_by_semantic_target"
+                    current["args"] = {
+                        "target_text": Replanner._navigation_target_for_empty_fallback(goal=user_goal) or "first result",
+                        "role": "link",
+                    }
+                    current["save_as"] = "clicked_text"
+                elif normalized_url:
+                    current["args"]["url"] = normalized_url
+                else:
+                    logger.warning("Malformed open_url from model. Applying start_url normalization.")
+                    current["args"]["url"] = context_start_url
             if action == "click_by_semantic_target":
                 if "target_text" not in current["args"] and current["args"].get("text") is not None:
                     current["args"]["target_text"] = current["args"].pop("text")
@@ -558,8 +625,41 @@ class Replanner:
                     goal_hint = str(user_goal or "").casefold()
                     if any(token in goal_hint for token in ("clicked", "click", "press", "open link", "нажм", "клик", "перейд")):
                         current["save_as"] = "clicked_text"
+                if row_action := Replanner._row_action_for_empty_fallback(goal=user_goal):
+                    target_text = str(current["args"].get("target_text", "") or "").strip()
+                    condition = dict(row_action["condition"])
+                    if target_text and target_text.casefold() not in {"delete", "remove", "trash", "open", "click", "select", "choose"}:
+                        condition = {"contains": target_text}
+                    current["action"] = "click_row_action"
+                    current["args"] = {"action_name": row_action["action_name"], "condition": condition}
+                    current["save_as"] = "row_action"
             if action == "fill_by_semantic_target" and "value" not in current["args"] and current["args"].get("query") is not None:
                 current["args"]["value"] = current["args"].pop("query")
+            if action == "click_row_action":
+                action_name = str(current["args"].get("action_name", "") or current["args"].get("action", "") or "").strip().casefold()
+                action_aliases = {
+                    "remove": "delete",
+                    "trash": "trash",
+                    "delete": "delete",
+                    "close": "delete",
+                    "star": "star",
+                    "favorite": "star",
+                    "favourite": "star",
+                    "reply": "reply",
+                    "open": "open",
+                    "click": "open",
+                    "select": "select",
+                    "choose": "select",
+                }
+                normalized_action_name = action_aliases.get(action_name) or Replanner._row_action_name_for_goal(user_goal)
+                if normalized_action_name:
+                    current["args"]["action_name"] = normalized_action_name
+                if not current["args"].get("condition"):
+                    condition = Replanner._row_condition_for_goal(user_goal)
+                    if condition:
+                        current["args"]["condition"] = condition
+                if not str(current.get("save_as", "") or "").strip():
+                    current["save_as"] = "row_action"
             if action == "extract_structured_items":
                 semantic_intent = semantic_intent_for_structured_step(current)
                 if semantic_intent:
@@ -601,8 +701,50 @@ class Replanner:
                     current["action"] = "extract_by_intent"
                     current["args"] = {"intent": "page_title"}
             action = str(current.get("action", action)).strip()
+            if action == "wait_for":
+                if Replanner._should_drop_brittle_result_wait(
+                    goal=user_goal,
+                    args=current["args"],
+                    prior_steps=normalized_steps,
+                ) or Replanner._should_drop_brittle_row_wait(goal=user_goal, args=current["args"]):
+                    continue
             if action == "extract_by_intent" and str(current["args"].get("intent", "") or "").strip():
                 current["args"]["intent"] = normalize_intent_alias(current["args"].get("intent"))
+                intent = str(current["args"].get("intent", "") or "").strip().casefold()
+                save_as_hint = str(current.get("save_as", "") or "").strip().casefold()
+                if (
+                    save_as_hint in {"description", "summary", "snippet"}
+                    and intent
+                    in {
+                        "search_results",
+                        "results",
+                        "result_list",
+                        "paper_results",
+                        "repository_results",
+                        "article_results",
+                        "news_items",
+                    }
+                    and Replanner._navigation_target_for_empty_fallback(goal=user_goal)
+                ):
+                    current["args"] = {"intent": "package_metadata", "output_key": save_as_hint}
+                    intent = "package_metadata"
+                if (
+                    intent
+                    in {
+                        "search_results",
+                        "paper_results",
+                        "repository_results",
+                        "article_results",
+                        "news_items",
+                        "card_items",
+                        "product_cards",
+                        "table_rows",
+                    }
+                    and not any(key in current["args"] for key in ("condition", "filter", "where"))
+                ):
+                    condition = Replanner._condition_for_goal(user_goal)
+                    if condition:
+                        current["args"]["condition"] = condition
             collection_like_action = action in {
                 "extract_items",
                 "extract_structured_items",
@@ -630,6 +772,8 @@ class Replanner:
                     "news",
                     "product_cards",
                     "products",
+                    "card_items",
+                    "cards",
                     "table_rows",
                     "rows",
                     "package_metadata",
@@ -652,13 +796,107 @@ class Replanner:
 
         fallback_required_fields: list[str] = []
         fallback_description = ""
+        fallback_force_required_fields = False
         if not normalized_steps:
-            if Replanner._looks_like_package_metadata_request(
+            if visual_count := Replanner._visual_count_for_empty_fallback(goal=user_goal):
+                output_key = visual_count["output_key"]
+                fallback_required_fields = [output_key]
+                fallback_description = "Count requested visible objects"
+                fallback_force_required_fields = True
+                normalized_steps = [
+                    {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
+                    {"step_id": 2, "action": "visual_observe", "args": {}, "save_as": "page_snapshot"},
+                    {
+                        "step_id": 3,
+                        "action": "visual_extract_object_count",
+                        "args": {"target": visual_count["target"], **visual_count.get("region_args", {})},
+                        "save_as": output_key,
+                    },
+                    {"step_id": 4, "action": "finish", "args": {}},
+                ]
+            elif row_action := Replanner._row_action_for_empty_fallback(goal=user_goal):
+                fallback_required_fields = ["row_action"]
+                fallback_description = "Find matching row and perform requested row action"
+                fallback_force_required_fields = True
+                normalized_steps = [
+                    {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
+                    {
+                        "step_id": 2,
+                        "action": "find_row_by_condition",
+                        "args": {"condition": row_action["condition"]},
+                        "save_as": "row_ref",
+                    },
+                    {
+                        "step_id": 3,
+                        "action": "click_row_action",
+                        "args": {"action_name": row_action["action_name"], "condition": row_action["condition"]},
+                        "save_as": "row_action",
+                    },
+                    {"step_id": 4, "action": "finish", "args": {}},
+                ]
+            elif navigation_target := Replanner._navigation_target_for_empty_fallback(goal=user_goal):
+                fallback_required_fields = Replanner._navigation_required_fields_for_goal(user_goal)
+                fallback_description = "Navigate and extract requested page metadata"
+                if "description" in fallback_required_fields and preferred_intents and "package_metadata" not in preferred_intents:
+                    fallback_required_fields = [field for field in fallback_required_fields if field != "description"]
+                normalized_steps = [
+                    {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
+                    {
+                        "step_id": 2,
+                        "action": "click_by_semantic_target",
+                        "args": {"target_text": navigation_target, "role": "link"},
+                        "save_as": "clicked_text",
+                    },
+                    {"step_id": 3, "action": "observe_page", "args": {}, "save_as": "page_snapshot"},
+                ]
+                next_step_id = 4
+                if "page_title" in fallback_required_fields:
+                    normalized_steps.append(
+                        {
+                            "step_id": next_step_id,
+                            "action": "extract_by_intent",
+                            "args": {"intent": "page_title"},
+                            "save_as": "page_title",
+                        }
+                    )
+                    next_step_id += 1
+                if "final_url" in fallback_required_fields:
+                    normalized_steps.append(
+                        {
+                            "step_id": next_step_id,
+                            "action": "extract_by_intent",
+                            "args": {"intent": "current_url"},
+                            "save_as": "final_url",
+                        }
+                    )
+                    next_step_id += 1
+                if "description" in fallback_required_fields:
+                    normalized_steps.append(
+                        {
+                            "step_id": next_step_id,
+                            "action": "extract_by_intent",
+                            "args": {"intent": "package_metadata", "output_key": "page_metadata"},
+                            "save_as": "page_metadata",
+                        }
+                    )
+                    next_step_id += 1
+                if "visible_links" in fallback_required_fields:
+                    normalized_steps.append(
+                        {
+                            "step_id": next_step_id,
+                            "action": "extract_visible_links",
+                            "args": {"output_key": "visible_links", "limit": 12},
+                            "save_as": "visible_links",
+                        }
+                    )
+                    next_step_id += 1
+                normalized_steps.append({"step_id": next_step_id, "action": "finish", "args": {}})
+            elif Replanner._looks_like_package_metadata_request(
                 goal=user_goal,
                 previous_plan=previous_plan,
                 plan=plan,
                 page_snapshot=page_snapshot,
-            ):
+            ) and (not preferred_intents or "package_metadata" in preferred_intents):
                 fallback_required_fields = ["package_metadata"]
                 fallback_description = "Extract package metadata"
                 normalized_steps = [
@@ -671,13 +909,16 @@ class Replanner:
                     },
                     {"step_id": 3, "action": "finish", "args": {}},
                 ]
-            elif table_intent := Replanner._table_intent_for_empty_fallback(
-                goal=user_goal,
-                previous_plan=previous_plan,
-                plan=plan,
-                page_snapshot=page_snapshot,
-            ):
+            elif (
+                table_intent := Replanner._table_intent_for_empty_fallback(
+                    goal=user_goal,
+                    previous_plan=previous_plan,
+                    plan=plan,
+                    page_snapshot=page_snapshot,
+                )
+            ) and (not preferred_intents or table_intent in preferred_intents):
                 output_key = default_output_key_for_intent(table_intent)
+                condition = Replanner._condition_for_goal(user_goal)
                 fallback_required_fields = [output_key]
                 fallback_description = "Extract table rows"
                 normalized_steps = [
@@ -685,18 +926,25 @@ class Replanner:
                     {
                         "step_id": 2,
                         "action": "extract_by_intent",
-                        "args": {"intent": table_intent, "output_key": output_key},
+                        "args": {
+                            "intent": table_intent,
+                            "output_key": output_key,
+                            **({"condition": condition} if condition else {}),
+                        },
                         "save_as": output_key,
                     },
                     {"step_id": 3, "action": "finish", "args": {}},
                 ]
-            elif collection_intent := Replanner._collection_intent_for_empty_fallback(
-                goal=user_goal,
-                previous_plan=previous_plan,
-                plan=plan,
-                page_snapshot=page_snapshot,
-            ):
+            elif (
+                collection_intent := Replanner._collection_intent_for_empty_fallback(
+                    goal=user_goal,
+                    previous_plan=previous_plan,
+                    plan=plan,
+                    page_snapshot=page_snapshot,
+                )
+            ) and (not preferred_intents or collection_intent in preferred_intents):
                 output_key = default_output_key_for_intent(collection_intent)
+                condition = Replanner._condition_for_goal(user_goal)
                 fallback_required_fields = [output_key]
                 fallback_description = "Extract requested collection"
                 action = "extract_visible_links" if collection_intent == "visible_links" else "extract_by_intent"
@@ -705,6 +953,8 @@ class Replanner:
                     if action == "extract_visible_links"
                     else {"intent": collection_intent, "output_key": output_key}
                 )
+                if condition and action == "extract_by_intent":
+                    args["condition"] = condition
                 normalized_steps = [
                     {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
                     {
@@ -720,7 +970,6 @@ class Replanner:
                     {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
                     {"step_id": 2, "action": "finish", "args": {}},
                 ]
-
         expected_result = plan.get("expected_result")
         if not isinstance(expected_result, dict):
             expected_result = {}
@@ -741,7 +990,7 @@ class Replanner:
                 for field in expected_result.get("required_fields", [])
                 if str(field).strip()
             }
-            if not required_hint or required_hint.issubset({"page_snapshot", "final_url", "page_title"}):
+            if fallback_force_required_fields or not required_hint or required_hint.issubset({"page_snapshot", "final_url", "page_title"}):
                 expected_result["required_fields"] = fallback_required_fields
                 expected_result["description"] = fallback_description or expected_result["description"]
         expected_result["required_fields"] = Replanner._normalize_required_fields_against_steps(
@@ -780,6 +1029,7 @@ class Replanner:
             normalized_steps[insert_index:insert_index] = metadata_steps
             for idx, step in enumerate(normalized_steps, start=1):
                 step["step_id"] = idx
+        normalized_steps = Replanner._move_url_extractors_after_navigating_metadata(normalized_steps)
 
         constraints = plan.get("constraints")
         if not isinstance(constraints, dict):
@@ -842,10 +1092,266 @@ class Replanner:
         normalized_fields = {normalize_required_field_alias(field).casefold() for field in required_fields if field}
         if len(normalized_fields & PACKAGE_METADATA_FIELDS) >= 2:
             return True
+        if len(normalized_fields & {"name", "page_title", "description", "summary", "final_url"}) >= 2:
+            return True
         haystack = " ".join(hints).casefold()
+        generic_metadata_groups = [
+            ("name", "title", "page title"),
+            ("description", "summary"),
+            ("url", "current url", "final url", "link"),
+        ]
+        if sum(1 for group in generic_metadata_groups if any(token in haystack for token in group)) >= 2:
+            return True
         package_context = any(token in haystack for token in ("package", "library", "module"))
         metadata_context = any(token in haystack for token in ("version", "description", "summary", "metadata"))
         return package_context and metadata_context
+
+    @staticmethod
+    def _navigation_target_for_empty_fallback(*, goal: str) -> str:
+        text = str(goal or "").strip()
+        if not text:
+            return ""
+        quoted = re.findall(r'["“”«»]([^"“”«»]{2,60})["“”«»]', text)
+        if quoted:
+            return quoted[0].strip()
+        patterns = [
+            r"\b(?:click|follow|press)\s+(?:the\s+)?(.{2,60}?)(?:\s+link|\s+button|,|\.|\bthen\b|$)",
+            r"\b(?:open|navigate to|go to)\s+(?:the\s+)?(.{2,60}?)(?:\s+link|\s+page|,|\.|\bthen\b|$)",
+            r"\b(?:перейди|нажми|кликни|открой)\s+(?:по\s+)?(?:ссылке\s+)?(.{2,60}?)(?:,|\.|\bзатем\b|$)",
+        ]
+        stop_words = {"the", "a", "an", "link", "button", "page", "website", "site", "ссылку", "ссылка", "страницу"}
+        for pattern in patterns:
+            for match in re.finditer(pattern, text, flags=re.IGNORECASE):
+                candidate = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.")
+                words = [word for word in candidate.split() if word.casefold() not in stop_words]
+                candidate = " ".join(words).strip()
+                if candidate and not candidate.startswith(("http://", "https://")):
+                    return candidate
+        return ""
+
+    @staticmethod
+    def _navigation_required_fields_for_goal(goal: str) -> list[str]:
+        text = str(goal or "").casefold()
+        fields: list[str] = []
+        if any(token in text for token in ("title", "page title", "заголов")):
+            fields.append("page_title")
+        if any(token in text for token in ("url", "current url", "final url", "текущий url")):
+            fields.append("final_url")
+        if any(token in text for token in ("description", "summary", "snippet", "short description", "РѕРїРёСЃР°РЅ", "РєСЂР°С‚Рє")):
+            fields.append("description")
+        if any(token in text for token in ("link", "links", "visible links", "ссылк")):
+            fields.append("visible_links")
+        return fields or ["final_url", "page_title"]
+
+    @staticmethod
+    def _row_action_for_empty_fallback(*, goal: str) -> dict[str, Any]:
+        text = str(goal or "").strip()
+        folded = text.casefold()
+        if not re.search(r"\b(?:row|rows|item|items|record|records|list item|table row)\b", folded):
+            return {}
+        action_name = Replanner._row_action_name_for_goal(goal)
+        if not action_name:
+            return {}
+        condition = Replanner._row_condition_for_goal(goal)
+        if not condition:
+            return {}
+        return {"action_name": action_name, "condition": condition}
+
+    @staticmethod
+    def _row_action_name_for_goal(goal: str) -> str:
+        text = str(goal or "").casefold()
+        checks = [
+            ("delete", ("delete", "remove", "trash")),
+            ("star", ("star", "favorite", "favourite", "mark important")),
+            ("select", ("select", "choose")),
+            ("open", ("open", "click")),
+        ]
+        for action_name, tokens in checks:
+            if any(token in text for token in tokens):
+                return action_name
+        return ""
+
+    @staticmethod
+    def _row_condition_for_goal(goal: str) -> dict[str, str]:
+        text = str(goal or "").strip()
+        quoted = re.findall(r'["вЂњвЂќВ«В»]([^"вЂњвЂќВ«В»]{1,120})["вЂњвЂќВ«В»]', text)
+        if quoted:
+            return {"contains": quoted[0].strip()}
+        patterns = [
+            r"\b(?:row|item|record|list item|table row)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
+            r"\b(?:delete|remove|trash|click|open|select|choose|star)\s+(?:the\s+)?(?:table\s+)?(?:row|item|record|list item)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.\"'")
+            if value:
+                return {"contains": value}
+        return Replanner._condition_for_goal(goal)
+
+    @staticmethod
+    def _visual_count_for_empty_fallback(*, goal: str) -> dict[str, Any]:
+        text = str(goal or "").casefold()
+        if not any(token in text for token in ("count", "how many", "visual", "visible", "screenshot")):
+            return {}
+        target_checks = [
+            ("link", ("link", "links", "anchor", "anchors")),
+            ("button", ("button", "buttons")),
+            ("input", ("input", "field", "fields")),
+            ("item", ("item", "items", "card", "cards", "row", "rows")),
+        ]
+        target = ""
+        for candidate, tokens in target_checks:
+            if any(token in text for token in tokens):
+                target = candidate
+                break
+        if not target:
+            return {}
+        output_key = "count"
+        if "link" in target:
+            output_key = "link_count"
+        elif "button" in target:
+            output_key = "button_count"
+        elif "input" in target:
+            output_key = "input_count"
+        elif "item" in target:
+            output_key = "item_count"
+        if any(token in text for token in ("language", "languages")) and target == "link":
+            output_key = "language_link_count"
+        region_args: dict[str, Any] = {}
+        if any(token in text for token in ("center", "centre", "middle")):
+            region_args["region"] = {"x": 0.25, "y": 0.15, "width": 0.5, "height": 0.55}
+        return {"target": target, "output_key": output_key, "region_args": region_args}
+
+    @staticmethod
+    def _should_rewrite_result_open_url_to_click(
+        *,
+        goal: str,
+        raw_url: Any,
+        normalized_url: str,
+        context_start_url: str,
+        prior_steps: list[dict],
+    ) -> bool:
+        target = Replanner._navigation_target_for_empty_fallback(goal=goal)
+        target_text = target.casefold()
+        goal_text = str(goal or "").casefold()
+        if "result" not in target_text and "result" not in goal_text:
+            return False
+        prior_result_extraction = False
+        for step in prior_steps:
+            if not isinstance(step, dict):
+                continue
+            save_as = str(step.get("save_as", "") or "").casefold()
+            action = str(step.get("action", "") or "").casefold()
+            intent = str((step.get("args") or {}).get("intent", "") or "").casefold() if isinstance(step.get("args"), dict) else ""
+            if action == "extract_by_intent" and intent in {"search_results", "results", "result_list", "repository_results", "paper_results", "article_results", "news_items"}:
+                prior_result_extraction = True
+                break
+            if "result" in save_as:
+                prior_result_extraction = True
+                break
+        if not prior_result_extraction:
+            return False
+        raw_text = str(raw_url or "")
+        dynamic_markers = ("result", "href", "link", "{{", "}}", "[0]", "$", ".")
+        if any(marker in raw_text.casefold() for marker in dynamic_markers) and not normalized_url:
+            return True
+        if normalized_url and context_start_url and normalized_url.rstrip("/") == context_start_url.rstrip("/"):
+            return True
+        return False
+
+    @staticmethod
+    def _move_url_extractors_after_navigating_metadata(steps: list[dict]) -> list[dict]:
+        package_indices = [
+            idx
+            for idx, step in enumerate(steps)
+            if isinstance(step, dict)
+            and step.get("action") == "extract_by_intent"
+            and isinstance(step.get("args"), dict)
+            and str(step["args"].get("intent", "") or "").strip().casefold() == "package_metadata"
+        ]
+        if not package_indices:
+            return steps
+        last_package_idx = max(package_indices)
+        move_indices = [
+            idx
+            for idx, step in enumerate(steps)
+            if idx < last_package_idx
+            and isinstance(step, dict)
+            and step.get("action") == "extract_by_intent"
+            and isinstance(step.get("args"), dict)
+            and str(step["args"].get("intent", "") or "").strip().casefold() == "current_url"
+            and str(step.get("save_as", "") or "").strip() == "final_url"
+        ]
+        if not move_indices:
+            return steps
+        moving = [steps[idx] for idx in move_indices]
+        remaining = [step for idx, step in enumerate(steps) if idx not in set(move_indices)]
+        package_step = steps[last_package_idx]
+        insert_index = next((idx for idx, step in enumerate(remaining) if step is package_step), len(remaining) - 1) + 1
+        remaining[insert_index:insert_index] = moving
+        for idx, step in enumerate(remaining, start=1):
+            if isinstance(step, dict):
+                step["step_id"] = idx
+        return remaining
+
+    @staticmethod
+    def _should_drop_brittle_result_wait(*, goal: str, args: dict, prior_steps: list[dict]) -> bool:
+        url_contains = str(args.get("url_contains", "") or "").strip()
+        if not url_contains:
+            return False
+        goal_text = str(goal or "").casefold()
+        if url_contains.casefold() in goal_text:
+            return False
+        target = Replanner._navigation_target_for_empty_fallback(goal=goal).casefold()
+        if "result" not in target and "result" not in goal_text:
+            return False
+        for step in reversed(prior_steps[-3:]):
+            if not isinstance(step, dict) or step.get("action") != "click_by_semantic_target":
+                continue
+            args_obj = step.get("args") if isinstance(step.get("args"), dict) else {}
+            target_text = str(args_obj.get("target_text") or args_obj.get("target") or args_obj.get("text") or "").casefold()
+            if "result" in target_text:
+                return True
+        return False
+
+    @staticmethod
+    def _should_drop_brittle_row_wait(*, goal: str, args: dict) -> bool:
+        if not Replanner._row_action_for_empty_fallback(goal=goal):
+            return False
+        if str(args.get("selector", "") or "").strip() or str(args.get("url_contains", "") or "").strip():
+            return False
+        return bool(str(args.get("text", "") or "").strip())
+
+    @staticmethod
+    def _condition_for_goal(goal: str) -> dict[str, Any]:
+        text = str(goal or "").strip()
+        if not text:
+            return {}
+        patterns = [
+            ("title", r"\b(?:whose|where|with)\s+title\s+(?:contains?|includes?|has)\s+(.{1,80}?)(?:,|\.|\bwith\b|\bthen\b|$)"),
+            ("title", r"\btitle\s+(?:contains?|includes?|has)\s+(.{1,80}?)(?:,|\.|\bwith\b|\bthen\b|$)"),
+            ("title", r"\b(?:в\s+заголовке|заголовок)\s+(?:есть|содержит)\s+(.{1,80}?)(?:,|\.|\bс\b|\bзатем\b|$)"),
+            ("contains", r"\b(?:contains?|includes?|matching)\s+(.{1,80}?)(?:,|\.|\bwith\b|\bthen\b|$)"),
+            ("contains", r"\b(?:содержит|содержащие)\s+(.{1,80}?)(?:,|\.|\bс\b|\bзатем\b|$)"),
+        ]
+        for key, pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            raw = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.")
+            if not raw:
+                continue
+            terms = [
+                item.strip(" '\"“”«»")
+                for item in re.split(r"\s+(?:or|или)\s+|\|", raw, flags=re.IGNORECASE)
+                if item.strip(" '\"“”«»")
+            ]
+            if not terms:
+                continue
+            return {key: terms if len(terms) > 1 else terms[0]}
+        return {}
 
     @staticmethod
     def _table_intent_for_empty_fallback(
@@ -905,7 +1411,8 @@ class Replanner:
         goal_haystack = " ".join(goal_hints).casefold()
         page_haystack = " ".join(page_hints).casefold()
         checks = [
-            ("product_cards", ("product", "products", "product_card", "product_cards", "товар", "карточ")),
+            ("product_cards", ("product", "products", "product_card", "product_cards", "товар")),
+            ("card_items", ("card", "cards", "card_items", "catalog", "listing", "listings", "карточ", "каталог")),
             ("repository_results", ("repository", "repositories", "repo", "repos", "репозитор")),
             ("paper_results", ("paper", "papers", "preprint", "publication", "научн", "стат")),
             ("article_results", ("article", "articles", "news", "post", "posts", "новост", "публик")),

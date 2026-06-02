@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Iterable
 from typing import Any, Literal
 
@@ -26,6 +27,7 @@ SUPPORTED_RUNTIME_INTENTS = {
     "value_near_anchor",
     "package_metadata",
     "search_results",
+    "card_items",
     "product_cards",
     "table_rows",
     "article_results",
@@ -181,6 +183,9 @@ PROFILES: dict[str, PlanningProfile] = {
             "repository_results",
             "paper_results",
             "news_items",
+            "current_url",
+            "page_title",
+            "package_metadata",
         ),
         conceptual_intents=["result_list"],
         expected_output_type="list",
@@ -234,8 +239,8 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_items",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents("product_cards", "search_results"),
-        conceptual_intents=["card_items"],
+        preferred_intents=_runtime_intents("card_items", "product_cards", "search_results"),
+        conceptual_intents=["card_or_catalog_items"],
         expected_output_type="list",
         required_skill_groups=["card_or_catalog_extraction"],
         forbidden_actions=["extract_pattern_from_page_text"],
@@ -264,7 +269,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_by_intent",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents(),
+        preferred_intents=_runtime_intents("current_url", "page_title", "package_metadata"),
         conceptual_intents=["semantic_navigation"],
         expected_output_type="navigation",
         required_skill_groups=["semantic_navigation"],
@@ -327,6 +332,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "value_near_anchor",
             "package_metadata",
             "search_results",
+            "card_items",
             "product_cards",
             "table_rows",
             "article_results",
@@ -362,48 +368,90 @@ class TaskRouter:
                 scores[family_route] += 0.35
                 signals.append(f"benchmark_family:{benchmark_family}")
 
-        has_search = self._has_any(text, ["search", "find", "query", "look up", "lookup", "найди", "поиск", "искать"])
+        search_required = self._has_any(text, ["search", "find", "query", "look up", "lookup", "найди", "поиск", "искать"])
         has_extract = self._has_any(text, ["extract", "export", "return", "collect", "get", "выгрузи", "извлеки", "верни", "получи", "собери"])
-        has_list = self._has_any(text, ["list", "results", "top", "all", "links", "items", "rows", "список", "результат", "ссылк", "все", "топ"])
-        has_table = self._has_any(text, ["table", "row", "column", "cell", "таблиц", "строк", "колон", "ячей"])
-        has_card = self._has_any(text, ["card", "cards", "catalog", "product", "products", "price", "карточ", "каталог", "товар", "цена"])
+        list_output = self._has_any(text, ["list", "results", "top", "all", "links", "items", "rows", "список", "результат", "ссылк", "все", "топ"])
+        has_table = self._has_word_any(text, ["table", "tables", "row", "rows", "column", "columns", "cell", "cells"]) or self._has_any(text, ["таблиц", "строк", "колон", "ячей"])
+        cards_like = self._has_any(
+            text,
+            ["card", "cards", "catalog", "listing", "listings", "карточ", "каталог", "витрин"],
+        )
+        product_detail_hint = self._has_any(
+            text,
+            ["product", "products", "price", "rating", "attribute", "attributes", "товар", "цен", "рейтинг", "атрибут"],
+        )
         has_visual = self._has_any(text, ["visual", "screenshot", "image", "canvas", "coordinate", "x=", "y=", "визуал", "скрин", "изображ", "координат"])
         has_row_action = (
             has_table
             and not has_extract
             and self._has_any(text, ["click", "select", "delete", "star", "choose", "нажм", "выбери", "удали"])
         )
-        has_navigation = self._has_any(text, ["click", "open link", "navigate", "go to", "follow", "press", "нажм", "перейд", "клик", "открой ссыл"])
-        has_form = has_search or self._has_any(text, ["fill", "enter", "type", "input", "submit", "заполни", "введи", "форма"])
+        navigation_required = self._has_any(text, ["click", "open link", "navigate", "go to", "follow", "press", "нажм", "перейд", "клик", "открой ссыл"])
+        result_navigation_request = (
+            self._has_any(
+                text,
+                [
+                    "open first",
+                    "open the first",
+                    "follow first",
+                    "follow the first",
+                    "click first",
+                    "click the first",
+                    "first relevant",
+                    "top result",
+                    "best result",
+                ],
+            )
+            and self._has_any(text, ["result", "results", "item", "link", "результат"])
+        )
+        navigation_required = navigation_required or result_navigation_request
+        has_form = search_required or self._has_any(text, ["fill", "enter", "type", "input", "submit", "заполни", "введи", "форма"])
         has_anchor_value = self._has_any(text, ["near", "next to", "beside", "anchor", "label", "value", "рядом", "возле", "значени", "метк"])
         has_metadata_fields = self._metadata_field_count(text) >= 2
-        has_single_object = self._has_any(text, ["package", "project", "library", "repo", "repository", "article", "profile", "пакет", "проект", "библиотек", "репозитор", "профил"])
+        object_output = has_metadata_fields and not list_output and not has_table and not cards_like
+        search_navigation_then_extraction = (
+            search_required
+            and navigation_required
+            and has_extract
+            and (list_output or self._has_any(text, ["result", "results", "СЂРµР·СѓР»СЊС‚Р°С‚"]))
+        )
+        domain_object_hint = self._has_any(text, ["package", "project", "library", "repo", "repository", "article", "profile", "пакет", "проект", "библиотек", "репозитор", "профил"])
         has_article = self._has_any(text, ["article", "articles", "news", "post", "стать", "новост", "публикац"])
         has_repository = self._has_any(text, ["repository", "repositories", "repo", "репозитор"])
         has_paper = self._has_any(text, ["paper", "papers", "preprint", "publication", "научн", "препринт"])
+        condition_filtering = self._has_any(
+            text,
+            ["where", "whose", "contains", "containing", "filter", "condition", "matching", "в заголов", "котор", "содерж"],
+        )
 
         # Keep a normalized Cyrillic pass because some legacy token literals above are mojibake.
-        has_search = has_search or self._has_any(text, ["найди", "поиск", "искать"])
+        search_required = search_required or self._has_any(text, ["найди", "поиск", "искать"])
         has_extract = has_extract or self._has_any(text, ["выгрузи", "извлеки", "верни", "получи", "собери"])
-        has_list = has_list or self._has_any(text, ["список", "результат", "ссылк", "все", "топ"])
+        list_output = list_output or self._has_any(text, ["список", "результат", "ссылк", "все", "топ"])
         has_table = has_table or self._has_any(text, ["таблиц", "строк", "колон", "ячей"])
-        has_card = has_card or self._has_any(text, ["карточ", "каталог", "товар", "цен", "витрин"])
+        cards_like = cards_like or self._has_any(text, ["карточ", "каталог", "витрин"])
+        product_detail_hint = product_detail_hint or self._has_any(text, ["товар", "цен", "рейтинг", "атрибут"])
         has_visual = has_visual or self._has_any(text, ["визуал", "скрин", "изображ", "координат"])
         has_row_action = has_row_action or (
             has_table
             and not has_extract
             and self._has_any(text, ["нажм", "выбери", "удали"])
         )
-        has_navigation = has_navigation or self._has_any(text, ["нажм", "перейд", "клик", "открой ссыл"])
-        has_form = has_form or has_search or self._has_any(text, ["заполни", "введи", "форма"])
+        navigation_required = navigation_required or self._has_any(text, ["нажм", "перейд", "клик", "открой ссыл"])
+        has_form = has_form or search_required or self._has_any(text, ["заполни", "введи", "форма"])
         has_anchor_value = has_anchor_value or self._has_any(text, ["рядом", "возле", "значени", "метк"])
-        has_single_object = has_single_object or self._has_any(
-            text,
-            ["пакет", "проект", "библиотек", "репозитор", "профил"],
+        object_output = has_metadata_fields and not list_output and not has_table and not cards_like
+        search_navigation_then_extraction = search_navigation_then_extraction or (
+            search_required
+            and navigation_required
+            and has_extract
+            and (list_output or self._has_any(text, ["result", "results", "СЂРµР·СѓР»СЊС‚Р°С‚"]))
         )
+        domain_object_hint = domain_object_hint or self._has_any(text, ["пакет", "проект", "библиотек", "репозитор", "профил"])
         has_article = has_article or self._has_any(text, ["стать", "новост", "публикац"])
         has_repository = has_repository or self._has_any(text, ["репозитор"])
         has_paper = has_paper or self._has_any(text, ["научн", "препринт"])
+        condition_filtering = condition_filtering or self._has_any(text, ["в заголов", "котор", "содерж"])
 
         if has_visual:
             scores["visual_or_spatial_task"] += 0.85
@@ -414,32 +462,46 @@ class TaskRouter:
         if has_table:
             scores["structured_table_extraction"] += 0.78
             signals.append("table_shape")
-        if has_card:
+        if cards_like:
             scores["catalog_or_card_extraction"] += 0.74
             signals.append("card_or_catalog_shape")
-        if has_search and (has_list or self._has_any(text, ["result", "results", "результат"])):
+        if search_required and (list_output or self._has_any(text, ["result", "results", "результат"])):
             scores["search_results_extraction"] += 0.78
             signals.append("search_results_shape")
-        if has_list and has_extract and not has_table and not has_card:
+        if list_output and has_extract and not has_table and not cards_like:
             scores["repeated_items_extraction"] += 0.72
             signals.append("repeated_items_shape")
-        if has_metadata_fields and (has_single_object or has_search):
+        if object_output or (has_metadata_fields and search_required and not list_output and not navigation_required):
             scores["single_entity_metadata"] += 0.8
             signals.append("single_entity_metadata_fields")
-        if has_anchor_value or (has_extract and not has_list and not has_table and not has_card and not has_metadata_fields):
+        if has_anchor_value or (has_extract and not list_output and not has_table and not cards_like and not has_metadata_fields):
             scores["direct_value_extraction"] += 0.68
             signals.append("direct_or_anchor_value")
-        if has_navigation:
+        if navigation_required:
             scores["semantic_navigation"] += 0.76
             signals.append("semantic_navigation")
             if has_extract:
                 signals.append("navigation_then_extraction")
                 scores["direct_value_extraction"] -= 0.08
+        if search_navigation_then_extraction:
+            signals.append("search_navigation_then_extraction")
+            scores["search_results_extraction"] += 0.18
+            scores["semantic_navigation"] += 0.12
+            scores["single_entity_metadata"] -= 0.18
+        if condition_filtering:
+            signals.append("condition_filtering")
+            if list_output:
+                scores["repeated_items_extraction"] += 0.08
+            if cards_like:
+                scores["catalog_or_card_extraction"] += 0.08
 
         if has_form:
             signals.append("requires_form_fill")
             for task_type in ("single_entity_metadata", "search_results_extraction", "catalog_or_card_extraction"):
                 scores[task_type] += 0.08
+        if domain_object_hint and has_metadata_fields:
+            signals.append("domain_object_hint")
+            scores["single_entity_metadata"] += 0.05
         if has_article:
             signals.append("article_like_items")
             scores["search_results_extraction"] += 0.04
@@ -451,11 +513,14 @@ class TaskRouter:
             signals.append("paper_like_items")
             scores["search_results_extraction"] += 0.04
 
-        if has_card and has_extract:
+        if cards_like and has_extract:
             scores["catalog_or_card_extraction"] += 0.16
             if scores["search_results_extraction"] > 0:
                 scores["search_results_extraction"] -= 0.1
             signals.append("card_catalog_priority")
+        if product_detail_hint and (cards_like or list_output):
+            signals.append("product_detail_hint")
+            scores["catalog_or_card_extraction"] += 0.06
 
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         best_type, confidence = ranked[0]
@@ -478,7 +543,7 @@ class TaskRouter:
             item_type=self._infer_item_type(text, best_type),
             expected_output_type=profile.expected_output_type,
             expected_fields=expected_fields,
-            requires_navigation=has_navigation,
+            requires_navigation=navigation_required,
             requires_form_fill=has_form,
             requires_table_extraction=best_type in {"structured_table_extraction", "row_or_item_action"},
             requires_visual=best_type == "visual_or_spatial_task",
@@ -500,6 +565,10 @@ class TaskRouter:
     @staticmethod
     def _has_any(text: str, tokens: list[str]) -> bool:
         return any(token.casefold() in text for token in tokens)
+
+    @staticmethod
+    def _has_word_any(text: str, tokens: list[str]) -> bool:
+        return any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(token.casefold())}(?![A-Za-z0-9_])", text) for token in tokens)
 
     @classmethod
     def _metadata_field_count(cls, text: str) -> int:
@@ -533,7 +602,8 @@ class TaskRouter:
     @classmethod
     def _infer_item_type(cls, text: str, task_type: str) -> str | None:
         checks = [
-            ("product", ["product", "products", "товар", "карточ", "catalog", "каталог"]),
+            ("product", ["product", "products", "товар"]),
+            ("card", ["card", "cards", "catalog", "listing", "listings", "карточ", "каталог"]),
             ("article", ["article", "articles", "news", "post", "стать", "новост", "публикац"]),
             ("repository", ["repository", "repositories", "repo", "репозитор"]),
             ("paper", ["paper", "papers", "preprint", "publication", "научн", "препринт"]),

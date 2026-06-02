@@ -36,9 +36,9 @@ PLANNER_SYSTEM_PROMPT = """
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 0.2) Prefer semantic/extraction actions over fragile CSS/XPath: observe_page before extraction, extract_by_intent for reusable intents, extract_visible_links for visible links, find_row_by_condition for row/table conditions, extract_value_near_anchor for values near anchors, click_by_semantic_target for visible buttons/links, fill_by_semantic_target for form fields, select_by_semantic_target or choose_autocomplete_suggestion for lists/autocomplete.
-0.2.1) For common extraction tasks prefer extract_by_intent with generic intent/item_type: package_metadata, search_results, paper_results, repository_results, article_results, news_items, product_cards, table_rows. Use regex only as a fallback for plain text or after generic extraction is insufficient.
+0.2.1) For common extraction tasks prefer extract_by_intent with generic intent/item_type: package_metadata, search_results, paper_results, repository_results, article_results, news_items, card_items, product_cards, table_rows. Use regex only as a fallback for plain text or after generic extraction is insufficient.
 0.2.2) Runtime extraction priority: observe_page -> extract_by_intent -> extract_visible_links -> find_row_by_condition -> extract_value_near_anchor -> extract_structured_items generic DOM/table/list fallback -> extract_pattern_from_page_text only as last fallback.
-0.2.3) For package/search/list/table/card goals do not plan mandatory regex extraction. Use extract_by_intent(package_metadata/search_results/product_cards/table_rows/article_results/repository_results/paper_results), extract_visible_links, find_row_by_condition, or extract_structured_items first.
+0.2.3) For package/search/list/table/card goals do not plan mandatory regex extraction. Use extract_by_intent(package_metadata/search_results/card_items/product_cards/table_rows/article_results/repository_results/paper_results), extract_visible_links, find_row_by_condition, or extract_structured_items first.
 0.3) Do not invent site-specific selectors when a semantic action can express the same intent. Use generic selectors only when observe_page evidence makes them stable.
 1. Последний шаг всегда finish.
 2. step_id строго подряд: 1,2,3,...
@@ -109,7 +109,7 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
     allowed = "|".join(allowed_actions)
     if task_family == "real_web_user_request":
         return f"""
-Runtime extraction policy: for package/search/product/table/article/repository/paper data prefer extract_by_intent(package_metadata/search_results/product_cards/table_rows/article_results/repository_results/paper_results). For visible links use extract_visible_links; for table conditions use find_row_by_condition; for anchor/value use extract_value_near_anchor. Use extract_pattern_from_page_text only as fallback.
+Runtime extraction policy: for package/search/card/product/table/article/repository/paper data prefer extract_by_intent(package_metadata/search_results/card_items/product_cards/table_rows/article_results/repository_results/paper_results). For visible links use extract_visible_links; for table conditions use find_row_by_condition; for anchor/value use extract_value_near_anchor. Use extract_pattern_from_page_text only as fallback.
 Ты planner агентной web-automation системы. Верни только JSON TaskSpec.
 Пользовательский запрос находится в user message; не добавляй значения, которых не извлекал со страницы.
 Разрешённые actions: {allowed}
@@ -220,7 +220,7 @@ REPLANNER_SYSTEM_PROMPT = """
 
 Ключевые правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
-0.1.1) Runtime extraction priority: extract_by_intent for package/search/product/table/article/repository/paper intents; extract_visible_links for link lists; find_row_by_condition for table rows; extract_value_near_anchor for anchor/value; extract_pattern_from_page_text only as fallback.
+0.1.1) Runtime extraction priority: extract_by_intent for package/search/card/product/table/article/repository/paper intents; extract_visible_links for link lists; find_row_by_condition for table rows; extract_value_near_anchor for anchor/value; extract_pattern_from_page_text only as fallback.
 1) Если final execution может запускаться в отдельной сессии, добавляй open_url(start_url) первым шагом.
 2) Не выдумывай CSS-селекторы, если можно выразить задачу через semantic/generic extraction. Regex по page_text не является preferred path.
 3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor или extract_by_intent(intent="value_near_anchor"); regex используй только как fallback:
@@ -281,7 +281,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 0.2) Prefer semantic/extraction actions over fragile selectors: extract_visible_links for visible links, extract_by_intent for reusable extraction intents, click_by_semantic_target/fill_by_semantic_target/select_by_semantic_target for UI controls.
-0.3) Do not replace package/search/product/table/article/repository/paper extraction with mandatory regex. Use extract_by_intent or row/link actions first; extract_pattern_from_page_text is fallback only.
+0.3) Do not replace package/search/card/product/table/article/repository/paper extraction with mandatory regex. Use extract_by_intent or row/link actions first; extract_pattern_from_page_text is fallback only.
 0) Never invent action names. Use only TaskSpec allowed actions exactly. Invalid examples: Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
 2) Если требовался список, возвращай массив объектов:

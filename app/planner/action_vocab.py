@@ -47,6 +47,8 @@ ACTION_ALIASES: dict[str, str] = {
     "extract_search_results": "extract_by_intent",
     "extract_package_info": "extract_by_intent",
     "extract_product_cards": "extract_by_intent",
+    "extract_card_items": "extract_by_intent",
+    "extract_cards": "extract_by_intent",
     "extract_article_links": "extract_by_intent",
 }
 
@@ -55,6 +57,8 @@ ACTION_ALIAS_INTENTS: dict[str, str] = {
     "extract_search_results": "search_results",
     "extract_package_info": "package_metadata",
     "extract_product_cards": "product_cards",
+    "extract_card_items": "card_items",
+    "extract_cards": "card_items",
     "extract_article_links": "article_results",
 }
 
@@ -65,6 +69,12 @@ INTENT_ALIASES: dict[str, str] = {
     "library": "package_metadata",
     "library_info": "package_metadata",
     "library_metadata": "package_metadata",
+    "card": "card_items",
+    "cards": "card_items",
+    "catalog": "card_items",
+    "catalog_items": "card_items",
+    "listing": "card_items",
+    "listings": "card_items",
     "currency": "table_rows",
     "currency_row": "table_rows",
     "currency_rows": "table_rows",
@@ -170,11 +180,13 @@ def semantic_intent_for_structured_step(step: dict[str, Any]) -> str | None:
     has_structural_hint = selector_like_pattern or fields_are_selector_like or bool(args.get("item_selector"))
     if not has_structural_hint and not any(
         token in hint
-        for token in ("article", "articles", "news", "paper", "repository", "repo", "product", "table")
+        for token in ("article", "articles", "news", "paper", "repository", "repo", "product", "card", "catalog", "listing", "table")
     ):
         return None
     if any(token in hint for token in ("product", "products", "product_cards")):
         return "product_cards"
+    if any(token in hint for token in ("card", "cards", "card_items", "catalog", "listing", "listings")):
+        return "card_items"
     if any(token in hint for token in ("repository", "repositories", "repo")):
         return "repository_results"
     if any(token in hint for token in ("paper", "papers", "preprint")):
@@ -200,6 +212,8 @@ def canonical_structured_intent(value: str) -> str | None:
     normalized = normalize_intent_alias(value)
     if normalized == "package_metadata":
         return "package_metadata"
+    if normalized in {"card", "cards", "card_item", "card_items", "catalog", "catalog_items", "listing", "listings"}:
+        return "card_items"
     if normalized in {"product", "products", "product_card", "product_cards"}:
         return "product_cards"
     if normalized in {"repository", "repositories", "repo", "repo_results", "repository_results"}:
@@ -222,6 +236,7 @@ def canonical_structured_intent(value: str) -> str | None:
 def default_output_key_for_intent(intent: str) -> str:
     return {
         "product_cards": "products",
+        "card_items": "cards",
         "repository_results": "repositories",
         "paper_results": "papers",
         "article_results": "articles",

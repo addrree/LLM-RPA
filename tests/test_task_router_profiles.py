@@ -32,8 +32,8 @@ def test_task_router_classifies_search_results_table_cards_and_repeated_items():
     assert table.task_type == "structured_table_extraction"
     assert cards.task_type == "catalog_or_card_extraction"
     assert repeated.task_type == "repeated_items_extraction"
-    assert "card_items" in cards.profile.conceptual_intents
-    assert "card_items" not in cards.profile.preferred_intents
+    assert "card_or_catalog_items" in cards.profile.conceptual_intents
+    assert "card_items" in cards.profile.preferred_runtime_intents
     assert "repeated_items" in repeated.profile.conceptual_intents
     assert "repeated_items" not in repeated.profile.preferred_intents
 
@@ -46,6 +46,30 @@ def test_task_router_classifies_russian_product_cards_as_catalog_profile():
     assert route.task_type == "catalog_or_card_extraction"
     assert "product_cards" in route.profile.preferred_runtime_intents
     assert "product" == route.item_type
+
+
+def test_task_router_uses_domain_words_only_as_weak_hints():
+    product_value = TaskRouter().route("Open the page and extract the product price.")
+    project_cards = TaskRouter().route("Open a catalog page and extract project cards with title, description, and link.")
+
+    assert product_value.task_type != "catalog_or_card_extraction"
+    assert "product_detail_hint" not in product_value.signals
+    assert project_cards.task_type == "catalog_or_card_extraction"
+    assert project_cards.item_type == "card"
+    assert "card_items" in project_cards.profile.preferred_runtime_intents
+
+
+def test_task_router_prioritizes_search_navigation_structure_over_metadata_words():
+    route = TaskRouter().route(
+        "Open https://search.sample.test/?q=browser+automation, open the first relevant repository result, "
+        "then extract the opened page title, a short description, and the current URL."
+    )
+
+    assert route.task_type == "search_results_extraction"
+    assert "search_navigation_then_extraction" in route.signals
+    assert route.task_type != "single_entity_metadata"
+    assert "current_url" in route.profile.preferred_runtime_intents
+    assert "page_title" in route.profile.preferred_runtime_intents
 
 
 def test_task_router_does_not_treat_table_export_as_row_action():
@@ -88,6 +112,17 @@ def test_profile_prompt_does_not_include_full_vocabulary_or_conceptual_runtime_i
     assert "compare_structured_values" not in prompt
     assert "entity_metadata" not in runtime_line
     assert "package_metadata" in runtime_line
+
+
+def test_profile_prompt_includes_card_items_as_runtime_intent_only():
+    route = TaskRouter().route("Open a project catalog and extract cards with titles, descriptions, and links.")
+    prompt = build_profile_planner_prompt(route.profile)
+    runtime_line = next(line for line in prompt.splitlines() if line.startswith("- preferred_runtime_intents:"))
+    conceptual_line = next(line for line in prompt.splitlines() if line.startswith("- conceptual_profile_intents_diagnostics_only:"))
+
+    assert route.task_type == "catalog_or_card_extraction"
+    assert "card_items" in runtime_line
+    assert "card_items" not in conceptual_line
 
 
 def test_profile_validation_rejects_action_outside_profile_with_controlled_diagnostics():

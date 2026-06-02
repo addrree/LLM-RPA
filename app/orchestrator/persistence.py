@@ -24,6 +24,17 @@ def save_artifacts(result: dict, run_id: str) -> dict:
     planning_mode = result.get("planning_mode", "single_stage")
     execution_json = result["execution_result"].model_dump(mode="json")
     verdict_json = result["verdict"].model_dump(mode="json")
+    runtime_diagnostics = result.get("runtime_diagnostics", {}) if isinstance(result.get("runtime_diagnostics"), dict) else {}
+    for key in (
+        "task_type",
+        "router_confidence",
+        "router_signals",
+        "planning_profile",
+        "full_vocabulary_was_used",
+    ):
+        if key in runtime_diagnostics:
+            execution_json[key] = runtime_diagnostics.get(key)
+    execution_json.setdefault("failure_stage", execution_json.get("failure_type"))
 
     _write_json(plan_path, {
         "planning_mode": planning_mode,
