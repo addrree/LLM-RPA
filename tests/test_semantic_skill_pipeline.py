@@ -311,44 +311,15 @@ def test_language_link_filter_keeps_same_root_domain_links():
     assert [item["text"] for item in filtered] == ["English", "Русский"]
 
 
-def test_language_link_request_detects_user_goal_context():
-    assert ActionHandlers._language_links_requested(
-        args={},
-        runtime_state={"user_goal": "Открой сайт и извлеки языковые ссылки с href."},
-    )
-
-
-def test_article_link_filter_keeps_article_like_same_domain_links():
-    links = [
-        {"text": "Navigation", "href": "https://habr.com/ru/news/"},
-        {"text": "8 минут назад", "href": "https://habr.com/ru/articles/123456/"},
-        {"text": "Блог компании Example", "href": "https://habr.com/ru/companies/example/articles/"},
-        {"text": "A serious article title", "href": "https://habr.com/ru/articles/123456/"},
-        {"text": "External article", "href": "https://example.com/articles/1"},
-        {"text": "Short", "href": "https://habr.com/ru/articles/2"},
-    ]
-
-    filtered = ActionHandlers._filter_links_to_article_like_paths(
-        links,
-        current_url="https://habr.com/ru/articles/",
-    )
-
-    assert filtered == [{"text": "A serious article title", "href": "https://habr.com/ru/articles/123456/"}]
-
-
-def test_article_metadata_request_detects_author_and_time_goal():
-    assert ActionHandlers._article_metadata_requested(
-        args={"output_key": "articles"},
-        runtime_state={"user_goal": "Extract visible articles with title, link, author and publication time."},
-    )
-    assert ActionHandlers._article_metadata_requested(
-        args={"output_key": "articles"},
-        runtime_state={"user_goal": "Выгрузи статьи: заголовок, ссылку, автора и время публикации."},
-    )
-    assert not ActionHandlers._paper_results_requested(
-        args={"output_key": "articles"},
-        runtime_state={"user_goal": "Выгрузи первые видимые статьи с Habr."},
-    )
+def test_known_content_profile_request_helpers_are_removed():
+    for name in (
+        "_language_links_requested",
+        "_filter_links_to_article_like_paths",
+        "_article_metadata_requested",
+        "_paper_results_requested",
+        "_repository_results_requested",
+    ):
+        assert not hasattr(ActionHandlers, name)
 
 
 def test_page_snapshot_supports_rich_observation_fields():
@@ -886,8 +857,8 @@ def test_replanner_converts_selector_structured_items_to_generic_intent():
 
     extract_step = normalized["steps"][1]
     assert extract_step["action"] == "extract_by_intent"
-    assert extract_step["args"]["intent"] == "article_results"
-    assert extract_step["args"]["item_type"] == "article"
+    assert extract_step["args"]["intent"] == "card_items"
+    assert extract_step["args"]["item_type_hint"] == "article"
     assert extract_step["args"]["output_key"] == "articles"
     assert extract_step["args"]["limit"] == 20
     assert extract_step["save_as"] == "articles"
@@ -971,13 +942,6 @@ def test_planner_simplifies_generic_result_link_click_targets():
     assert normalized["steps"][1]["args"]["target_text"] == "playwright"
 
 
-def test_repository_results_requested_for_repo_search_goal():
-    assert ActionHandlers._repository_results_requested(
-        args={"output_key": "repositories"},
-        runtime_state={"user_goal": "Find repositories for browser automation python"},
-    )
-
-
 def test_action_aliases_map_to_semantic_and_intent_actions():
     from app.planner.action_vocab import normalize_plan_action_aliases
 
@@ -1001,8 +965,8 @@ def test_action_aliases_map_to_semantic_and_intent_actions():
         "extract_by_intent",
         "extract_by_intent",
     ]
-    assert payload["steps"][2]["args"]["intent"] == "package_metadata"
-    assert payload["steps"][3]["args"]["intent"] == "product_cards"
+    assert payload["steps"][2]["args"]["intent"] == "field_schema"
+    assert payload["steps"][3]["args"]["intent"] == "card_items"
     assert payload["steps"][4]["args"]["intent"] == "card_items"
     assert payload["_normalized_action_aliases"] == [
         {"from": "fill_input", "to": "fill_by_semantic_target"},
@@ -1016,20 +980,19 @@ def test_action_aliases_map_to_semantic_and_intent_actions():
 def test_extract_by_intent_routes_generic_search_product_and_card_intents():
     handler = ActionHandlers()
 
-    async def _search(*, page, args, runtime_state=None):
-        return [{"title": "Result", "href": "https://example.com"}]
-
-    async def _products(*, page, args, runtime_state=None):
-        return [{"title": "SSD", "price_value": 6900}]
-
     async def _cards(*, page, args, runtime_state=None):
-        return [{"title": "Project Alpha", "description": "Automation toolkit", "href": "https://example.com/a"}]
+        return [
+            {
+                "title": str(args.get("item_type_hint") or "Project Alpha"),
+                "description": "Automation toolkit",
+                "href": "https://example.com/a",
+                "price_aware": bool(args.get("price_aware")),
+            }
+        ]
 
     async def _not_blocked(*_args, **_kwargs):
         return None
 
-    handler._collect_search_results_by_intent = _search  # type: ignore[method-assign]
-    handler._collect_product_cards_generic = _products  # type: ignore[method-assign]
     handler._collect_card_items_generic = _cards  # type: ignore[method-assign]
     handler._raise_if_page_blocked_or_limited = _not_blocked  # type: ignore[method-assign]
 
@@ -1037,8 +1000,9 @@ def test_extract_by_intent_routes_generic_search_product_and_card_intents():
     products = asyncio.run(handler.extract_by_intent(object(), {"intent": "product_cards"}, {}))
     cards = asyncio.run(handler.extract_by_intent(object(), {"intent": "card_items", "condition": {"title": "Alpha"}}, {}))
 
-    assert result[0]["title"] == "Result"
-    assert products[0]["price_value"] == 6900
+    assert result[0]["title"] == "result"
+    assert products[0]["title"] == "product"
+    assert products[0]["price_aware"] is True
     assert cards[0]["title"] == "Project Alpha"
 
 
@@ -1166,8 +1130,8 @@ def test_planner_canonicalizes_structured_item_type_to_supported_intent():
     )
 
     assert normalized["steps"][1]["action"] == "extract_by_intent"
-    assert normalized["steps"][1]["args"]["intent"] == "article_results"
-    assert normalized["steps"][1]["args"]["item_type"] == "article"
+    assert normalized["steps"][1]["args"]["intent"] == "card_items"
+    assert normalized["steps"][1]["args"]["item_type_hint"] == "article"
 
 
 def test_planner_normalizes_tasks_and_action_params():

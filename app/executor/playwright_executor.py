@@ -157,15 +157,7 @@ class PlaywrightExecutor:
                     )
 
                     output_key = str(step.args.get("output_key", "")).strip()
-                    if self._is_package_metadata_step(step) and isinstance(result, dict):
-                        for key, value in result.items():
-                            if str(key).strip() and value not in (None, "", [], {}):
-                                extracted_data[str(key)] = value
-                        metadata_key = step.save_as or output_key
-                        if metadata_key:
-                            extracted_data[str(metadata_key)] = result
-                        runtime_state["extracted_data"] = extracted_data
-                    elif step.save_as:
+                    if step.save_as:
                         extracted_data[step.save_as] = result
                         runtime_state["extracted_data"] = extracted_data
                     elif step.action in self.OUTPUT_KEY_ACTIONS and output_key:
@@ -430,13 +422,6 @@ class PlaywrightExecutor:
     def _is_technical_failure(message: str) -> bool:
         text = message.lower()
         return any(token in text for token in ["timeout", "net::", "navigation", "target closed", "detached", "browser"])
-
-    @staticmethod
-    def _is_package_metadata_step(step: ActionStep) -> bool:
-        if step.action != "extract_by_intent":
-            return False
-        intent = str(step.args.get("intent", "") or "").strip().casefold()
-        return intent in {"package", "package_metadata", "package_info", "library_metadata"}
 
     @staticmethod
     def _has_useful_extracted_data(extracted_data: dict[str, Any]) -> bool:

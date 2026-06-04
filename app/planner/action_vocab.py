@@ -11,17 +11,6 @@ REQUIRED_FIELD_ALIASES: dict[str, str] = {
     "current_title": "page_title",
 }
 
-PACKAGE_METADATA_FIELDS = {
-    "package",
-    "package_metadata",
-    "package_name",
-    "name",
-    "latest_version",
-    "version",
-    "description",
-    "summary",
-}
-
 ACTION_ALIASES: dict[str, str] = {
     "enter_text": "fill_by_semantic_target",
     "input_text": "fill_by_semantic_target",
@@ -43,48 +32,29 @@ ACTION_ALIASES: dict[str, str] = {
     "semantic_fill": "fill_by_semantic_target",
     "select_semantic": "select_by_semantic_target",
     "visible_links": "extract_visible_links",
-    "extract_results": "extract_by_intent",
-    "extract_search_results": "extract_by_intent",
-    "extract_package_info": "extract_by_intent",
-    "extract_product_cards": "extract_by_intent",
     "extract_card_items": "extract_by_intent",
     "extract_cards": "extract_by_intent",
-    "extract_article_links": "extract_by_intent",
     "extract_fields_from_region": "extract_by_intent",
 }
 
 
 ACTION_ALIAS_INTENTS: dict[str, str] = {
-    "extract_results": "search_results",
-    "extract_search_results": "search_results",
-    "extract_package_info": "package_metadata",
-    "extract_product_cards": "product_cards",
     "extract_card_items": "card_items",
     "extract_cards": "card_items",
-    "extract_article_links": "article_results",
+    "extract_fields_from_region": "field_schema",
 }
 
 INTENT_ALIASES: dict[str, str] = {
-    "package": "package_metadata",
-    "packages": "package_metadata",
-    "package_info": "package_metadata",
-    "library": "package_metadata",
-    "library_info": "package_metadata",
-    "library_metadata": "package_metadata",
     "card": "card_items",
     "cards": "card_items",
     "catalog": "card_items",
     "catalog_items": "card_items",
     "listing": "card_items",
     "listings": "card_items",
-    "currency": "table_rows",
-    "currency_row": "table_rows",
-    "currency_rows": "table_rows",
-    "currency_table_rows": "table_rows",
-    "field_schema": "semantic_region_fields",
-    "fields_schema": "semantic_region_fields",
-    "region_fields": "semantic_region_fields",
-    "extract_fields_from_region": "semantic_region_fields",
+    "semantic_region_fields": "field_schema",
+    "fields_schema": "field_schema",
+    "region_fields": "field_schema",
+    "extract_fields_from_region": "field_schema",
 }
 
 
@@ -133,102 +103,6 @@ CANONICAL_ACTIONS = {
 }
 
 
-CONTACT_REGION_CANDIDATES = [
-    "Контакты",
-    "Contacts",
-    "Contact",
-    "Связаться",
-    "Support",
-    "Поддержка",
-    "About",
-    "О нас",
-]
-
-
-def goal_requests_semantic_region_fields(goal: object, required_fields: list[str] | None = None) -> bool:
-    text = str(goal or "").casefold()
-    fields = {str(field or "").strip().casefold() for field in (required_fields or [])}
-    contact_terms = (
-        "contact",
-        "contacts",
-        "support",
-        "about",
-        "контакт",
-        "связ",
-        "поддерж",
-        "реквизит",
-        "сведения об организа",
-    )
-    field_terms = (
-        "email",
-        "e-mail",
-        "mail",
-        "phone",
-        "telephone",
-        "address",
-        "почт",
-        "телефон",
-        "адрес",
-    )
-    schema_fields = {"email", "phone", "address", "contact_page_url", "final_url", "url"}
-    return any(term in text for term in contact_terms) and (
-        any(term in text for term in field_terms)
-        or bool(fields & schema_fields)
-        or any(term in text for term in ("данн", "информац", "сведения", "details", "info", "link", "page", "ссылк", "страниц"))
-    )
-
-
-def infer_semantic_region_required_fields(goal: object, required_fields: list[str] | None = None) -> list[str]:
-    text = str(goal or "").casefold()
-    inferred = [str(field or "").strip() for field in (required_fields or []) if str(field or "").strip()]
-
-    def add(field: str) -> None:
-        if field not in inferred:
-            inferred.append(field)
-
-    broad_contact = any(term in text for term in ("contact data", "contact details", "контактные данн", "контактную информац", "реквизит", "сведения об организа"))
-    if broad_contact:
-        for field in ("address", "phone", "email", "contact_page_url"):
-            add(field)
-    if any(term in text for term in ("address", "адрес")):
-        add("address")
-    if any(term in text for term in ("phone", "telephone", "tel", "телефон")):
-        add("phone")
-    if any(term in text for term in ("email", "e-mail", "mail", "почт")):
-        add("email")
-    if any(term in text for term in ("contact page", "contacts page", "contact link", "ссылк", "страниц")) and any(term in text for term in ("contact", "контакт")):
-        add("contact_page_url")
-    return inferred
-
-
-def build_semantic_region_fields_args(goal: object, required_fields: list[str] | None = None, output_key: str = "contact_info") -> dict[str, Any]:
-    fields: dict[str, dict[str, Any]] = {}
-    for field in infer_semantic_region_required_fields(goal, required_fields):
-        normalized = normalize_required_field_alias(field)
-        if normalized in {"email"}:
-            fields["email"] = {"type": "email"}
-        elif normalized in {"phone"}:
-            fields["phone"] = {"type": "phone"}
-        elif normalized in {"address"}:
-            fields["address"] = {"type": "text", "anchors": ["Адрес", "Address"]}
-        elif normalized in {"contact_page_url", "final_url", "url"}:
-            fields["contact_page_url"] = {"type": "current_url"}
-    if not fields:
-        fields = {
-            "address": {"type": "text", "anchors": ["Адрес", "Address"]},
-            "phone": {"type": "phone"},
-            "email": {"type": "email"},
-            "contact_page_url": {"type": "current_url"},
-        }
-    return {
-        "intent": "semantic_region_fields",
-        "region_hint": "contacts/support/about/details",
-        "region_candidates": CONTACT_REGION_CANDIDATES,
-        "fields": fields,
-        "output_key": output_key,
-    }
-
-
 def normalize_required_field_alias(field: str) -> str:
     normalized_field = str(field or "").strip()
     if normalized_field.endswith("[]"):
@@ -236,97 +110,149 @@ def normalize_required_field_alias(field: str) -> str:
     return REQUIRED_FIELD_ALIASES.get(normalized_field.lower(), normalized_field)
 
 
-CONTACT_REGION_CANDIDATES = [
-    "Контакты",
-    "Contacts",
-    "Contact",
-    "Связаться",
-    "Support",
-    "Поддержка",
-    "About",
-    "О нас",
-]
+_FIELD_REQUEST_VERB = re.compile(
+    r"\b(?:extract|export|return|collect|get|provide|list|выгрузи|извлеки|верни|получи|собери|перечисли)\b",
+    flags=re.IGNORECASE,
+)
+_FIELD_LIST_SPLITTER = re.compile(
+    r"\s*(?:,|;|\band\b|\bplus\b|\bas\s+well\s+as\b|\bи\b|\bа\s+также\b)\s*",
+    flags=re.IGNORECASE,
+)
+_FIELD_LIST_INTRO = re.compile(
+    r"\b(?:with|including|fields?|с\s+полями|включая)\b",
+    flags=re.IGNORECASE,
+)
+_FIELD_QUALIFIER = re.compile(
+    r"\b(?:if|when)\s+(?:available|present)\b|\bпри\s+наличии\b",
+    flags=re.IGNORECASE,
+)
+_FIELD_LEADING_MODIFIERS = {
+    "a",
+    "an",
+    "the",
+    "all",
+    "any",
+    "visible",
+    "requested",
+    "following",
+    "short",
+    "brief",
+    "general",
+    "common",
+    "все",
+    "видимые",
+    "следующие",
+    "краткое",
+    "краткую",
+    "общие",
+    "общую",
+}
 
 
-def goal_requests_semantic_region_fields(goal: object, required_fields: list[str] | None = None) -> bool:
-    text = str(goal or "").casefold()
-    fields = {str(field or "").strip().casefold() for field in (required_fields or [])}
-    contact_terms = (
-        "contact",
-        "contacts",
-        "support",
-        "about",
-        "контакт",
-        "связ",
-        "поддерж",
-        "реквизит",
-        "сведения об организа",
-    )
-    field_terms = (
-        "email",
-        "e-mail",
-        "mail",
-        "phone",
-        "telephone",
-        "address",
-        "почт",
-        "телефон",
-        "адрес",
-    )
-    schema_fields = {"email", "phone", "address", "contact_page_url", "final_url", "url"}
-    return any(term in text for term in contact_terms) and (
-        any(term in text for term in field_terms)
-        or bool(fields & schema_fields)
-        or any(term in text for term in ("данн", "информац", "сведения", "details", "info", "link", "page", "ссылк", "страниц"))
-    )
+def _field_names_from_explicit_list(segment: str, *, explicit_intro: bool) -> list[str]:
+    value = str(segment or "").strip()
+    if not value:
+        return []
+    parts = [part.strip() for part in _FIELD_LIST_SPLITTER.split(value) if part.strip()]
+    if not explicit_intro:
+        has_list_punctuation = "," in value or ";" in value
+        short_conjunction_list = len(parts) >= 2 and all(len(part.split()) <= 3 for part in parts)
+        if not has_list_punctuation and not short_conjunction_list:
+            return []
+
+    fields: list[str] = []
+    for part in parts:
+        cleaned = _FIELD_QUALIFIER.sub("", part).strip(" .:()[]{}'\"")
+        words = [word for word in re.findall(r"\w+", cleaned, flags=re.UNICODE) if word]
+        while words and words[0].casefold() in _FIELD_LEADING_MODIFIERS:
+            words.pop(0)
+        if not words or len(words) > 6:
+            continue
+        field = "_".join(word.casefold() for word in words).strip("_")
+        if field and field not in fields:
+            fields.append(field)
+    return fields
 
 
-def infer_semantic_region_required_fields(goal: object, required_fields: list[str] | None = None) -> list[str]:
-    text = str(goal or "").casefold()
-    inferred = [str(field or "").strip() for field in (required_fields or []) if str(field or "").strip()]
+def _infer_explicit_goal_fields(goal: object) -> list[str]:
+    text = str(goal or "").strip()
+    if not text:
+        return []
+
+    candidates: list[tuple[str, bool]] = []
+    if ":" in text:
+        candidates.append((text.rsplit(":", 1)[1], True))
+
+    matches = list(_FIELD_REQUEST_VERB.finditer(text))
+    if matches:
+        tail = text[matches[-1].end() :].strip()
+        intro_matches = list(_FIELD_LIST_INTRO.finditer(tail))
+        if intro_matches:
+            candidates.append((tail[intro_matches[-1].end() :], True))
+        candidates.append((tail, False))
+
+    for segment, explicit_intro in candidates:
+        fields = _field_names_from_explicit_list(segment, explicit_intro=explicit_intro)
+        if fields:
+            return fields
+    return []
+
+
+def infer_schema_required_fields(goal: object, required_fields: list[str] | None = None) -> list[str]:
+    inferred: list[str] = []
 
     def add(field: str) -> None:
         if field not in inferred:
             inferred.append(field)
 
-    broad_contact = any(term in text for term in ("contact data", "contact details", "контактные данн", "контактную информац", "реквизит", "сведения об организа"))
-    if broad_contact:
-        for field in ("address", "phone", "email", "contact_page_url"):
-            add(field)
-    if any(term in text for term in ("address", "адрес")):
-        add("address")
-    if any(term in text for term in ("phone", "telephone", "tel", "телефон")):
-        add("phone")
-    if any(term in text for term in ("email", "e-mail", "mail", "почт")):
-        add("email")
-    if any(term in text for term in ("contact page", "contacts page", "contact link", "ссылк", "страниц")) and any(term in text for term in ("contact", "контакт")):
-        add("contact_page_url")
+    for field in required_fields or []:
+        normalized = str(field or "").strip()
+        if normalized and normalized not in {"page_snapshot", "clicked_text"}:
+            add(normalized)
+
+    for field in _infer_explicit_goal_fields(goal):
+        add(field)
     return inferred
 
 
-def build_semantic_region_fields_args(goal: object, required_fields: list[str] | None = None, output_key: str = "contact_info") -> dict[str, Any]:
+def goal_requests_schema_fields(goal: object, required_fields: list[str] | None = None) -> bool:
+    fields = infer_schema_required_fields(goal, required_fields)
+    collection_keys = {
+        "items",
+        "results",
+        "rows",
+        "links",
+        "cards",
+    }
+    return bool(fields) and not all(str(field).casefold() in collection_keys for field in fields)
+
+
+def _field_rule_for_name(field: object) -> dict[str, Any]:
+    name = str(field or "").strip()
+    normalized = normalize_required_field_alias(name).casefold()
+    if normalized in {"url", "final_url", "current_url", "source_url"} or normalized.endswith("_url"):
+        return {"type": "current_url"}
+    if normalized in {"title", "page_title", "current_title"}:
+        return {"type": "page_title"}
+    if normalized in {"description", "summary", "snippet", "meta_description"}:
+        return {"type": "meta_description", "anchors": [name.replace("_", " ")]}
+    if normalized in {"email", "phone"}:
+        return {"type": normalized}
+    return {"type": "text", "anchors": [name.replace("_", " ")]}
+
+
+def build_field_schema_args(
+    goal: object,
+    required_fields: list[str] | None = None,
+    output_key: str = "extracted_fields",
+) -> dict[str, Any]:
     fields: dict[str, dict[str, Any]] = {}
-    for field in infer_semantic_region_required_fields(goal, required_fields):
-        normalized = normalize_required_field_alias(field)
-        if normalized in {"email"}:
-            fields["email"] = {"type": "email"}
-        elif normalized in {"phone"}:
-            fields["phone"] = {"type": "phone"}
-        elif normalized in {"address"}:
-            fields["address"] = {"type": "text", "anchors": ["Адрес", "Address"]}
-        elif normalized in {"contact_page_url", "final_url", "url"}:
-            fields["contact_page_url"] = {"type": "current_url"}
-    if not fields:
-        fields = {
-            "address": {"type": "text", "anchors": ["Адрес", "Address"]},
-            "phone": {"type": "phone"},
-            "email": {"type": "email"},
-            "contact_page_url": {"type": "current_url"},
-        }
+    for field in infer_schema_required_fields(goal, required_fields):
+        normalized = str(field or "").strip()
+        if normalized:
+            fields[normalized] = _field_rule_for_name(normalized)
     return {
-        "intent": "semantic_region_fields",
-        "region_hint": "contacts/support/about/details",
-        "region_candidates": CONTACT_REGION_CANDIDATES,
+        "intent": "field_schema",
         "fields": fields,
         "output_key": output_key,
     }
@@ -360,139 +286,154 @@ def looks_like_css_selector(value: object) -> bool:
 def semantic_intent_for_structured_step(step: dict[str, Any]) -> str | None:
     args = step.get("args") if isinstance(step.get("args"), dict) else {}
     fields = args.get("fields")
-    hint = " ".join(
-        [
-            str(args.get("intent", "")),
-            str(args.get("item_type", "")),
-            str(args.get("type", "")),
-            str(args.get("output_key", "")),
-            str(step.get("save_as", "")),
-            str(args.get("pattern", "")),
-            " ".join(str(key) for key in fields.keys()) if isinstance(fields, dict) else "",
-        ]
-    ).casefold()
+    intent = normalize_intent_alias(args.get("intent"))
+    if intent in {"field_schema", "card_items", "table_rows"}:
+        return intent
+    typed_field_schema = isinstance(fields, dict) and bool(fields) and all(
+        isinstance(rule, dict)
+        and any(key in rule for key in ("type", "anchors", "anchor_text", "anchor_candidates", "value_pattern"))
+        and not any(key in rule for key in ("selector", "attr", "attribute"))
+        for rule in fields.values()
+    )
+    if typed_field_schema or bool(args.get("region_hint")) or bool(args.get("region_candidates")):
+        return "field_schema"
     selector_like_pattern = looks_like_css_selector(args.get("pattern", ""))
     fields_are_selector_like = isinstance(fields, dict) and any(
         isinstance(value, str) and looks_like_css_selector(value)
         for value in fields.values()
     )
-    has_structural_hint = selector_like_pattern or fields_are_selector_like or bool(args.get("item_selector"))
-    if not has_structural_hint and not any(
-        token in hint
-        for token in ("article", "articles", "news", "paper", "repository", "repo", "product", "card", "catalog", "listing", "table")
-    ):
+    fields_have_selector_rules = isinstance(fields, dict) and any(
+        isinstance(value, dict) and any(key in value for key in ("selector", "attr", "attribute"))
+        for value in fields.values()
+    )
+    if fields_have_selector_rules:
         return None
-    if any(token in hint for token in ("product", "products", "product_cards")):
-        return "product_cards"
-    if any(token in hint for token in ("card", "cards", "card_items", "catalog", "listing", "listings")):
-        return "card_items"
-    if any(token in hint for token in ("repository", "repositories", "repo")):
-        return "repository_results"
-    if any(token in hint for token in ("paper", "papers", "preprint")):
-        return "paper_results"
-    if any(token in hint for token in ("news", "news_items")):
-        return "news_items"
-    if any(token in hint for token in ("article", "articles")):
-        return "article_results"
-    if "table" in hint:
+    shape = str(args.get("shape", "") or "").strip().casefold()
+    if shape in {"table", "rows", "grid"}:
         return "table_rows"
+    if selector_like_pattern or fields_are_selector_like or bool(args.get("item_selector")) or isinstance(fields, dict):
+        return "card_items"
     return None
 
 
-def item_type_args_for_intent(intent: str) -> dict[str, str]:
-    if intent in {"article_results", "paper_results", "repository_results"}:
-        return {"item_type": intent.replace("_results", "")}
-    if intent == "news_items":
-        return {"item_type": "news"}
-    return {}
+def normalize_schema_fields_step(
+    step: dict[str, Any],
+    *,
+    goal: object,
+    required_fields: list[str] | None = None,
+) -> dict[str, Any]:
+    current = dict(step) if isinstance(step, dict) else {}
+    args = current.get("args")
+    current["args"] = dict(args) if isinstance(args, dict) else {}
+    args = current["args"]
+    action = str(current.get("action", "") or "").strip()
+
+    if action == "extract_fields_from_region":
+        action = "extract_by_intent"
+        current["action"] = action
+        args.setdefault("intent", "field_schema")
+
+    if action == "click_by_semantic_target":
+        target_candidates = args.get("target_candidates")
+        candidates = [
+            str(item).strip()
+            for item in target_candidates
+            if str(item).strip()
+        ] if isinstance(target_candidates, list) else []
+        target_text = str(args.get("target_text") or args.get("text") or args.get("target") or "").strip()
+        if not target_text and candidates:
+            args["target_text"] = candidates[0]
+        return current
+
+    intent = normalize_intent_alias(args.get("intent"))
+    schema_hint = semantic_intent_for_structured_step(current) == "field_schema"
+    has_anchor = bool(str(args.get("anchor_text") or args.get("anchor") or "").strip()) or (
+        isinstance(args.get("anchor_candidates"), list)
+        and any(str(item or "").strip() for item in args.get("anchor_candidates", []))
+    )
+    malformed_schema_extraction = goal_requests_schema_fields(goal, required_fields) and (
+        action == "extract_value_near_anchor" and not has_anchor
+    )
+    explicit_schema = action == "extract_by_intent" and intent == "field_schema"
+    if not (malformed_schema_extraction or schema_hint or explicit_schema):
+        return current
+
+    output_key = str(args.get("output_key") or current.get("save_as") or "extracted_fields").strip() or "extracted_fields"
+    normalized_args = build_field_schema_args(goal, required_fields, output_key=output_key)
+    if isinstance(args.get("fields"), dict) and args["fields"]:
+        normalized_args["fields"] = dict(args["fields"])
+    if isinstance(args.get("region_candidates"), list) and args["region_candidates"]:
+        normalized_args["region_candidates"] = list(args["region_candidates"])
+    if str(args.get("region_hint", "") or "").strip():
+        normalized_args["region_hint"] = str(args["region_hint"]).strip()
+    current["action"] = "extract_by_intent"
+    current["args"] = normalized_args
+    current["save_as"] = output_key
+    return current
 
 
 def canonical_structured_intent(value: str) -> str | None:
     normalized = normalize_intent_alias(value)
-    if normalized == "package_metadata":
-        return "package_metadata"
+    if normalized == "field_schema":
+        return "field_schema"
     if normalized in {"card", "cards", "card_item", "card_items", "catalog", "catalog_items", "listing", "listings"}:
         return "card_items"
-    if normalized in {"product", "products", "product_card", "product_cards"}:
-        return "product_cards"
-    if normalized in {"repository", "repositories", "repo", "repo_results", "repository_results"}:
-        return "repository_results"
-    if normalized in {"paper", "papers", "preprint", "paper_results"}:
-        return "paper_results"
-    if normalized in {"article", "articles", "article_results"}:
-        return "article_results"
-    if normalized in {"news", "news_item", "news_items"}:
-        return "news_items"
     if normalized in {"table", "table_row", "table_rows", "row", "rows"}:
         return "table_rows"
-    if normalized in {"currency", "currency_row", "currency_rows", "currency_table_rows"}:
-        return "table_rows"
-    if normalized in {"search", "search_result", "search_results", "results"}:
-        return "search_results"
-    return normalized if normalized.endswith("_results") else None
+    return None
 
 
 def default_output_key_for_intent(intent: str) -> str:
+    normalized = normalize_intent_alias(intent)
     return {
-        "product_cards": "products",
-        "card_items": "cards",
-        "repository_results": "repositories",
-        "paper_results": "papers",
-        "article_results": "articles",
-        "news_items": "news",
-        "currency_table_rows": "rows",
+        "card_items": "items",
         "table_rows": "rows",
-        "package_metadata": "package_metadata",
-        "package_info": "package_metadata",
-        "library_metadata": "package_metadata",
-        "package": "package_metadata",
         "visible_links": "links",
         "extract_visible_links": "links",
         "links": "links",
-        "search_results": "results",
-        "result_list": "results",
-    }.get(intent, "results")
+        "field_schema": "extracted_fields",
+    }.get(normalized, "items")
 
 
-def coalesce_package_metadata_steps(
+def coalesce_field_schema_steps(
     steps: list[dict[str, Any]],
     *,
     goal: str,
     required_fields: list[str],
 ) -> list[dict[str, Any]]:
-    field_set = {normalize_required_field_alias(str(field)).strip().lower() for field in required_fields}
-    goal_hint = str(goal or "").casefold()
-    package_requested = (
-        len(field_set & PACKAGE_METADATA_FIELDS) >= 2
-        or ("package" in goal_hint and any(token in goal_hint for token in ("version", "description", "summary")))
-    )
-    if not package_requested:
+    field_set = {
+        str(field or "").strip()
+        for field in required_fields
+        if str(field or "").strip() and str(field or "").strip() not in {"page_snapshot", "clicked_text"}
+    }
+    if len(field_set) < 2 or not goal_requests_schema_fields(goal, list(field_set)):
         return steps
 
-    package_step_indices: list[int] = []
+    field_step_indices: list[int] = []
+    schema_fields: dict[str, dict[str, Any]] = {}
     for index, step in enumerate(steps):
         if not isinstance(step, dict):
             continue
-        save_as = str(step.get("save_as", "") or "").strip().lower()
-        if save_as not in PACKAGE_METADATA_FIELDS:
+        save_as = str(step.get("save_as", "") or "").strip()
+        if save_as not in field_set:
             continue
         action = str(step.get("action", "") or "").strip()
         args = step.get("args") if isinstance(step.get("args"), dict) else {}
-        intent = str(args.get("intent", "") or "").strip().casefold()
-        fragile_package_action = action in {
+        fragile_field_action = action in {
             "extract_text",
             "extract_html",
             "extract_pattern_from_page_text",
             "extract_text_near_text",
             "extract_value_near_anchor",
-        } or (action == "extract_by_intent" and intent in {"value_near_anchor", "text_near_anchor"})
-        if fragile_package_action:
-            package_step_indices.append(index)
-    if not package_step_indices:
+        }
+        if fragile_field_action:
+            field_step_indices.append(index)
+            schema_fields[save_as] = _field_rule_for_name(save_as)
+    if len(field_step_indices) < 2:
         return steps
 
-    insert_at = package_step_indices[0]
-    skip = set(package_step_indices)
+    insert_at = field_step_indices[0]
+    skip = set(field_step_indices)
     coalesced: list[dict[str, Any]] = []
     inserted = False
     for index, step in enumerate(steps):
@@ -501,8 +442,12 @@ def coalesce_package_metadata_steps(
                 {
                     "step_id": 0,
                     "action": "extract_by_intent",
-                    "args": {"intent": "package_metadata", "output_key": "package_metadata"},
-                    "save_as": "package_metadata",
+                    "args": {
+                        "intent": "field_schema",
+                        "fields": schema_fields,
+                        "output_key": "extracted_fields",
+                    },
+                    "save_as": "extracted_fields",
                 }
             )
             inserted = True

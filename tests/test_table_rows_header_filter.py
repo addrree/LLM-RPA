@@ -35,7 +35,14 @@ def test_table_rows_intent_filters_rows_by_requested_columns_from_goal():
         )
     )
 
-    assert result == [rows[0]]
+    assert len(result) == 1
+    assert result[0]["headers"] == ["Company", "Contact", "Country"]
+    assert result[0]["cells"] == ["Alfreds Futterkiste", "Maria Anders", "Germany"]
+    assert result[0]["fields_by_header"] == {
+        "Company": "Alfreds Futterkiste",
+        "Contact": "Maria Anders",
+        "Country": "Germany",
+    }
 
 
 def test_table_rows_intent_filters_rows_by_explicit_columns_arg():
@@ -57,12 +64,18 @@ def test_table_rows_intent_filters_rows_by_explicit_columns_arg():
     result = asyncio.run(
         handler.extract_by_intent(
             object(),
-            {"intent": "table_rows", "columns": ["Company", "Contact", "Country"]},
+            {"intent": "table_rows", "columns": ["Company", "Country"]},
             {},
         )
     )
 
-    assert result == [rows[0]]
+    assert len(result) == 1
+    assert result[0]["headers"] == ["Company", "Country"]
+    assert result[0]["cells"] == ["A", "C"]
+    assert result[0]["fields_by_header"] == {"Company": "A", "Country": "C"}
+    assert result[0]["company"] == "A"
+    assert result[0]["country"] == "C"
+    assert "contact" not in result[0]
 
 
 def test_result_like_text_fallback_extracts_titles_and_links():

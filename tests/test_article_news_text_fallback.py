@@ -1,59 +1,54 @@
 from __future__ import annotations
 
+from pathlib import Path
+
 from app.executor.action_handlers import ActionHandlers
 
 
-def test_article_text_fallback_extracts_title_link_author_and_date():
+def test_generic_text_result_fallback_extracts_requested_visible_blocks():
     source_text = """
-    LATEST
-    Python 3.14.5 is out!
-    Hugo van Kemenade
-    ·
-    May 10, 2026
-    A special release with a new garbage collector.
-    RECENT
-    Python 3.15.0 beta 1 is here!
-    Hugo van Kemenade
-    ·
-    May 7, 2026
-    The propreantepenultimate 3.15 beta is out!
-    CPython: 36 Years of Source Code
-    Stan Ulbrych
-    ·
-    March 8, 2026
-    An analysis of the growth of CPython's codebase.
+    Results
+    Alpha heading
+    A meaningful description for the first visible result block.
+    Beta heading
+    A different meaningful description for the second visible result block.
+    Privacy policy
     """
     links = [
-        {"text": "Python 3.14.5 is out!", "href": "https://blog.python.local/python-3145-is-out.html"},
-        {"text": "Python 3.15.0 beta 1 is here!", "href": "https://blog.python.local/python-3150-beta-1.html"},
-        {"text": "CPython: 36 Years of Source Code", "href": "https://blog.python.local/cpython-36-years.html"},
+        {"text": "Alpha heading", "href": "https://sample.test/alpha"},
+        {"text": "Beta heading", "href": "https://sample.test/beta"},
     ]
 
-    items = ActionHandlers._collect_article_like_items_from_text(source_text=source_text, links=links, limit=5)
+    items = ActionHandlers._collect_result_like_items_from_text(source_text=source_text, links=links, limit=5)
 
-    assert items[0]["title"] == "Python 3.14.5 is out!"
-    assert items[0]["href"] == "https://blog.python.local/python-3145-is-out.html"
-    assert items[0]["author"] == "Hugo van Kemenade"
-    assert items[0]["publication_time"] == "May 10, 2026"
-    assert items[1]["title"] == "Python 3.15.0 beta 1 is here!"
-    assert items[2]["title"] == "CPython: 36 Years of Source Code"
-    assert items[2]["publication_time"] == "March 8, 2026"
+    assert [item["title"] for item in items] == ["Alpha heading", "Beta heading"]
+    assert [item["href"] for item in items] == ["https://sample.test/alpha", "https://sample.test/beta"]
+    assert all(item["description"] for item in items)
 
 
-def test_article_metadata_requested_understands_russian_date_goal():
-    assert ActionHandlers._article_metadata_requested(
-        args={"intent": "news_items"},
-        runtime_state={"user_goal": "Выгрузи последние статьи: заголовок, дату и ссылку."},
+def test_generic_item_projection_does_not_invent_known_profile_fields():
+    projected = ActionHandlers._project_item_to_schema(
+        item={
+            "title": "Alpha heading",
+            "description": "Visible summary",
+            "href": "https://sample.test/alpha",
+            "raw_text": "Alpha heading Visible summary 2026-05-10",
+        },
+        fields={"heading": {"type": "title"}, "summary": {"type": "description"}},
     )
 
+    assert projected["heading"] == "Alpha heading"
+    assert projected["summary"] == "Visible summary"
+    assert "author" not in projected
+    assert "publication_time" not in projected
 
-def test_article_link_filter_accepts_date_based_blog_paths():
-    links = [
-        {"text": "Python 3.14.5 is out!", "href": "https://blog.python.org/2026/05/python-3145-is-out"},
-        {"text": "RSS", "href": "https://blog.python.org/rss.xml"},
-    ]
 
-    filtered = ActionHandlers._filter_links_to_article_like_paths(links, current_url="https://blog.python.org/")
+def test_no_known_content_profile_helpers_remain():
+    source = Path("app/executor/action_handlers.py").read_text(encoding="utf-8")
 
-    assert [item["href"] for item in filtered] == ["https://blog.python.org/2026/05/python-3145-is-out"]
-
+    for name in (
+        "_collect_article_like_items_from_text",
+        "_article_metadata_requested",
+        "_filter_links_to_article_like_paths",
+    ):
+        assert f"def {name}" not in source

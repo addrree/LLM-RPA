@@ -6,7 +6,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
-from app.planner.action_vocab import goal_requests_semantic_region_fields, infer_semantic_region_required_fields
+from app.planner.action_vocab import infer_schema_required_fields
 
 
 TaskType = Literal[
@@ -27,16 +27,9 @@ SUPPORTED_RUNTIME_INTENTS = {
     "current_url",
     "page_title",
     "value_near_anchor",
-    "package_metadata",
-    "search_results",
     "card_items",
-    "product_cards",
     "table_rows",
-    "article_results",
-    "repository_results",
-    "paper_results",
-    "news_items",
-    "semantic_region_fields",
+    "field_schema",
 }
 
 COMMON_RUNTIME_INTENTS = ["current_url", "page_title"]
@@ -164,7 +157,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_structured_items",
             "extract_items",
         ],
-        preferred_intents=_runtime_intents("package_metadata", "value_near_anchor", "semantic_region_fields"),
+        preferred_intents=_runtime_intents("field_schema", "value_near_anchor"),
         conceptual_intents=["entity_metadata"],
         expected_output_type="object",
         required_skill_groups=["semantic_form_fill", "entity_metadata_extraction"],
@@ -180,16 +173,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_structured_items",
             "extract_items",
         ],
-        preferred_intents=_runtime_intents(
-            "search_results",
-            "article_results",
-            "repository_results",
-            "paper_results",
-            "news_items",
-            "current_url",
-            "page_title",
-            "package_metadata",
-        ),
+        preferred_intents=_runtime_intents("card_items"),
         conceptual_intents=["result_list"],
         expected_output_type="list",
         required_skill_groups=["semantic_form_fill", "result_list_extraction"],
@@ -220,13 +204,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_structured_items",
             "extract_items",
         ],
-        preferred_intents=_runtime_intents(
-            "search_results",
-            "article_results",
-            "repository_results",
-            "paper_results",
-            "news_items",
-        ),
+        preferred_intents=_runtime_intents("card_items"),
         conceptual_intents=["repeated_items"],
         expected_output_type="list",
         required_skill_groups=["repeated_item_extraction"],
@@ -242,7 +220,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_items",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents("card_items", "product_cards", "search_results"),
+        preferred_intents=_runtime_intents("card_items"),
         conceptual_intents=["card_or_catalog_items"],
         expected_output_type="list",
         required_skill_groups=["card_or_catalog_extraction"],
@@ -272,7 +250,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_by_intent",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents("current_url", "page_title", "package_metadata", "semantic_region_fields"),
+        preferred_intents=_runtime_intents("current_url", "page_title", "field_schema"),
         conceptual_intents=["semantic_navigation"],
         expected_output_type="navigation",
         required_skill_groups=["semantic_navigation"],
@@ -288,7 +266,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "click_by_semantic_target",
             "wait_for",
         ],
-        preferred_intents=_runtime_intents("table_rows", "search_results"),
+        preferred_intents=_runtime_intents("table_rows", "card_items"),
         conceptual_intents=["row_action"],
         expected_output_type="action",
         required_skill_groups=["row_selection", "semantic_action"],
@@ -333,15 +311,9 @@ PROFILES: dict[str, PlanningProfile] = {
         ],
         preferred_intents=_runtime_intents(
             "value_near_anchor",
-            "package_metadata",
-            "search_results",
             "card_items",
-            "product_cards",
             "table_rows",
-            "article_results",
-            "repository_results",
-            "paper_results",
-            "news_items",
+            "field_schema",
         ),
         conceptual_intents=["generic_web_task"],
         expected_output_type="unknown",
@@ -379,10 +351,6 @@ class TaskRouter:
             text,
             ["card", "cards", "catalog", "listing", "listings", "карточ", "каталог", "витрин"],
         )
-        product_detail_hint = self._has_any(
-            text,
-            ["product", "products", "price", "rating", "attribute", "attributes", "товар", "цен", "рейтинг", "атрибут"],
-        )
         has_visual = self._has_any(text, ["visual", "screenshot", "image", "canvas", "coordinate", "x=", "y=", "визуал", "скрин", "изображ", "координат"])
         has_row_action = (
             has_table
@@ -410,34 +378,25 @@ class TaskRouter:
         navigation_required = navigation_required or result_navigation_request
         has_form = search_required or self._has_any(text, ["fill", "enter", "type", "input", "submit", "заполни", "введи", "форма"])
         has_anchor_value = self._has_any(text, ["near", "next to", "beside", "anchor", "label", "value", "рядом", "возле", "значени", "метк"])
-        has_metadata_fields = self._metadata_field_count(text) >= 2
-        object_output = has_metadata_fields and not list_output and not has_table and not cards_like
+        schema_field_hints = infer_schema_required_fields(text)
+        has_metadata_fields = len(schema_field_hints) >= 2
+        object_output = has_metadata_fields and not list_output and not has_table and not cards_like and not navigation_required
         search_navigation_then_extraction = (
             search_required
             and navigation_required
             and has_extract
             and (list_output or self._has_any(text, ["result", "results", "СЂРµР·СѓР»СЊС‚Р°С‚"]))
         )
-        domain_object_hint = self._has_any(text, ["package", "project", "library", "repo", "repository", "article", "profile", "пакет", "проект", "библиотек", "репозитор", "профил"])
-        has_article = self._has_any(text, ["article", "articles", "news", "post", "стать", "новост", "публикац"])
-        has_repository = self._has_any(text, ["repository", "repositories", "repo", "репозитор"])
-        has_paper = self._has_any(text, ["paper", "papers", "preprint", "publication", "научн", "препринт"])
         condition_filtering = self._has_any(
             text,
             ["where", "whose", "contains", "containing", "filter", "condition", "matching", "в заголов", "котор", "содерж"],
         )
-        contact_region_fields = goal_requests_semantic_region_fields(text)
-        contact_page_link_request = contact_region_fields and self._has_any(text, ["contact page", "contacts page", "contact link", "ссылк", "страниц"])
-
         # Keep a normalized Cyrillic pass because some legacy token literals above are mojibake.
         search_required = search_required or self._has_any(text, ["найди", "поиск", "искать"])
         has_extract = has_extract or self._has_any(text, ["выгрузи", "извлеки", "верни", "получи", "собери"])
         list_output = list_output or self._has_any(text, ["список", "результат", "ссылк", "все", "топ"])
-        if contact_page_link_request:
-            list_output = False
         has_table = has_table or self._has_any(text, ["таблиц", "строк", "колон", "ячей"])
         cards_like = cards_like or self._has_any(text, ["карточ", "каталог", "витрин"])
-        product_detail_hint = product_detail_hint or self._has_any(text, ["товар", "цен", "рейтинг", "атрибут"])
         has_visual = has_visual or self._has_any(text, ["визуал", "скрин", "изображ", "координат"])
         has_row_action = has_row_action or (
             has_table
@@ -447,17 +406,13 @@ class TaskRouter:
         navigation_required = navigation_required or self._has_any(text, ["нажм", "перейд", "клик", "открой ссыл"])
         has_form = has_form or search_required or self._has_any(text, ["заполни", "введи", "форма"])
         has_anchor_value = has_anchor_value or self._has_any(text, ["рядом", "возле", "значени", "метк"])
-        object_output = has_metadata_fields and not list_output and not has_table and not cards_like
+        object_output = has_metadata_fields and not list_output and not has_table and not cards_like and not navigation_required
         search_navigation_then_extraction = search_navigation_then_extraction or (
             search_required
             and navigation_required
             and has_extract
             and (list_output or self._has_any(text, ["result", "results", "СЂРµР·СѓР»СЊС‚Р°С‚"]))
         )
-        domain_object_hint = domain_object_hint or self._has_any(text, ["пакет", "проект", "библиотек", "репозитор", "профил"])
-        has_article = has_article or self._has_any(text, ["стать", "новост", "публикац"])
-        has_repository = has_repository or self._has_any(text, ["репозитор"])
-        has_paper = has_paper or self._has_any(text, ["научн", "препринт"])
         condition_filtering = condition_filtering or self._has_any(text, ["в заголов", "котор", "содерж"])
 
         if has_visual:
@@ -502,42 +457,15 @@ class TaskRouter:
             if cards_like:
                 scores["catalog_or_card_extraction"] += 0.08
 
-        if contact_region_fields:
-            signals.append("semantic_region_fields")
-            scores["single_entity_metadata"] += 0.84
-            scores["semantic_navigation"] += 0.2
-            scores["repeated_items_extraction"] -= 0.5
-            scores["search_results_extraction"] -= 0.2
-            if contact_page_link_request or navigation_required:
-                scores["semantic_navigation"] += 0.58
-
         if has_form:
             signals.append("requires_form_fill")
             for task_type in ("single_entity_metadata", "search_results_extraction", "catalog_or_card_extraction"):
                 scores[task_type] += 0.08
-        if domain_object_hint and has_metadata_fields:
-            signals.append("domain_object_hint")
-            scores["single_entity_metadata"] += 0.05
-        if has_article:
-            signals.append("article_like_items")
-            scores["search_results_extraction"] += 0.04
-            scores["repeated_items_extraction"] += 0.04
-        if has_repository:
-            signals.append("repository_like_items")
-            scores["search_results_extraction"] += 0.04
-        if has_paper:
-            signals.append("paper_like_items")
-            scores["search_results_extraction"] += 0.04
-
         if cards_like and has_extract:
             scores["catalog_or_card_extraction"] += 0.16
             if scores["search_results_extraction"] > 0:
                 scores["search_results_extraction"] -= 0.1
             signals.append("card_catalog_priority")
-        if product_detail_hint and (cards_like or list_output):
-            signals.append("product_detail_hint")
-            scores["catalog_or_card_extraction"] += 0.06
-
         ranked = sorted(scores.items(), key=lambda item: item[1], reverse=True)
         best_type, confidence = ranked[0]
         warnings: list[str] = []
@@ -549,8 +477,7 @@ class TaskRouter:
 
         profile = PROFILES[best_type].model_copy(deep=True)
         expected_fields = self._infer_expected_fields(text)
-        if contact_region_fields:
-            expected_fields = infer_semantic_region_required_fields(text, expected_fields)
+        expected_fields = _unique([*expected_fields, *infer_schema_required_fields(text, expected_fields)])
         profile.expected_fields = expected_fields
         route = TaskRoute(
             task_type=best_type,  # type: ignore[arg-type]
@@ -588,57 +515,24 @@ class TaskRouter:
     def _has_word_any(text: str, tokens: list[str]) -> bool:
         return any(re.search(rf"(?<![A-Za-z0-9_]){re.escape(token.casefold())}(?![A-Za-z0-9_])", text) for token in tokens)
 
-    @classmethod
-    def _metadata_field_count(cls, text: str) -> int:
-        groups = [
-            ["name", "title", "назван", "имя"],
-            ["version", "latest", "release", "верс", "релиз"],
-            ["description", "summary", "описан", "кратк"],
-            ["author", "owner", "maintainer", "автор"],
-            ["date", "published", "updated", "дат", "обнов"],
-        ]
-        return sum(1 for group in groups if cls._has_any(text, group))
-
-    @classmethod
-    def _infer_expected_fields(cls, text: str) -> list[str]:
-        fields: list[str] = []
-        checks = [
-            ("name", ["name", "title", "назван", "имя"]),
-            ("latest_version", ["latest version", "version", "верс"]),
-            ("description", ["description", "summary", "описан", "кратк"]),
-            ("url", ["url", "link", "ссылк"]),
-            ("price", ["price", "цена"]),
-            ("rating", ["rating", "рейтинг"]),
-            ("email", ["email", "mail", "почт"]),
-            ("phone", ["phone", "телефон"]),
-            ("address", ["address", "адрес"]),
-            ("contact_page_url", ["contact page", "contacts page", "contact link", "ссылк", "страниц"]),
-        ]
-        for field, tokens in checks:
-            if cls._has_any(text, tokens):
-                fields.append(field)
-        return _unique(fields)
+    @staticmethod
+    def _infer_expected_fields(text: str) -> list[str]:
+        return infer_schema_required_fields(text)
 
     @classmethod
     def _infer_item_type(cls, text: str, task_type: str) -> str | None:
-        checks = [
-            ("product", ["product", "products", "товар"]),
-            ("card", ["card", "cards", "catalog", "listing", "listings", "карточ", "каталог"]),
-            ("article", ["article", "articles", "news", "post", "стать", "новост", "публикац"]),
-            ("repository", ["repository", "repositories", "repo", "репозитор"]),
-            ("paper", ["paper", "papers", "preprint", "publication", "научн", "препринт"]),
-            ("package", ["package", "library", "module", "пакет", "библиотек"]),
-            ("table_row", ["table", "row", "таблиц", "строк"]),
-            ("link", ["link", "links", "ссылк"]),
-        ]
-        for item_type, tokens in checks:
-            if cls._has_any(text, tokens):
-                return item_type
-        if task_type == "visual_or_spatial_task":
-            return "visual"
-        if task_type == "direct_value_extraction":
-            return "value"
-        return None
+        _ = text
+        return {
+            "single_entity_metadata": "object",
+            "search_results_extraction": "item",
+            "structured_table_extraction": "row",
+            "repeated_items_extraction": "item",
+            "catalog_or_card_extraction": "item",
+            "direct_value_extraction": "value",
+            "semantic_navigation": "navigation",
+            "row_or_item_action": "item",
+            "visual_or_spatial_task": "visual",
+        }.get(task_type)
 
     @staticmethod
     def _reason_for(task_type: str, signals: list[str]) -> str:

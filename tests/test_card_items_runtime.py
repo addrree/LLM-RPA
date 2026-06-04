@@ -3,15 +3,29 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 
-from app.executor.action_handlers import ActionHandlers
+import pytest
+
+from app.executor.action_handlers import ActionHandlers, StructuredExtractionError
 from app.observer.page_observer import PageSnapshot
 from app.planner.action_vocab import normalize_plan_action_aliases
 from app.planner.planner import Planner
 from app.planner.replanner import Replanner
+from app.validator.plan_validator import PlanValidator
 
 
 def test_condition_term_groups_accept_generic_item_fields():
     assert ActionHandlers._condition_term_groups({"title": ["Python", "AI"]}) == [["Python"], ["AI"]]
+    assert ActionHandlers._condition_term_groups({"arbitrary_metric": "42"}) == [["42"]]
+
+
+def test_row_action_contract_accepts_arbitrary_command():
+    assert Replanner._row_action_name_for_goal('Archive the item called "Quarterly report"') == "archive"
+    assert Replanner._row_condition_for_goal('Archive the item called "Quarterly report"') == {
+        "contains": "Quarterly report"
+    }
+    PlanValidator._validate_click_row_action_args(
+        {"action_name": "archive", "condition": {"contains": "Quarterly report"}}
+    )
 
 
 def test_confident_item_filter_applies_only_explicit_conditions():
@@ -127,30 +141,35 @@ def test_action_aliases_map_card_items_to_extract_by_intent():
     assert payload["steps"][0]["args"]["intent"] == "card_items"
 
 
-def test_extract_by_intent_routes_generic_search_product_and_card_intents():
+def test_extract_by_intent_accepts_only_generic_card_intent():
     handler = ActionHandlers()
 
-    async def _search(*, page, args, runtime_state=None):
-        return [{"title": "Result", "href": "https://example.com"}]
-
-    async def _products(*, page, args, runtime_state=None):
-        return [{"title": "SSD", "price_value": 6900}]
-
     async def _cards(*, page, args, runtime_state=None):
-        return [{"title": "Project Alpha", "description": "Automation toolkit", "href": "https://example.com/a"}]
+        return [
+            {
+                "title": "Project Alpha",
+                "description": "Automation toolkit",
+                "href": "https://sample.test/a",
+                "numeric_value_required": bool(args.get("numeric_value_required")),
+            }
+        ]
 
     async def _not_blocked(*_args, **_kwargs):
         return None
 
-    handler._collect_search_results_by_intent = _search  # type: ignore[method-assign]
-    handler._collect_product_cards_generic = _products  # type: ignore[method-assign]
     handler._collect_card_items_generic = _cards  # type: ignore[method-assign]
     handler._raise_if_page_blocked_or_limited = _not_blocked  # type: ignore[method-assign]
 
-    result = asyncio.run(handler.extract_by_intent(object(), {"intent": "search_results"}, {}))
-    products = asyncio.run(handler.extract_by_intent(object(), {"intent": "product_cards"}, {}))
-    cards = asyncio.run(handler.extract_by_intent(object(), {"intent": "card_items", "condition": {"title": "Alpha"}}, {}))
+    cards = asyncio.run(
+        handler.extract_by_intent(
+            object(),
+            {"intent": "card_items", "condition": {"title": "Alpha"}, "numeric_value_required": True},
+            {},
+        )
+    )
 
-    assert result[0]["title"] == "Result"
-    assert products[0]["price_value"] == 6900
     assert cards[0]["title"] == "Project Alpha"
+    assert cards[0]["numeric_value_required"] is True
+
+    with pytest.raises(StructuredExtractionError):
+        asyncio.run(handler.extract_by_intent(object(), {"intent": "product_cards"}, {}))

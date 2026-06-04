@@ -4,15 +4,13 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import (
-    build_semantic_region_fields_args,
     canonical_structured_intent,
-    coalesce_package_metadata_steps,
-    goal_requests_semantic_region_fields,
-    item_type_args_for_intent,
+    coalesce_field_schema_steps,
     looks_like_css_selector,
     normalize_plan_action_aliases,
     normalize_required_field_aliases,
     normalize_intent_alias,
+    normalize_schema_fields_step,
     PlannerValidationFailed,
     raise_for_invalid_plan_actions,
     semantic_intent_for_structured_step,
@@ -514,8 +512,7 @@ class Planner:
         if not text:
             return ""
         patterns = [
-            r"^(?:package|project|repository|repo|result|article|paper)\s+(?:name\s+)?link\s+for\s+(.+)$",
-            r"^(?:link|result)\s+for\s+(.+)$",
+            r"^(?:.+?\s+)?(?:link|result)\s+for\s+(.+)$",
             r"^visible\s+link\s+with\s+text\s+(.+)$",
             r"^link\s+with\s+text\s+(.+)$",
         ]
@@ -538,46 +535,15 @@ class Planner:
         explicit_output = str(args.get("output_key", "") or "").strip()
         if explicit_output:
             return explicit_output
-        explicit_type = " ".join(str(args.get(key, "")) for key in ("intent", "item_type", "type")).casefold()
-        if any(token in explicit_type for token in ("product", "products", "product_cards")):
-            return "products"
-        if any(token in explicit_type for token in ("card", "cards", "card_items", "catalog", "listing", "listings")):
-            return "cards"
-        if any(token in explicit_type for token in ("repository", "repositories", "repo")):
-            return "repositories"
-        if any(token in explicit_type for token in ("paper", "papers", "preprint")):
-            return "papers"
-        if any(token in explicit_type for token in ("news", "news_items")):
-            return "news"
-        if any(token in explicit_type for token in ("article", "articles")):
-            return "articles"
-        if any(token in explicit_type for token in ("package", "package_metadata", "package_info", "library_metadata")):
-            return "package"
-        if any(token in explicit_type for token in ("language", "languages")):
-            return "languages"
-        text = " ".join(
-            [
-                str(user_goal or ""),
-                str(args.get("intent", "")),
-                str(args.get("target", "")),
-                " ".join(required_fields),
-            ]
-        ).casefold()
-        if any(token in text for token in ("products[]", "product", "products", "товар")):
-            return "products"
-        if any(token in text for token in ("cards[]", "card", "cards", "card_items", "catalog", "listing", "listings", "карточ", "каталог")):
-            return "cards"
-        if any(token in text for token in ("repositories[]", "repository", "repositories", "repo", "репозитор")):
-            return "repositories"
-        if any(token in text for token in ("papers[]", "paper", "papers", "preprint", "препринт", "научн")):
-            return "papers"
-        if any(token in text for token in ("news[]", "news", "новост")):
-            return "news"
-        if any(token in text for token in ("articles[]", "article", "articles", "стать")):
-            return "articles"
-        if any(token in text for token in ("languages[]", "language", "languages", "язык", "языков")):
-            return "languages"
-        return "results"
+        candidates = [
+            str(field or "").strip().removesuffix("[]")
+            for field in required_fields
+            if str(field or "").strip()
+            and str(field or "").strip() not in {"page_snapshot", "clicked_text", "final_url", "page_title"}
+        ]
+        if len(candidates) == 1:
+            return candidates[0]
+        return "items"
 
     @classmethod
     def _normalize_plan_envelope(
@@ -661,22 +627,14 @@ class Planner:
                 and str(current["args"].get("output_key", "") or "").strip()
             ):
                 current["save_as"] = str(current["args"]["output_key"]).strip()
+            current = normalize_schema_fields_step(
+                current,
+                goal=user_goal,
+                required_fields=required_fields,
+            )
+            action = str(current.get("action", action)).strip()
             if not isinstance(current.get("step_id"), int):
                 current["step_id"] = index
-            if (
-                action == "extract_structured_items"
-                and goal_requests_semantic_region_fields(user_goal, required_fields)
-                and ("fields" not in current["args"] or not current["args"].get("fields"))
-            ):
-                allowed_actions = set()
-                if isinstance(benchmark_context, dict) and isinstance(benchmark_context.get("allowed_actions"), list):
-                    allowed_actions = {str(item).strip() for item in benchmark_context.get("allowed_actions", [])}
-                if not allowed_actions or "extract_by_intent" in allowed_actions:
-                    action = "extract_by_intent"
-                    current["action"] = action
-                    output_key = str(current["args"].get("output_key") or current.get("save_as") or "contact_info").strip()
-                    current["args"] = build_semantic_region_fields_args(user_goal, required_fields, output_key=output_key)
-                    current["save_as"] = output_key
             if action == "extract_structured_items" and "pattern" not in current["args"]:
                 allowed_actions = set()
                 if isinstance(benchmark_context, dict) and isinstance(benchmark_context.get("allowed_actions"), list):
@@ -702,11 +660,10 @@ class Planner:
                     )
                     current["args"] = {
                         "intent": structured_intent,
-                        **(
-                            {"item_type": current["args"].get("item_type")}
-                            if current["args"].get("item_type")
-                            else item_type_args_for_intent(structured_intent)
-                        ),
+                        **({"fields": current["args"].get("fields")} if isinstance(current["args"].get("fields"), dict) else {}),
+                        **({"region_candidates": current["args"].get("region_candidates")} if isinstance(current["args"].get("region_candidates"), list) else {}),
+                        **({"region_hint": current["args"].get("region_hint")} if str(current["args"].get("region_hint", "") or "").strip() else {}),
+                        **({"numeric_value_required": current["args"].get("numeric_value_required")} if isinstance(current["args"].get("numeric_value_required"), bool) else {}),
                         **({"output_key": output_key} if output_key else {}),
                         "limit": current["args"]["limit"] if isinstance(current["args"].get("limit"), int) and current["args"]["limit"] > 0 else 20,
                     }
@@ -847,29 +804,10 @@ class Planner:
                     "visible_links",
                     "extract_visible_links",
                     "links",
-                    "search_results",
-                    "results",
-                    "result_list",
-                    "paper_results",
-                    "papers",
-                    "repository_results",
-                    "repositories",
-                    "repo_results",
-                    "article_results",
-                    "articles",
-                    "news_items",
-                    "news",
-                    "product_cards",
-                    "products",
                     "card_items",
                     "cards",
                     "table_rows",
                     "rows",
-                    "currency_table_rows",
-                    "currency_rows",
-                    "package_metadata",
-                    "package_info",
-                    "library_metadata",
                 }
             if (
                 collection_like_action
@@ -909,7 +847,7 @@ class Planner:
                 current["save_as"] = required_fields[0]
             normalized_steps.append(current)
 
-        normalized_steps = coalesce_package_metadata_steps(
+        normalized_steps = coalesce_field_schema_steps(
             normalized_steps,
             goal=user_goal,
             required_fields=required_fields,

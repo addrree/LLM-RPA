@@ -37,7 +37,8 @@ def test_ollama_chat_retries_once_on_500_and_records_retry_diagnostics():
     assert client.last_chat_diagnostics["transport_retry_reason"] == "http_500"
 
 
-def test_ollama_chat_retries_once_on_timeout_and_records_retry_diagnostics():
+def test_ollama_chat_retries_once_on_timeout_and_records_retry_diagnostics(monkeypatch):
+    monkeypatch.setenv("OLLAMA_RETRY_ON_TIMEOUT", "1")
     client = LLMClient(backend="ollama", planner_model="qwen3-vl:4b", verifier_model="qwen3-vl:4b", timeout_sec=1)
     calls = {"count": 0}
 
@@ -70,3 +71,29 @@ def test_ollama_chat_raises_clear_error_for_thinking_without_json():
     with pytest.raises(LLMClientError, match="reasoning/thinking but no JSON content"):
         client._ollama_chat(model="qwen3-vl:4b", system_prompt="s", user_prompt="u", image_path=None)
     assert client.last_chat_diagnostics["content_source"] == "empty_content_with_thinking"
+
+
+def test_planner_disables_thinking_so_json_is_returned_in_content():
+    client = LLMClient(backend="ollama", planner_model="qwen3-next:80b", verifier_model="gpt-oss:20b", timeout_sec=1)
+    captured = {}
+
+    def fake_post(*args, **kwargs):
+        captured.update(kwargs["json"])
+        return _FakeResponse(
+            200,
+            {
+                "message": {"content": '{"steps": []}', "thinking": ""},
+                "done": True,
+                "done_reason": "stop",
+                "eval_count": 12,
+            },
+        )
+
+    client.session.post = fake_post
+    artifact = client.generate_planner_artifact(system_prompt="json only", user_prompt="goal", stage="initial_planner")
+
+    assert captured["think"] is False
+    assert captured["format"] == "json"
+    assert artifact.parsed_response == {"steps": []}
+    assert client.last_chat_diagnostics["think_requested"] is False
+    assert client.last_chat_diagnostics["done_reason"] == "stop"

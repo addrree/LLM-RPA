@@ -105,6 +105,7 @@ class LLMClient:
                 user_prompt=user_prompt,
                 image_path=None,
                 images_base64=self._normalize_images_base64(images_base64, image_base64),
+                think=False,
             )
             parsed = self._safe_parse_json(raw_text, stage=stage, diagnostics=self.last_chat_diagnostics)
         except LLMClientError as exc:
@@ -214,6 +215,7 @@ class LLMClient:
         user_prompt: str,
         image_path: Optional[str] = None,
         images_base64: Optional[list[str]] = None,
+        think: bool | str | None = None,
     ) -> str:
         url = f"{self.ollama_base_url}/api/chat"
         headers: Dict[str, str] = {}
@@ -244,6 +246,8 @@ class LLMClient:
                 user_message,
             ],
         }
+        if think is not None:
+            payload["think"] = think
 
         last_error: LLMClientError | None = None
         retry_used = False
@@ -331,6 +335,11 @@ class LLMClient:
                 "content_source": content_source,
                 "used_thinking_fallback": used_thinking_fallback,
                 "response_keys": sorted(list(data.keys())),
+                "done": data.get("done"),
+                "done_reason": data.get("done_reason"),
+                "eval_count": data.get("eval_count"),
+                "prompt_eval_count": data.get("prompt_eval_count"),
+                "think_requested": think,
                 "transport_retry_used": retry_used,
                 "transport_retry_reason": retry_reason,
                 "transport_attempt_count": attempt + 1,

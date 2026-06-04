@@ -6,7 +6,7 @@ from app.executor.action_handlers import ActionHandlers
 def test_click_by_semantic_target_opens_first_result_like_link():
     handler = ActionHandlers()
 
-    async def _search_results(*, page, args, runtime_state=None):
+    async def _card_items(*, page, args, runtime_state=None):
         return [{"title": "Project Alpha", "href": "https://projects.sample.test/alpha"}]
 
     async def _wait(_page):
@@ -22,7 +22,7 @@ def test_click_by_semantic_target_opens_first_result_like_link():
         async def goto(self, url, wait_until="domcontentloaded", timeout=20000):
             self.opened.append((url, wait_until, timeout))
 
-    handler._collect_search_results_by_intent = _search_results  # type: ignore[method-assign]
+    handler._collect_card_items_generic = _card_items  # type: ignore[method-assign]
     handler._wait_after_possible_navigation = _wait  # type: ignore[method-assign]
     handler._raise_if_page_blocked_or_limited = _raise  # type: ignore[method-assign]
 

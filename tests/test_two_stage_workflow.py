@@ -201,11 +201,12 @@ def test_normalize_final_plan_metadata_fallback_respects_preferred_runtime_inten
         user_goal="Extract the page title, a short description, and the current URL.",
         previous_plan=previous_plan,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["current_url", "page_title", "package_metadata", "value_near_anchor"],
+        preferred_runtime_intents=["current_url", "page_title", "field_schema", "value_near_anchor"],
     )
 
     assert normalized["steps"][1]["action"] == "extract_by_intent"
-    assert normalized["steps"][1]["args"]["intent"] == "package_metadata"
+    assert normalized["steps"][1]["args"]["intent"] == "field_schema"
+    assert set(normalized["steps"][1]["args"]["fields"]) == {"page_title", "description", "current_url"}
 
 
 def test_normalize_final_plan_builds_generic_navigation_fallback():
@@ -280,7 +281,7 @@ def test_normalize_final_plan_collection_fallback_adds_confident_condition():
         user_goal="Extract story cards whose title contains Arm, with title and link.",
         previous_plan=previous_plan,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["card_items", "product_cards", "search_results"],
+        preferred_runtime_intents=["card_items"],
     )
 
     extract_step = normalized["steps"][1]
@@ -317,7 +318,7 @@ def test_normalize_final_plan_row_action_fallback_clicks_matching_row():
         user_goal="Open the page and delete the table row named Hit the gym.",
         previous_plan=previous_plan,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["table_rows", "search_results"],
+        preferred_runtime_intents=["table_rows", "card_items"],
     )
 
     assert [step["action"] for step in normalized["steps"]] == [
@@ -396,10 +397,10 @@ def test_normalize_final_plan_repairs_click_row_action_args_from_goal():
         user_goal="Open the page and delete the table row named Hit the gym.",
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["table_rows", "search_results"],
+        preferred_runtime_intents=["table_rows", "card_items"],
     )
 
-    assert normalized["steps"][1]["args"] == {"action_name": "delete", "condition": {"contains": "Hit the gym"}}
+    assert normalized["steps"][1]["args"] == {"action_name": "remove", "condition": {"contains": "Hit the gym"}}
     assert normalized["steps"][1]["save_as"] == "row_action"
 
 
@@ -426,7 +427,7 @@ def test_normalize_final_plan_rewrites_semantic_row_click_to_row_action():
         user_goal="Open the page and delete the table row named Hit the gym.",
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["table_rows", "search_results"],
+        preferred_runtime_intents=["table_rows", "card_items"],
     )
 
     assert normalized["steps"][1]["action"] == "click_row_action"
@@ -458,7 +459,7 @@ def test_normalize_final_plan_drops_bare_text_wait_for_row_action():
         user_goal="Open the page and delete the table row named Hit the gym.",
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["table_rows", "search_results"],
+        preferred_runtime_intents=["table_rows", "card_items"],
     )
 
     assert "wait_for" not in [step["action"] for step in normalized["steps"]]
@@ -495,7 +496,7 @@ def test_normalize_final_plan_search_result_navigation_keeps_description_require
         ),
         previous_plan=previous_plan,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["search_results", "repository_results", "current_url", "page_title", "package_metadata"],
+        preferred_runtime_intents=["card_items", "current_url", "page_title", "field_schema"],
     )
 
     assert [step["action"] for step in normalized["steps"]] == [
@@ -508,8 +509,14 @@ def test_normalize_final_plan_search_result_navigation_keeps_description_require
         "finish",
     ]
     assert normalized["steps"][1]["args"] == {"target_text": "first relevant repository result", "role": "link"}
-    assert normalized["steps"][5]["args"] == {"intent": "package_metadata", "output_key": "page_metadata"}
-    assert normalized["steps"][5]["save_as"] == "page_metadata"
+    assert normalized["steps"][4]["args"] == {
+        "intent": "field_schema",
+        "fields": {"description": {"type": "meta_description"}},
+        "output_key": "page_metadata",
+    }
+    assert normalized["steps"][5]["args"] == {"intent": "current_url"}
+    assert normalized["steps"][4]["save_as"] == "page_metadata"
+    assert normalized["steps"][5]["save_as"] == "final_url"
     assert normalized["expected_result"]["required_fields"] == ["page_title", "final_url", "page_metadata"]
 
 
@@ -528,7 +535,7 @@ def test_normalize_final_plan_rewrites_dynamic_result_open_url_to_click():
             "allowed_domains": ["search.sample.test"],
             "steps": [
                 {"action": "open_url", "args": {"url": "https://search.sample.test/?q=browser+automation"}},
-                {"action": "extract_by_intent", "args": {"intent": "search_results"}, "save_as": "search_results_list"},
+                {"action": "extract_by_intent", "args": {"intent": "card_items"}, "save_as": "items"},
                 {"action": "open_url", "args": {"url": "search_results_list[0].href"}},
                 {"action": "finish", "args": {}},
             ],
@@ -540,7 +547,7 @@ def test_normalize_final_plan_rewrites_dynamic_result_open_url_to_click():
         ),
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["search_results", "current_url", "page_title", "package_metadata"],
+        preferred_runtime_intents=["card_items", "current_url", "page_title", "field_schema"],
     )
 
     assert normalized["steps"][2]["action"] == "click_by_semantic_target"
@@ -564,7 +571,7 @@ def test_normalize_final_plan_rewrites_collection_description_after_navigation_t
             "steps": [
                 {"action": "open_url", "args": {"url": "https://search.sample.test/?q=browser+automation"}},
                 {"action": "click_by_semantic_target", "args": {"target_text": "first search result"}},
-                {"action": "extract_by_intent", "args": {"intent": "article_results"}, "save_as": "description"},
+                {"action": "extract_by_intent", "args": {"intent": "card_items"}, "save_as": "description"},
                 {"action": "finish", "args": {}},
             ],
             "expected_result": {"required_fields": ["description"]},
@@ -575,11 +582,15 @@ def test_normalize_final_plan_rewrites_collection_description_after_navigation_t
         ),
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["search_results", "current_url", "page_title", "package_metadata"],
+        preferred_runtime_intents=["card_items", "current_url", "page_title", "field_schema"],
     )
 
     assert normalized["steps"][2]["action"] == "extract_by_intent"
-    assert normalized["steps"][2]["args"] == {"intent": "package_metadata", "output_key": "description"}
+    assert normalized["steps"][2]["args"] == {
+        "intent": "field_schema",
+        "fields": {"description": {"type": "meta_description"}},
+        "output_key": "description",
+    }
     assert normalized["steps"][2]["save_as"] == "description"
 
 
@@ -600,7 +611,15 @@ def test_normalize_final_plan_moves_final_url_after_navigating_metadata():
                 {"action": "open_url", "args": {"url": "https://search.sample.test/?q=browser+automation"}},
                 {"action": "click_by_semantic_target", "args": {"target_text": "first search result"}},
                 {"action": "extract_by_intent", "args": {"intent": "current_url"}, "save_as": "final_url"},
-                {"action": "extract_by_intent", "args": {"intent": "package_metadata"}, "save_as": "description"},
+                {
+                    "action": "extract_by_intent",
+                    "args": {
+                        "intent": "field_schema",
+                        "fields": {"description": {"type": "meta_description"}},
+                        "output_key": "description",
+                    },
+                    "save_as": "description",
+                },
                 {"action": "finish", "args": {}},
             ],
             "expected_result": {"required_fields": ["description", "final_url"]},
@@ -611,7 +630,7 @@ def test_normalize_final_plan_moves_final_url_after_navigating_metadata():
         ),
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["search_results", "current_url", "page_title", "package_metadata"],
+        preferred_runtime_intents=["card_items", "current_url", "page_title", "field_schema"],
     )
 
     actions_and_saves = [(step["action"], step.get("save_as")) for step in normalized["steps"]]
@@ -648,7 +667,7 @@ def test_normalize_final_plan_drops_brittle_wait_after_first_result_click():
         ),
         previous_plan=None,
         page_snapshot=snapshot,
-        preferred_runtime_intents=["search_results", "current_url", "page_title", "package_metadata"],
+        preferred_runtime_intents=["card_items", "current_url", "page_title", "field_schema"],
     )
 
     assert "wait_for" not in [step["action"] for step in normalized["steps"]]

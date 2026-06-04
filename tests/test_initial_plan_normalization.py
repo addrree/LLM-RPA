@@ -6,6 +6,7 @@ from app.planner.planner import Planner
 from app.planner.prompts import INITIAL_PLANNER_SYSTEM_PROMPT
 from app.schemas.execution import GenerationMetadata, LLMArtifact
 from app.schemas.task_spec import TaskSpec
+from app.utils.llm_client import LLMClient
 
 
 def test_normalize_initial_plan_to_full_taskspec_shape():
@@ -188,6 +189,54 @@ def test_initial_planner_retries_generation_error_before_fallback():
 
     assert client.calls == 2
     assert str(plan.start_url) == "https://www.wikipedia.org/"
+
+
+def test_initial_planner_without_explicit_url_uses_model_url_with_thinking_disabled():
+    class FakeResponse:
+        status_code = 200
+        ok = True
+        text = ""
+
+        @staticmethod
+        def json():
+            return {
+                "message": {
+                    "content": (
+                        '{"goal":"Open the official IANA website","start_url":"https://www.iana.org/",'
+                        '"allowed_domains":["www.iana.org"],'
+                        '"constraints":{"max_steps":4,"max_replans":1,"max_verification_retries":1,"timeout_sec":30},'
+                        '"expected_result":{"description":"Observe page","required_fields":["page_snapshot"]},'
+                        '"steps":['
+                        '{"step_id":1,"action":"open_url","args":{"url":"https://www.iana.org/"}},'
+                        '{"step_id":2,"action":"observe_page","args":{},"save_as":"page_snapshot"},'
+                        '{"step_id":3,"action":"finish","args":{}}]}'
+                    ),
+                    "thinking": "",
+                },
+                "done": True,
+                "done_reason": "stop",
+            }
+
+    client = LLMClient(
+        backend="ollama",
+        planner_model="qwen3-next:80b",
+        verifier_model="gpt-oss:20b",
+        timeout_sec=1,
+    )
+    captured_payload = {}
+
+    def fake_post(*args, **kwargs):
+        captured_payload.update(kwargs["json"])
+        return FakeResponse()
+
+    client.session.post = fake_post
+    planner = Planner(client)
+    plan = planner.build_initial_plan("Open the official IANA website and observe its homepage")
+
+    assert captured_payload["think"] is False
+    assert str(plan.start_url) == "https://www.iana.org/"
+    assert planner.last_initial_artifact.generation.source == "llm"
+    assert planner.last_initial_artifact.generation.fallback_used is False
 
 
 def test_initial_repair_generation_error_returns_controlled_validation_failure():

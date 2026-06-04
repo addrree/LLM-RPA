@@ -38,24 +38,25 @@ def test_task_router_classifies_search_results_table_cards_and_repeated_items():
     assert "repeated_items" not in repeated.profile.preferred_intents
 
 
-def test_task_router_classifies_russian_product_cards_as_catalog_profile():
+def test_task_router_classifies_russian_cards_as_catalog_profile():
     route = TaskRouter().route(
         "Открой маркетплейс, найди ssd и выгрузи карточки товаров: название, цену и ссылку."
     )
 
     assert route.task_type == "catalog_or_card_extraction"
-    assert "product_cards" in route.profile.preferred_runtime_intents
-    assert "product" == route.item_type
+    assert "card_items" in route.profile.preferred_runtime_intents
+    assert "product_cards" not in route.profile.preferred_runtime_intents
+    assert route.item_type == "item"
 
 
-def test_task_router_uses_domain_words_only_as_weak_hints():
+def test_task_router_ignores_domain_words_for_routing():
     product_value = TaskRouter().route("Open the page and extract the product price.")
     project_cards = TaskRouter().route("Open a catalog page and extract project cards with title, description, and link.")
 
     assert product_value.task_type != "catalog_or_card_extraction"
     assert "product_detail_hint" not in product_value.signals
     assert project_cards.task_type == "catalog_or_card_extraction"
-    assert project_cards.item_type == "card"
+    assert project_cards.item_type == "item"
     assert "card_items" in project_cards.profile.preferred_runtime_intents
 
 
@@ -111,7 +112,8 @@ def test_profile_prompt_does_not_include_full_vocabulary_or_conceptual_runtime_i
     assert "visual_click_by_geometry" not in prompt
     assert "compare_structured_values" not in prompt
     assert "entity_metadata" not in runtime_line
-    assert "package_metadata" in runtime_line
+    assert "field_schema" in runtime_line
+    assert "package_metadata" not in runtime_line
 
 
 def test_profile_prompt_includes_card_items_as_runtime_intent_only():
@@ -154,7 +156,7 @@ def test_profile_validation_rejects_action_outside_profile_with_controlled_diagn
     message = str(exc_info.value)
     assert message.startswith("planner_validation_failed:")
     diagnostics = json.loads(message.split("planner_validation_failed: ", 1)[1])
-    assert diagnostics["task_type"] == "direct_value_extraction"
+    assert diagnostics["task_type"] == route.task_type
     assert diagnostics["invalid_action"] == "screenshot"
     assert "screenshot" not in diagnostics["allowed_actions"]
     assert diagnostics["full_vocabulary_was_used"] is False

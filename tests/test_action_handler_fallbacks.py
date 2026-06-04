@@ -1,4 +1,5 @@
 import asyncio
+import re
 
 from app.executor.action_handlers import ActionHandlers
 
@@ -99,15 +100,15 @@ def test_broad_repeated_pattern_rejects_low_quality_list_items_fallback():
         assert "high-quality DOM fallback" in str(exc) or "low-quality" in str(exc)
 
 
-def test_repeated_entity_blocks_extract_python_release_like_items_generically():
+def test_repeated_entity_blocks_preserve_generic_text_and_link_diagnostics():
     handler = ActionHandlers()
     page = _FakePage(
         entity_rows=[
-            {"text": "Python 3.14.0 Oct. 7, 2025 Download", "raw_text": "Python 3.14.0 Oct. 7, 2025 Download", "href": "/downloads/release/python-3140/"},
-            {"text": "Python 3.13.7 September 10, 2025 Notes", "raw_text": "Python 3.13.7 September 10, 2025 Notes", "href": "/downloads/release/python-3137/"},
+            {"text": "Alpha details and attributes", "raw_text": "Alpha details and attributes", "href": "/items/alpha", "link_text": "Alpha"},
+            {"text": "Beta details and attributes", "raw_text": "Beta details and attributes", "href": "/items/beta", "link_text": "Beta"},
         ]
     )
-    args = {"pattern": "(.+)", "limit": 2, "fields": {"title": 1, "date": 2, "href": 3}}
+    args = {"pattern": "(.+)", "limit": 2, "fields": {"title": 1, "href": 2}}
     result = asyncio.run(
         handler.extract_structured_items(
             page,
@@ -116,9 +117,10 @@ def test_repeated_entity_blocks_extract_python_release_like_items_generically():
         )
     )
     assert len(result) == 2
-    assert any("Python 3.14.0" in item.get("title", "") for item in result)
-    assert all(item.get("date") for item in result)
-    assert all(str(item.get("href", "")).startswith("/downloads/release/") for item in result)
+    assert [item.get("title") for item in result] == ["Alpha", "Beta"]
+    assert all(item.get("raw_text") for item in result)
+    assert all(str(item.get("href", "")).startswith("/items/") for item in result)
+    assert all(item.get("link") == item.get("href") for item in result)
     assert "fallback=repeated_entity_blocks" in args.get("_executor_note", "")
 
 
@@ -163,10 +165,72 @@ def test_broad_pattern_no_fallback_raises_controlled_error_code():
         assert "broad_pattern_rejected_no_structured_fallback" in str(exc)
 
 
-def test_contact_value_type_supports_email_or_phone():
-    assert ActionHandlers._resolve_value_pattern("email_or_phone")
-    assert ActionHandlers._is_valid_typed_contact_value(value="support@example.org", value_type="email_or_phone")
-    assert ActionHandlers._is_valid_typed_contact_value(value="+1 415 555 0100", value_type="email_or_phone")
+def test_typed_value_patterns_use_independent_generic_shapes():
+    email_pattern = ActionHandlers._resolve_value_pattern("email")
+    phone_pattern = ActionHandlers._resolve_value_pattern("phone")
+    url_pattern = ActionHandlers._resolve_value_pattern("url")
+
+    assert email_pattern and re.search(email_pattern, "team@sample.test", flags=re.IGNORECASE)
+    assert phone_pattern and re.search(phone_pattern, "+1 415 555 0100", flags=re.IGNORECASE)
+    assert url_pattern and re.search(url_pattern, "https://sample.test/path", flags=re.IGNORECASE)
+    assert ActionHandlers._resolve_value_pattern("email_or_phone") is None
+
+
+def test_click_row_action_accepts_arbitrary_control_label():
+    class _Control:
+        def __init__(self):
+            self.clicked = False
+            self.first = self
+
+        async def inner_text(self, timeout=None):
+            return "Archive"
+
+        async def get_attribute(self, _name):
+            return ""
+
+        async def click(self):
+            self.clicked = True
+
+    class _ControlList:
+        def __init__(self, control):
+            self.control = control
+            self.first = control
+
+        async def count(self):
+            return 1
+
+        def nth(self, _index):
+            return self.control
+
+    class _Row:
+        def __init__(self, control):
+            self.control = control
+            self.first = self
+
+        def locator(self, _selector):
+            return _ControlList(self.control)
+
+        async def click(self):
+            raise AssertionError("row itself should not be clicked")
+
+    class _Page:
+        def __init__(self, row):
+            self.row = row
+
+        def locator(self, _selector):
+            return self.row
+
+    control = _Control()
+    result = asyncio.run(
+        ActionHandlers().click_row_action(
+            _Page(_Row(control)),
+            {"action_name": "archive", "row_ref": {"selector": "#row-1"}},
+            {},
+        )
+    )
+
+    assert control.clicked is True
+    assert result["action_name"] == "archive"
 
 
 def test_click_helpers_infer_slug_and_href_from_visible_links():

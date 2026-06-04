@@ -377,90 +377,35 @@ class LLMVerifier:
         if negative_like_goal:
             return None
 
-        metadata_fields = {"final_url", "current_url", "url", "page_title", "current_title", "title"}
-        if set(normalized_required).issubset(metadata_fields):
-            missing_fields = [
-                field
-                for field in normalized_required
-                if not cls._has_meaningful_value(cls._value_for_required_field(field, result, extracted_data))
-            ]
-            if not missing_fields:
-                return VerificationVerdict(
-                    task_completed=True,
-                    confidence=0.93,
-                    verdict="accept",
-                    issues=[],
-                    summary="Deterministic verifier accepted populated page metadata fields.",
-                )
-
-        object_metadata_fields = {
-            "name",
-            "title",
-            "page_title",
-            "current_title",
-            "description",
-            "summary",
-            "snippet",
-            "url",
-            "final_url",
-            "current_url",
-        }
-        if set(normalized_required).issubset(object_metadata_fields):
+        generic_fields = [field for field in normalized_required if field != "count" and not field.endswith("_count")]
+        if generic_fields:
             present_fields = [
                 field
-                for field in normalized_required
+                for field in generic_fields
                 if cls._has_meaningful_value(cls._value_for_required_field(field, result, extracted_data))
             ]
-            missing_fields = [field for field in normalized_required if field not in present_fields]
-            if not missing_fields:
+            missing_fields = [field for field in generic_fields if field not in present_fields]
+            metadata_aliases = {
+                alias
+                for aliases in cls._field_alias_groups()
+                for alias in aliases
+            }
+            deterministic_metadata = all(field.casefold() in metadata_aliases for field in generic_fields)
+            if not missing_fields and len(generic_fields) == len(normalized_required) and deterministic_metadata:
                 return VerificationVerdict(
                     task_completed=True,
                     confidence=0.91,
                     verdict="accept",
                     issues=[],
-                    summary="Deterministic verifier accepted populated object metadata fields.",
+                    summary="Deterministic verifier accepted populated required fields.",
                 )
-            if present_fields:
+            if present_fields and missing_fields:
                 return VerificationVerdict(
                     task_completed=False,
                     confidence=0.58,
                     verdict="uncertain",
-                    issues=[
-                        "Partial required fields satisfied; missing: "
-                        + ", ".join(missing_fields)
-                    ],
-                    summary="Verifier saw partial success for object metadata fields.",
-                )
-
-        structured_outputs = {
-            "results",
-            "visible_links",
-            "links",
-            "products",
-            "product_cards",
-            "items",
-            "articles",
-            "article_results",
-            "extracted_articles",
-            "table_rows",
-            "rows",
-            "extracted_table",
-            "repositories",
-            "papers",
-        }
-        if set(normalized_required).issubset(structured_outputs):
-            missing_fields = [
-                field
-                for field in normalized_required
-                if not cls._has_meaningful_value(extracted_data.get(field))
-            ]
-            if not missing_fields:
-                return VerificationVerdict(
-                    task_completed=True,
-                    confidence=0.91,
-                    verdict="accept",
-                    issues=[],
-                    summary="Deterministic verifier accepted populated structured extraction fields.",
+                    issues=["Partial required fields satisfied; missing: " + ", ".join(missing_fields)],
+                    summary="Verifier saw partial success for required fields.",
                 )
 
         count_fields = [field for field in normalized_required if field == "count" or field.endswith("_count")]

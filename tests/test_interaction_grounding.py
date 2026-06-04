@@ -23,16 +23,20 @@ def test_action_grounder_maps_enter_text_to_fill():
     assert result.grounding_strategy == "fill_candidate"
 
 
-def test_action_grounder_maps_login_form_sequence():
+def test_action_grounder_maps_generic_multi_field_sequence():
     result = ActionGrounder().ground(
-        {"intent": "login", "username": "alice", "password": "secret"},
+        {
+            "intent": "fill_fields",
+            "fields": {"Username": "alice", "Password": "secret"},
+            "completion_target": "Login",
+        },
         _candidates(),
-        user_goal="Log in as alice",
     )
     assert [action.action for action in result.actions] == ["fill", "fill", "click"]
     assert result.actions[0].args["selector"] == "#u"
     assert result.actions[1].args["selector"] == "#p"
     assert result.actions[2].args["selector"] == "#login"
+    assert result.grounding_strategy == "multi_field_sequence"
 
 
 def test_action_grounder_rejects_unknown_submit_fallback():

@@ -53,9 +53,13 @@ def _infer_anchor_value_type(goal_text: str) -> str:
         return "email"
     if any(token in normalized for token in ("phone", "tel", "тел")):
         return "phone"
-    if any(token in normalized for token in ("contact", "support", "help", "контакт", "поддерж")):
-        return "email_or_phone"
-    return "number"
+    if any(token in normalized for token in ("url", "link", "ссылк")):
+        return "url"
+    if any(token in normalized for token in ("decimal", "float", "дроб", "десятич")):
+        return "float"
+    if any(token in normalized for token in ("number", "count", "total", "числ", "количеств")):
+        return "number"
+    return ""
 
 
 def _capture_group_count(pattern: str) -> int:
@@ -384,7 +388,9 @@ def _canonicalize_family_steps(
             has_value_type = _is_non_empty_str(args.get("value_type"))
             has_value_pattern = _is_non_empty_str(args.get("value_pattern"))
             if not has_value_type and not has_value_pattern:
-                args["value_type"] = _infer_anchor_value_type(goal_text)
+                inferred_value_type = _infer_anchor_value_type(goal_text)
+                if inferred_value_type:
+                    args["value_type"] = inferred_value_type
 
         if task_family == "repeated_structured_items" and action == "extract_structured_items":
             if not _is_non_empty_str(step.get("save_as")):

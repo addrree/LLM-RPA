@@ -233,8 +233,19 @@ class PlanValidator:
 
     @staticmethod
     def _validate_click_by_semantic_target_args(args: dict) -> None:
-        if not str(args.get("target_text", args.get("text", args.get("target", "")))).strip():
-            raise PlanValidationError("click_by_semantic_target requires target_text")
+        has_target_text = bool(str(args.get("target_text", args.get("text", args.get("target", "")))).strip())
+        target_candidates = args.get("target_candidates")
+        has_target_candidates = isinstance(target_candidates, list) and any(
+            isinstance(item, str) and item.strip() for item in target_candidates
+        )
+        if not has_target_text and not has_target_candidates:
+            raise PlanValidationError("click_by_semantic_target requires target_text or target_candidates")
+        if target_candidates is not None and (
+            not isinstance(target_candidates, list)
+            or not target_candidates
+            or not all(isinstance(item, str) and item.strip() for item in target_candidates)
+        ):
+            raise PlanValidationError("click_by_semantic_target requires non-empty string entries in target_candidates")
         exact = args.get("exact")
         if exact is not None and not isinstance(exact, bool):
             raise PlanValidationError("click_by_semantic_target requires boolean exact")
@@ -270,9 +281,11 @@ class PlanValidator:
     def _validate_click_row_action_args(args: dict) -> None:
         if not (args.get("row_ref") or args.get("condition")):
             raise PlanValidationError("click_row_action requires row_ref or condition")
-        action_name = str(args.get("action_name", "")).strip().lower()
-        if action_name not in {"star", "trash", "delete", "reply", "open", "select"}:
-            raise PlanValidationError("click_row_action action_name must be star/trash/delete/reply/open/select")
+        action_name = str(args.get("action_name") or args.get("target_text") or "").strip()
+        target_candidates = args.get("target_candidates")
+        has_candidates = isinstance(target_candidates, list) and any(str(item).strip() for item in target_candidates)
+        if not action_name and not has_candidates and not str(args.get("action_selector", "") or "").strip():
+            raise PlanValidationError("click_row_action requires action_name, target_candidates, or action_selector")
 
     @staticmethod
     def _validate_visual_extract_object_count_args(args: dict, save_as: str | None) -> None:
@@ -610,18 +623,18 @@ class PlanValidator:
         if not has_pattern and not has_type:
             raise PlanValidationError("extract_value_near_anchor requires non-empty 'value_pattern' or 'value_type'")
         if has_type and str(args.get("value_type", "")).strip().lower() not in {
-            "article_count",
+            "integer",
             "count",
             "number",
+            "decimal",
             "float",
-            "rating",
             "email",
             "phone",
-            "email_or_phone",
+            "url",
         }:
             raise PlanValidationError(
                 "extract_value_near_anchor supports value_type in "
-                "{'article_count','count','number','float','rating','email','phone','email_or_phone'}"
+                "{'integer','count','number','decimal','float','email','phone','url'}"
             )
         direction = args.get("search_direction", "after")
         if direction not in {"after", "before", "around"}:

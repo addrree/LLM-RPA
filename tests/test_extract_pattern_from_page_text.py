@@ -113,23 +113,26 @@ def test_extract_pattern_raises_diagnostic_when_group_index_out_of_range():
     assert "available_groups=1" in str(exc.value)
 
 
-def test_extract_pattern_supports_repeated_structured_items_with_limit():
-    page = _FakePage("Русский\n2 087 000+\nEnglish\n6 987 000+")
+def test_extract_pattern_supports_explicit_repeated_field_normalization():
+    page = _FakePage("Alpha\n2 087 000+\nBeta\n6 987 000+")
     handler = ActionHandlers()
     value = asyncio.run(
         handler.extract_pattern_from_page_text(
             page,
             {
-                "pattern": r"(Русский|English)\s*\n?\s*([0-9][0-9\s,\.\u00A0\u202F\+]*)",
+                "pattern": r"(Alpha|Beta)\s*\n?\s*([0-9][0-9\s,\.\u00A0\u202F\+]*)",
                 "limit": 2,
-                "fields": ["language_name", "article_count"],
+                "fields": {
+                    "label": {"group_index": 1},
+                    "metric": {"group_index": 2, "normalize_number": True},
+                },
             },
             runtime_state={},
         )
     )
     assert value == [
-        {"language_name": "Русский", "article_count": 2087000},
-        {"language_name": "English", "article_count": 6987000},
+        {"label": "Alpha", "metric": 2087000},
+        {"label": "Beta", "metric": 6987000},
     ]
 
 

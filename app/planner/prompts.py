@@ -36,20 +36,20 @@ PLANNER_SYSTEM_PROMPT = """
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 0.2) Prefer semantic/extraction actions over fragile CSS/XPath: observe_page before extraction, extract_by_intent for reusable intents, extract_visible_links for visible links, find_row_by_condition for row/table conditions, extract_value_near_anchor for values near anchors, click_by_semantic_target for visible buttons/links, fill_by_semantic_target for form fields, select_by_semantic_target or choose_autocomplete_suggestion for lists/autocomplete.
-0.2.1) For common extraction tasks prefer extract_by_intent with generic intent/item_type: package_metadata, search_results, paper_results, repository_results, article_results, news_items, card_items, product_cards, table_rows. Use regex only as a fallback for plain text or after generic extraction is insufficient.
+0.2.1) Prefer structural extraction contracts: field_schema for one object, card_items for repeated visible blocks, and table_rows for real table/grid rows. Route by output shape and interaction structure; use regex only as a fallback.
 0.2.2) Runtime extraction priority: observe_page -> extract_by_intent -> extract_visible_links -> find_row_by_condition -> extract_value_near_anchor -> extract_structured_items generic DOM/table/list fallback -> extract_pattern_from_page_text only as last fallback.
-0.2.3) For package/search/list/table/card goals do not plan mandatory regex extraction. Use extract_by_intent(package_metadata/search_results/card_items/product_cards/table_rows/article_results/repository_results/paper_results), extract_visible_links, find_row_by_condition, or extract_structured_items first.
+0.2.3) For object/list/table goals do not plan mandatory regex extraction. Use extract_by_intent(field_schema/card_items/table_rows), extract_visible_links, find_row_by_condition, or extract_structured_items first.
 0.3) Do not invent site-specific selectors when a semantic action can express the same intent. Use generic selectors only when observe_page evidence makes them stable.
 1. Последний шаг всегда finish.
 2. step_id строго подряд: 1,2,3,...
 3. Для extract_* шагов с save_as в required_fields должны быть соответствующие поля.
 4. Для extract_items всегда указывай args.container_selector, args.limit, args.fields и save_as.
 4.0) Если надежный container_selector определить нельзя по snapshot, используй extract_structured_items (pattern + limit + fields) и сохраняй результат в одно top-level поле через save_as.
-4.1) Для повторяющихся карточек/блоков заполняй args.fields как объект полей (например language_name, article_count), а не как плоский список.
+4.1) Для повторяющихся карточек/блоков заполняй args.fields как объект произвольных запрошенных полей, а не как плоский список.
 4.2) Для числовых полей внутри extract_items можно использовать расширенное правило поля:
     {"selector":"...", "pattern":"...", "group_index":1, "normalize_number":true, "number_type":"int", "strip_plus":true}
     или правило с anchor/value внутри блока:
-    {"selector":"...", "anchor_text":"English", "value_pattern":"([0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*)", ... }.
+    {"selector":"...", "anchor_text":"<observed label>", "value_pattern":"([0-9][0-9\\s,\\.\\u00A0\\u202F\\+]*)", ... }.
 4.3) Для extract_structured_items fields допускают только:
     - int (индекс capture group), или
     - object rule c group_index.
@@ -66,13 +66,7 @@ PLANNER_SYSTEM_PROMPT = """
     - указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 13. Для list/block/card/top-N сценариев предпочитай extract_items (структурированный block-aware подход), а extract_pattern_from_page_text используй только как временный fallback.
 13.1) Если observe_page.page_text или page_text_excerpt уже содержит искомый label/anchor и значение рядом с ним, предпочитай extract_by_intent(intent="value_near_anchor") или extract_value_near_anchor. Regex по page_text используй только как fallback для plain text или если generic/anchor extraction не восстановила значение.
-Пример anchor/value article count:
-Observed text:
-English\n7,180,000+ articles
-Preferred action:
-{"action":"extract_by_intent","args":{"intent":"value_near_anchor","anchor_text":"English","value_type":"number"},"save_as":"english_article_count"}
-Regex fallback only if the page is plain text or the DOM/anchor extractor cannot recover the value:
-{"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}
+For anchor/value extraction, use only an anchor confirmed by the goal or page snapshot and choose a generic value_type by value shape. Use an explicit value_pattern when no supported generic type fits.
 14. Используй ТОЛЬКО канонические action names из схемы.
 15. Для single_value_title_or_header и похожих задач НЕ используй extract_value_near_anchor без явной пары anchor/value.
 16. Для navigation-задач не используй слишком общий click selector ("a", "button", "*", ".btn").
@@ -98,7 +92,7 @@ Regex fallback only if the page is plain text or the DOM/anchor extractor cannot
      2) extract_section_lines/save_as=source_b,
      3) compare_structured_values с save_as=combined_result (без regex-group контрактов между шагами).
 18. Для anchored_value_extraction учитывай язык страницы: используй anchor_text/anchor_candidates на том же языке страницы и anchor_matching_mode (auto/exact/contains), не ставь русские anchor на англоязычной странице.
-19. Для contact/support/email/phone задач используй anchor_candidates (например ["Contact","Support","Email","Help"]), anchor_matching_mode и block/section-поиск; не требуй слишком строгий required_right_context вроде "@".
+19. Для typed anchor/value задач передавай anchor_candidates только из цели или snapshot и используй block/section-поиск; не придумывай фиксированные anchors.
 20. Язык страницы определяется executor по фактической странице после navigation. Не передавай page_language в JSON-плане и не локализуй anchor_text по языку пользователя.
 21. Top-level результат должен быть минимальным и соответствовать required_fields из benchmark context для текущего task family.
 22. Не хардкодь shape под конкретный сайт/сценарий и не передавай expected answer values в JSON.
@@ -109,7 +103,7 @@ def build_benchmark_planner_prompt(*, task_family: str, allowed_actions: list[st
     allowed = "|".join(allowed_actions)
     if task_family == "real_web_user_request":
         return f"""
-Runtime extraction policy: for package/search/card/product/table/article/repository/paper data prefer extract_by_intent(package_metadata/search_results/card_items/product_cards/table_rows/article_results/repository_results/paper_results). For visible links use extract_visible_links; for table conditions use find_row_by_condition; for anchor/value use extract_value_near_anchor. Use extract_pattern_from_page_text only as fallback.
+Runtime extraction policy: prefer structural intents field_schema, card_items, and table_rows. For visible links use extract_visible_links; for table conditions use find_row_by_condition; for anchor/value use extract_value_near_anchor. Use extract_pattern_from_page_text only as fallback.
 Ты planner агентной web-automation системы. Верни только JSON TaskSpec.
 Пользовательский запрос находится в user message; не добавляй значения, которых не извлекал со страницы.
 Разрешённые actions: {allowed}
@@ -122,7 +116,7 @@ Runtime extraction policy: for package/search/card/product/table/article/reposit
 6) Для табличных/строчных данных используй find_row_by_condition или extract_structured_items.
 7) expected_result.required_fields должны быть top-level ключами, которые реально создаются через save_as/output_key.
 8) Не hardcode-ь итоговые значения; извлекай их во время выполнения.
-9) Если пользователь просит найти, поискать, извлечь, выгрузить, вернуть данные, список, результаты, товары, новости, статьи или ссылки, план open_url -> finish запрещен.
+9) Если пользователь просит найти, поискать, извлечь, выгрузить или вернуть данные/список/результаты/ссылки, план open_url -> finish запрещен.
 10) Для search/form задач используй open_url -> fill_by_semantic_target(query) -> click_by_semantic_target(search/submit) -> observe_page или extract_visible_links/extract_structured_items -> finish.
 11) Каждый extraction/output шаг обязан иметь save_as или args.output_key; expected_result.required_fields должен ссылаться на эти output ключи, а не на внутренние поля вроде title/link.
 """
@@ -143,7 +137,7 @@ Runtime extraction policy: for package/search/card/product/table/article/reposit
         ),
         "anchored_value_extraction": (
             "Path hint: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
-            "For contact goals prefer value_type=email|phone|email_or_phone inferred from page evidence."
+            "Choose value_type only from the requested value shape and observed page evidence."
         ),
         "negative_or_ambiguous_case": (
             "Path hint: open_url -> observe_page -> probe extraction (extract_text|extract_pattern_from_page_text) -> finish. "
@@ -220,25 +214,25 @@ REPLANNER_SYSTEM_PROMPT = """
 
 Ключевые правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
-0.1.1) Runtime extraction priority: extract_by_intent for package/search/card/product/table/article/repository/paper intents; extract_visible_links for link lists; find_row_by_condition for table rows; extract_value_near_anchor for anchor/value; extract_pattern_from_page_text only as fallback.
+0.1.1) Runtime extraction priority: extract_by_intent for field_schema/card_items/table_rows; extract_visible_links for link lists; find_row_by_condition for table rows; extract_value_near_anchor for anchor/value; extract_pattern_from_page_text only as fallback.
 1) Если final execution может запускаться в отдельной сессии, добавляй open_url(start_url) первым шагом.
 2) Не выдумывай CSS-селекторы, если можно выразить задачу через semantic/generic extraction. Regex по page_text не является preferred path.
-3) Если цель про одиночное значение рядом с известным текстовым ориентиром (подпись, язык, товар, метка), предпочитай action=extract_value_near_anchor или extract_by_intent(intent="value_near_anchor"); regex используй только как fallback:
+3) Если цель про одиночное значение рядом с известным видимым ориентиром, предпочитай action=extract_value_near_anchor или extract_by_intent(intent="value_near_anchor"); regex используй только как fallback:
    - задавай anchor_candidates (anchor_text только если он явно подтвержден на странице)
    - search_direction="after"
    - same_block_only=true
-   - required_right_context, если очевиден контекст ("articles", "₽", "reviews" и т.п.)
+   - required_right_context, если очевиден соседний контекст или единица измерения.
    - не бери "первое число рядом" без контекстной проверки.
    - если этот action невозможен, тогда используй extract_text_near_text или extract_pattern_from_page_text.
-2.1) Если observe_page.page_text/page_text_excerpt уже содержит label/anchor и значение рядом (например English\n7,180,000+ articles), предпочитай extract_by_intent(value_near_anchor) или extract_value_near_anchor с generic constraints. Regex по page_text используй только как fallback для plain-text или если generic extraction не восстановила значение.
-Пример: Goal=find visible article count for a language row; Observed text: English\\n7,180,000+ articles; Preferred extraction step: {"action":"extract_by_intent","args":{"intent":"value_near_anchor","anchor_text":"English","value_type":"number"},"save_as":"english_article_count"}. Regex fallback: {"action":"extract_pattern_from_page_text","args":{"pattern":"English\\s+([0-9][0-9,\\.\\s\\u00A0\\u202F]*\\+?)\\s+articles","group_index":1,"normalize_number":true,"number_type":"int","strip_plus":true},"save_as":"english_article_count"}.
+2.1) Если observe_page.page_text/page_text_excerpt уже содержит label/anchor и значение рядом, предпочитай extract_by_intent(value_near_anchor) или extract_value_near_anchor с generic constraints. Regex по page_text используй только как fallback для plain-text или если generic extraction не восстановила значение.
+Use a generic value_type only when its shape is known; otherwise derive an explicit value_pattern from the observed anchor/value pair.
 2.2) Для чисел с возможными разделителями тысяч и "+" захватывай ПОЛНУЮ числовую строку, а не только первую группу цифр.
 2.3) Для таких шагов указывай args.group_index=1, args.normalize_number=true, args.number_type="int", args.strip_plus=true.
 2.4) Избегай шаблонов уровня "(\\d+)" если рядом ожидается формат 2 087 000+, 2,087,000+ или 2.087.000+.
 4) Можно использовать observe_page как первый шаг final-плана только если нужен новый snapshot после переходов.
 4.1) Для извлечения повторяющихся структур (например top 10 строк/карточек) предпочитай один шаг extract_items с полями-объектами:
    - language_name: селектор названия языка внутри блока
-   - article_count: селектор/паттерн и normalize_number=true
+   - numeric metric: селектор/паттерн и normalize_number=true
    Результат должен быть массивом объектов, а не массивом строк.
 4.1.1) Если CSS-контейнер неочевиден или нестабилен, сначала используй extract_by_intent/extract_visible_links/find_row_by_condition по смыслу задачи; extract_structured_items с pattern используй только как generic fallback.
 4.1.2) Для extract_structured_items fields должны быть только int или object rule с group_index; string specs запрещены.
@@ -246,7 +240,7 @@ REPLANNER_SYSTEM_PROMPT = """
    - сначала пробуй extract_items (DOM/block-aware),
    - extract_pattern_from_page_text используй только как тактический fallback.
 5) required_fields должны быть только бизнес-поля, НЕ технические артефакты (например screenshot_path).
-5.1) Для structured outputs required_fields должны ссылаться на top-level save_as (например ["language_blocks"]), а не на вложенные поля объектов (language_name/article_count).
+5.1) Для structured outputs required_fields должны ссылаться на top-level save_as, а не на вложенные поля объектов.
 6) Последний шаг всегда finish, step_id подряд.
 7) Для action=open_url обязательно передавай args.url (не пустой).
 8) Для action=extract_value_near_anchor обязательно передавай:
@@ -267,7 +261,7 @@ REPLANNER_SYSTEM_PROMPT = """
 14) Учитывай task family policy из goal hints (single_value / anchored / repeated / navigation / multi_step).
 15) Для multi_step compare избегай хрупких regex-group ссылок между шагами; делай поэтапное извлечение и сохраняй минимальный итоговый результат.
 16) Для anchored extraction используй anchor_candidates + anchor_matching_mode и выбирай реально видимый anchor на странице.
-17) Для contact/support/email/phone задач предпочтительно value_type=email|phone и anchor_candidates вместо одного жесткого anchor_text.
+17) Для typed anchor/value задач используй подходящий value_type и несколько anchor_candidates только когда они подтверждены snapshot.
 18) Для anchored extraction не передавай page_language в args; executor сам определяет язык страницы. Не локализуй anchor по языку пользователя.
 19) Финальный top-level результат должен быть минимальным и соответствовать required_fields из benchmark context; без хардкода под сайт и без expected answer values.
 """
@@ -281,7 +275,7 @@ CORRECTIVE_REPLANNER_SYSTEM_PROMPT = """
 Правила:
 0.1) Return valid JSON only. If using regex patterns inside JSON strings, double-escape all backslashes. Wrong: "\\s+"; Right: "\\\\s+". Prefer extract_value_near_anchor for values near visible labels instead of complex regex when possible.
 0.2) Prefer semantic/extraction actions over fragile selectors: extract_visible_links for visible links, extract_by_intent for reusable extraction intents, click_by_semantic_target/fill_by_semantic_target/select_by_semantic_target for UI controls.
-0.3) Do not replace package/search/card/product/table/article/repository/paper extraction with mandatory regex. Use extract_by_intent or row/link actions first; extract_pattern_from_page_text is fallback only.
+0.3) Do not replace structural object/list/table extraction with mandatory regex. Use extract_by_intent or row/link actions first; extract_pattern_from_page_text is fallback only.
 0) Never invent action names. Use only TaskSpec allowed actions exactly. Invalid examples: Wrong: extract_value; Right: extract_value_near_anchor or extract_pattern_from_page_text. Wrong: scrape_value; Right: extract_pattern_from_page_text.
 1) Учти verifier_verdict.issues и НЕ повторяй известную ошибку.
 2) Если требовался список, возвращай массив объектов:
@@ -328,7 +322,7 @@ def build_benchmark_replanner_prompt(*, task_family: str, allowed_actions: list[
         ),
         "anchored_value_extraction": (
             "Используй стабильный путь: open_url -> observe_page(optional) -> extract_value_near_anchor(save_as='value') -> finish. "
-            "Не передавай page_language. Для contact/support задач используй value_type=email|phone|email_or_phone."
+            "Не передавай page_language. Для typed values используй поддерживаемый value_type."
         ),
         "negative_or_ambiguous_case": (
             "Обязателен probe plan: open_url -> observe_page -> попытка extraction/probe -> finish. "
@@ -416,8 +410,10 @@ Hard rules:
    - lists/links/results: extract_visible_links, extract_structured_items, extract_items, or extract_by_intent with a preferred_runtime_intent
    - cards/catalogs: extract_structured_items/extract_items, or extract_by_intent only with a preferred_runtime_intent
    - tables/rows: find_row_by_condition, extract_structured_items, or extract_by_intent only with a preferred_runtime_intent; if the user names headers/columns, pass them as args.columns
+   - arbitrary object fields: prefer extract_by_intent(intent="field_schema") with an explicit fields schema.
+     Use region_candidates or click target_candidates only when they are supported by the user goal or page_snapshot.
 5. Regex/page-text extraction is fallback-only. If extract_pattern_from_page_text is forbidden or absent from allowed_actions, do not emit it.
-6. Do not invent new extract_value_near_anchor value_type names. Supported value_type values are only: article_count, count, number, float, rating, email, phone, email_or_phone. For any other anchored value, provide an explicit value_pattern derived from observed page text.
+6. Do not invent new extract_value_near_anchor value_type names. Supported value_type values are only: integer, count, number, decimal, float, email, phone, url. For any other anchored value, provide an explicit value_pattern derived from observed page text.
 7. Required fields must be top-level keys actually produced by save_as or args.output_key.
 8. open_url requires args.url. observe_page and every extract/output action require save_as or args.output_key.
 9. Keep the plan short, usually 3-7 steps, and always end with finish.

@@ -5,14 +5,14 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import (
-    PACKAGE_METADATA_FIELDS,
-    build_semantic_region_fields_args,
-    coalesce_package_metadata_steps,
-    goal_requests_semantic_region_fields,
+    build_field_schema_args,
+    coalesce_field_schema_steps,
     default_output_key_for_intent,
+    goal_requests_schema_fields,
     normalize_plan_action_aliases,
     normalize_required_field_alias,
     normalize_intent_alias,
+    normalize_schema_fields_step,
     PlannerValidationFailed,
     raise_for_invalid_plan_actions,
     semantic_intent_for_structured_step,
@@ -542,7 +542,11 @@ class Replanner:
         preferred_runtime_intents: list[str] | None = None,
     ) -> dict:
         plan = dict(raw_plan) if isinstance(raw_plan, dict) else {}
-        preferred_intents = {str(intent).strip().casefold() for intent in preferred_runtime_intents or [] if str(intent).strip()}
+        preferred_intents = {
+            normalize_intent_alias(intent)
+            for intent in preferred_runtime_intents or []
+            if str(intent).strip()
+        }
         context_start_url = ""
         for candidate in (
             plan.get("start_url"),
@@ -566,9 +570,12 @@ class Replanner:
             steps = []
 
         raw_expected_result = plan.get("expected_result") if isinstance(plan.get("expected_result"), dict) else {}
+        raw_required_fields = raw_expected_result.get("required_fields")
+        if not isinstance(raw_required_fields, list):
+            raw_required_fields = []
         required_fields = [
             str(field).strip()
-            for field in (raw_expected_result.get("required_fields") if isinstance(raw_expected_result, dict) else [] or [])
+            for field in raw_required_fields
             if str(field).strip()
         ]
         if not required_fields and previous_plan is not None:
@@ -619,6 +626,12 @@ class Replanner:
                 else:
                     logger.warning("Malformed open_url from model. Applying start_url normalization.")
                     current["args"]["url"] = context_start_url
+            current = normalize_schema_fields_step(
+                current,
+                goal=user_goal,
+                required_fields=required_fields,
+            )
+            action = str(current.get("action", action)).strip()
             if action == "click_by_semantic_target":
                 if "target_text" not in current["args"] and current["args"].get("text") is not None:
                     current["args"]["target_text"] = current["args"].pop("text")
@@ -639,7 +652,7 @@ class Replanner:
                 if row_action := Replanner._row_action_for_empty_fallback(goal=user_goal):
                     target_text = str(current["args"].get("target_text", "") or "").strip()
                     condition = dict(row_action["condition"])
-                    if target_text and target_text.casefold() not in {"delete", "remove", "trash", "open", "click", "select", "choose"}:
+                    if target_text and target_text.casefold() != str(row_action["action_name"]).casefold():
                         condition = {"contains": target_text}
                     current["action"] = "click_row_action"
                     current["args"] = {"action_name": row_action["action_name"], "condition": condition}
@@ -648,21 +661,7 @@ class Replanner:
                 current["args"]["value"] = current["args"].pop("query")
             if action == "click_row_action":
                 action_name = str(current["args"].get("action_name", "") or current["args"].get("action", "") or "").strip().casefold()
-                action_aliases = {
-                    "remove": "delete",
-                    "trash": "trash",
-                    "delete": "delete",
-                    "close": "delete",
-                    "star": "star",
-                    "favorite": "star",
-                    "favourite": "star",
-                    "reply": "reply",
-                    "open": "open",
-                    "click": "open",
-                    "select": "select",
-                    "choose": "select",
-                }
-                normalized_action_name = action_aliases.get(action_name) or Replanner._row_action_name_for_goal(user_goal)
+                normalized_action_name = action_name or Replanner._row_action_name_for_goal(user_goal)
                 if normalized_action_name:
                     current["args"]["action_name"] = normalized_action_name
                 if not current["args"].get("condition"):
@@ -671,16 +670,6 @@ class Replanner:
                         current["args"]["condition"] = condition
                 if not str(current.get("save_as", "") or "").strip():
                     current["save_as"] = "row_action"
-            if (
-                action == "extract_structured_items"
-                and goal_requests_semantic_region_fields(user_goal, required_fields)
-                and ("fields" not in current["args"] or not current["args"].get("fields"))
-            ):
-                output_key = str(current["args"].get("output_key") or current.get("save_as") or "contact_info").strip()
-                current["action"] = "extract_by_intent"
-                current["args"] = build_semantic_region_fields_args(user_goal, required_fields, output_key=output_key)
-                current["save_as"] = output_key
-                action = "extract_by_intent"
             if action == "extract_structured_items":
                 semantic_intent = semantic_intent_for_structured_step(current)
                 if semantic_intent:
@@ -690,14 +679,20 @@ class Replanner:
                         or default_output_key_for_intent(semantic_intent)
                     )
                     limit = current["args"].get("limit")
+                    fields = current["args"].get("fields")
+                    region_candidates = current["args"].get("region_candidates")
+                    region_hint = current["args"].get("region_hint")
+                    numeric_value_required = current["args"].get("numeric_value_required")
                     current["action"] = "extract_by_intent"
                     current["args"] = {
                         "intent": semantic_intent,
                         "output_key": output_key,
                         "limit": limit if isinstance(limit, int) and limit > 0 else 20,
+                        **({"fields": fields} if isinstance(fields, dict) and fields else {}),
+                        **({"region_candidates": region_candidates} if isinstance(region_candidates, list) and region_candidates else {}),
+                        **({"region_hint": region_hint} if str(region_hint or "").strip() else {}),
+                        **({"numeric_value_required": numeric_value_required} if isinstance(numeric_value_required, bool) else {}),
                     }
-                    if semantic_intent in {"article_results", "news_items", "paper_results", "repository_results"}:
-                        current["args"]["item_type"] = semantic_intent.replace("_results", "").replace("news_items", "news")
                     if output_key and not str(current.get("save_as", "") or "").strip():
                         current["save_as"] = output_key
                 elif not isinstance(current["args"].get("limit"), int) or current["args"].get("limit") <= 0:
@@ -735,32 +730,17 @@ class Replanner:
                 save_as_hint = str(current.get("save_as", "") or "").strip().casefold()
                 if (
                     save_as_hint in {"description", "summary", "snippet"}
-                    and intent
-                    in {
-                        "search_results",
-                        "results",
-                        "result_list",
-                        "paper_results",
-                        "repository_results",
-                        "article_results",
-                        "news_items",
-                    }
+                    and intent == "card_items"
                     and Replanner._navigation_target_for_empty_fallback(goal=user_goal)
                 ):
-                    current["args"] = {"intent": "package_metadata", "output_key": save_as_hint}
-                    intent = "package_metadata"
-                if (
-                    intent
-                    in {
-                        "search_results",
-                        "paper_results",
-                        "repository_results",
-                        "article_results",
-                        "news_items",
-                        "card_items",
-                        "product_cards",
-                        "table_rows",
+                    current["args"] = {
+                        "intent": "field_schema",
+                        "fields": {save_as_hint: {"type": "meta_description"}},
+                        "output_key": save_as_hint,
                     }
+                    intent = "field_schema"
+                if (
+                    intent in {"card_items", "table_rows"}
                     and not any(key in current["args"] for key in ("condition", "filter", "where"))
                 ):
                     condition = Replanner._condition_for_goal(user_goal)
@@ -779,27 +759,10 @@ class Replanner:
                     "visible_links",
                     "extract_visible_links",
                     "links",
-                    "search_results",
-                    "results",
-                    "result_list",
-                    "paper_results",
-                    "papers",
-                    "repository_results",
-                    "repositories",
-                    "repo_results",
-                    "article_results",
-                    "articles",
-                    "news_items",
-                    "news",
-                    "product_cards",
-                    "products",
                     "card_items",
                     "cards",
                     "table_rows",
                     "rows",
-                    "package_metadata",
-                    "package_info",
-                    "library_metadata",
                 }
             if (
                 collection_like_action
@@ -819,7 +782,31 @@ class Replanner:
         fallback_description = ""
         fallback_force_required_fields = False
         if not normalized_steps:
-            if visual_count := Replanner._visual_count_for_empty_fallback(goal=user_goal):
+            if (
+                goal_requests_schema_fields(user_goal, required_fields)
+                and (not preferred_intents or "field_schema" in preferred_intents)
+                and not Replanner._visual_count_for_empty_fallback(goal=user_goal)
+                and not Replanner._row_action_for_empty_fallback(goal=user_goal)
+                and not Replanner._navigation_target_for_empty_fallback(goal=user_goal)
+            ):
+                fallback_required_fields = ["extracted_fields"]
+                fallback_description = "Extract requested fields by schema"
+                fallback_force_required_fields = True
+                normalized_steps = [
+                    {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
+                    {
+                        "step_id": 2,
+                        "action": "extract_by_intent",
+                        "args": build_field_schema_args(
+                            user_goal,
+                            required_fields,
+                            output_key="extracted_fields",
+                        ),
+                        "save_as": "extracted_fields",
+                    },
+                    {"step_id": 3, "action": "finish", "args": {}},
+                ]
+            elif visual_count := Replanner._visual_count_for_empty_fallback(goal=user_goal):
                 output_key = visual_count["output_key"]
                 fallback_required_fields = [output_key]
                 fallback_description = "Count requested visible objects"
@@ -858,7 +845,7 @@ class Replanner:
             elif navigation_target := Replanner._navigation_target_for_empty_fallback(goal=user_goal):
                 fallback_required_fields = Replanner._navigation_required_fields_for_goal(user_goal)
                 fallback_description = "Navigate and extract requested page metadata"
-                if "description" in fallback_required_fields and preferred_intents and "package_metadata" not in preferred_intents:
+                if "description" in fallback_required_fields and preferred_intents and "field_schema" not in preferred_intents:
                     fallback_required_fields = [field for field in fallback_required_fields if field != "description"]
                 normalized_steps = [
                     {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
@@ -896,7 +883,11 @@ class Replanner:
                         {
                             "step_id": next_step_id,
                             "action": "extract_by_intent",
-                            "args": {"intent": "package_metadata", "output_key": "page_metadata"},
+                            "args": {
+                                "intent": "field_schema",
+                                "fields": {"description": {"type": "meta_description"}},
+                                "output_key": "page_metadata",
+                            },
                             "save_as": "page_metadata",
                         }
                     )
@@ -912,24 +903,6 @@ class Replanner:
                     )
                     next_step_id += 1
                 normalized_steps.append({"step_id": next_step_id, "action": "finish", "args": {}})
-            elif Replanner._looks_like_package_metadata_request(
-                goal=user_goal,
-                previous_plan=previous_plan,
-                plan=plan,
-                page_snapshot=page_snapshot,
-            ) and (not preferred_intents or "package_metadata" in preferred_intents):
-                fallback_required_fields = ["package_metadata"]
-                fallback_description = "Extract package metadata"
-                normalized_steps = [
-                    {"step_id": 1, "action": "open_url", "args": {"url": context_start_url}},
-                    {
-                        "step_id": 2,
-                        "action": "extract_by_intent",
-                        "args": {"intent": "package_metadata", "output_key": "package_metadata"},
-                        "save_as": "package_metadata",
-                    },
-                    {"step_id": 3, "action": "finish", "args": {}},
-                ]
             elif (
                 table_intent := Replanner._table_intent_for_empty_fallback(
                     goal=user_goal,
@@ -1018,7 +991,7 @@ class Replanner:
             required_fields=expected_result.get("required_fields", []),
             steps=normalized_steps,
         )
-        normalized_steps = coalesce_package_metadata_steps(
+        normalized_steps = coalesce_field_schema_steps(
             normalized_steps,
             goal=user_goal,
             required_fields=expected_result["required_fields"],
@@ -1050,7 +1023,7 @@ class Replanner:
             normalized_steps[insert_index:insert_index] = metadata_steps
             for idx, step in enumerate(normalized_steps, start=1):
                 step["step_id"] = idx
-        normalized_steps = Replanner._move_url_extractors_after_navigating_metadata(normalized_steps)
+        normalized_steps = Replanner._move_url_extractors_after_field_schema(normalized_steps)
 
         constraints = plan.get("constraints")
         if not isinstance(constraints, dict):
@@ -1093,39 +1066,6 @@ class Replanner:
             "expected_result": expected_result,
             "steps": normalized_steps,
         }
-
-    @staticmethod
-    def _looks_like_package_metadata_request(
-        *,
-        goal: str,
-        previous_plan: TaskSpec | None,
-        plan: dict,
-        page_snapshot: PageSnapshot,
-    ) -> bool:
-        hints = [str(goal or ""), str(plan.get("goal", "") or ""), page_snapshot.url, page_snapshot.title]
-        required_fields: list[str] = []
-        expected_result = plan.get("expected_result")
-        if isinstance(expected_result, dict) and isinstance(expected_result.get("required_fields"), list):
-            required_fields.extend(str(field).strip() for field in expected_result["required_fields"])
-        if previous_plan:
-            required_fields.extend(previous_plan.expected_result.required_fields)
-            hints.extend([previous_plan.goal, str(previous_plan.start_url)])
-        normalized_fields = {normalize_required_field_alias(field).casefold() for field in required_fields if field}
-        if len(normalized_fields & PACKAGE_METADATA_FIELDS) >= 2:
-            return True
-        if len(normalized_fields & {"name", "page_title", "description", "summary", "final_url"}) >= 2:
-            return True
-        haystack = " ".join(hints).casefold()
-        generic_metadata_groups = [
-            ("name", "title", "page title"),
-            ("description", "summary"),
-            ("url", "current url", "final url", "link"),
-        ]
-        if sum(1 for group in generic_metadata_groups if any(token in haystack for token in group)) >= 2:
-            return True
-        package_context = any(token in haystack for token in ("package", "library", "module"))
-        metadata_context = any(token in haystack for token in ("version", "description", "summary", "metadata"))
-        return package_context and metadata_context
 
     @staticmethod
     def _navigation_target_for_empty_fallback(*, goal: str) -> str:
@@ -1181,16 +1121,12 @@ class Replanner:
     @staticmethod
     def _row_action_name_for_goal(goal: str) -> str:
         text = str(goal or "").casefold()
-        checks = [
-            ("delete", ("delete", "remove", "trash")),
-            ("star", ("star", "favorite", "favourite", "mark important")),
-            ("select", ("select", "choose")),
-            ("open", ("open", "click")),
-        ]
-        for action_name, tokens in checks:
-            if any(token in text for token in tokens):
-                return action_name
-        return ""
+        match = re.search(
+            r"\b([^\W\d_][\w-]{1,30})\s+(?:the\s+)?(?:table\s+)?(?:row|item|record|list item)\b",
+            text,
+            flags=re.IGNORECASE,
+        )
+        return str(match.group(1)).strip() if match else ""
 
     @staticmethod
     def _row_condition_for_goal(goal: str) -> dict[str, str]:
@@ -1200,7 +1136,7 @@ class Replanner:
             return {"contains": quoted[0].strip()}
         patterns = [
             r"\b(?:row|item|record|list item|table row)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
-            r"\b(?:delete|remove|trash|click|open|select|choose|star)\s+(?:the\s+)?(?:table\s+)?(?:row|item|record|list item)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
+            r"\b[^\W\d_][\w-]{1,30}\s+(?:the\s+)?(?:table\s+)?(?:row|item|record|list item)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
         ]
         for pattern in patterns:
             match = re.search(pattern, text, flags=re.IGNORECASE)
@@ -1214,7 +1150,7 @@ class Replanner:
     @staticmethod
     def _visual_count_for_empty_fallback(*, goal: str) -> dict[str, Any]:
         text = str(goal or "").casefold()
-        if not any(token in text for token in ("count", "how many", "visual", "visible", "screenshot")):
+        if not any(token in text for token in ("count", "how many", "посчитай", "сколько", "количество")):
             return {}
         target_checks = [
             ("link", ("link", "links", "anchor", "anchors")),
@@ -1266,7 +1202,7 @@ class Replanner:
             save_as = str(step.get("save_as", "") or "").casefold()
             action = str(step.get("action", "") or "").casefold()
             intent = str((step.get("args") or {}).get("intent", "") or "").casefold() if isinstance(step.get("args"), dict) else ""
-            if action == "extract_by_intent" and intent in {"search_results", "results", "result_list", "repository_results", "paper_results", "article_results", "news_items"}:
+            if action == "extract_by_intent" and intent == "card_items":
                 prior_result_extraction = True
                 break
             if "result" in save_as:
@@ -1283,22 +1219,22 @@ class Replanner:
         return False
 
     @staticmethod
-    def _move_url_extractors_after_navigating_metadata(steps: list[dict]) -> list[dict]:
-        package_indices = [
+    def _move_url_extractors_after_field_schema(steps: list[dict]) -> list[dict]:
+        schema_indices = [
             idx
             for idx, step in enumerate(steps)
             if isinstance(step, dict)
             and step.get("action") == "extract_by_intent"
             and isinstance(step.get("args"), dict)
-            and str(step["args"].get("intent", "") or "").strip().casefold() == "package_metadata"
+            and str(step["args"].get("intent", "") or "").strip().casefold() == "field_schema"
         ]
-        if not package_indices:
+        if not schema_indices:
             return steps
-        last_package_idx = max(package_indices)
+        last_schema_idx = max(schema_indices)
         move_indices = [
             idx
             for idx, step in enumerate(steps)
-            if idx < last_package_idx
+            if idx < last_schema_idx
             and isinstance(step, dict)
             and step.get("action") == "extract_by_intent"
             and isinstance(step.get("args"), dict)
@@ -1309,8 +1245,8 @@ class Replanner:
             return steps
         moving = [steps[idx] for idx in move_indices]
         remaining = [step for idx, step in enumerate(steps) if idx not in set(move_indices)]
-        package_step = steps[last_package_idx]
-        insert_index = next((idx for idx, step in enumerate(remaining) if step is package_step), len(remaining) - 1) + 1
+        schema_step = steps[last_schema_idx]
+        insert_index = next((idx for idx, step in enumerate(remaining) if step is schema_step), len(remaining) - 1) + 1
         remaining[insert_index:insert_index] = moving
         for idx, step in enumerate(remaining, start=1):
             if isinstance(step, dict):
@@ -1431,24 +1367,14 @@ class Replanner:
         normalized_required = " ".join(normalize_required_field_alias(field) for field in required_fields).casefold()
         goal_haystack = " ".join(goal_hints).casefold()
         page_haystack = " ".join(page_hints).casefold()
-        checks = [
-            ("product_cards", ("product", "products", "product_card", "product_cards", "товар")),
-            ("card_items", ("card", "cards", "card_items", "catalog", "listing", "listings", "карточ", "каталог")),
-            ("repository_results", ("repository", "repositories", "repo", "repos", "репозитор")),
-            ("paper_results", ("paper", "papers", "preprint", "publication", "научн", "стат")),
-            ("article_results", ("article", "articles", "news", "post", "posts", "новост", "публик")),
-            ("search_results", ("search result", "search_results", "results", "result list", "результат")),
-            ("visible_links", ("visible link", "visible_links", "links", "link list", "ссылк")),
-        ]
-        for intent, markers in checks:
-            if any(marker in normalized_required for marker in markers):
-                return intent
-        for intent, markers in checks:
-            if any(marker in goal_haystack for marker in markers):
-                return intent
-        for intent, markers in checks:
-            if any(marker in page_haystack for marker in markers):
-                return intent
+        combined = " ".join([normalized_required, goal_haystack, page_haystack])
+        if any(marker in combined for marker in ("visible link", "visible_links", "link list", "ссылк")):
+            return "visible_links"
+        if any(
+            marker in combined
+            for marker in ("list", "items", "results", "rows", "cards", "all", "top", "список", "результат", "все", "карточ")
+        ):
+            return "card_items"
         return ""
 
     @staticmethod
