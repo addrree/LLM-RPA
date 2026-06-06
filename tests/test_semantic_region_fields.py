@@ -12,6 +12,8 @@ from app.planner.action_vocab import (
 )
 from app.planner.prompts import build_profile_planner_prompt
 from app.planner.task_router import PROFILES
+from app.schemas.task_spec import TaskSpec
+from app.validator.plan_validator import PlanValidator
 
 
 class _MetaLocator:
@@ -251,3 +253,35 @@ def test_profile_prompt_exposes_only_generic_structural_intents():
     assert "product_cards" not in runtime_line
     assert "paper_results" not in runtime_line
     assert "semantic_region_fields" not in runtime_line
+
+
+def test_validator_accepts_field_schema_nested_required_fields():
+    plan = TaskSpec.model_validate(
+        {
+            "goal": "Extract contact fields",
+            "start_url": "https://example.org",
+            "allowed_domains": ["example.org"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {"description": "Contact fields", "required_fields": ["address", "phone", "email"]},
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://example.org"}},
+                {
+                    "step_id": 2,
+                    "action": "extract_by_intent",
+                    "args": {
+                        "intent": "field_schema",
+                        "fields": {
+                            "address": {"type": "text"},
+                            "phone": {"type": "phone"},
+                            "email": {"type": "email"},
+                        },
+                        "output_key": "extracted_fields",
+                    },
+                    "save_as": "extracted_fields",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+    PlanValidator().validate(plan)

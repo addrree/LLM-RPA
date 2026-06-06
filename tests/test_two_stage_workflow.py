@@ -327,8 +327,11 @@ def test_normalize_final_plan_row_action_fallback_clicks_matching_row():
         "click_row_action",
         "finish",
     ]
-    assert normalized["steps"][1]["args"]["condition"] == {"contains": "Hit the gym"}
-    assert normalized["steps"][2]["args"] == {"action_name": "delete", "condition": {"contains": "Hit the gym"}}
+    assert normalized["steps"][1]["args"]["condition"] == {"field": None, "operator": "contains", "value": "Hit the gym"}
+    assert normalized["steps"][2]["args"] == {
+        "action_name": "delete",
+        "condition": {"field": None, "operator": "contains", "value": "Hit the gym"},
+    }
     assert normalized["expected_result"]["required_fields"] == ["row_action"]
 
 
@@ -400,7 +403,10 @@ def test_normalize_final_plan_repairs_click_row_action_args_from_goal():
         preferred_runtime_intents=["table_rows", "card_items"],
     )
 
-    assert normalized["steps"][1]["args"] == {"action_name": "remove", "condition": {"contains": "Hit the gym"}}
+    assert normalized["steps"][1]["args"] == {
+        "action_name": "remove",
+        "condition": {"field": None, "operator": "contains", "value": "Hit the gym"},
+    }
     assert normalized["steps"][1]["save_as"] == "row_action"
 
 

@@ -1,7 +1,7 @@
 import asyncio
 import re
 
-from app.executor.action_handlers import ActionHandlers
+from app.executor.action_handlers import ActionHandlers, detect_blocked_or_limited_text
 
 
 class _FakePage:
@@ -174,6 +174,16 @@ def test_typed_value_patterns_use_independent_generic_shapes():
     assert phone_pattern and re.search(phone_pattern, "+1 415 555 0100", flags=re.IGNORECASE)
     assert url_pattern and re.search(url_pattern, "https://sample.test/path", flags=re.IGNORECASE)
     assert ActionHandlers._resolve_value_pattern("email_or_phone") is None
+
+
+def test_access_denied_detection_does_not_skip_normal_forbidden_word_content():
+    normal_doc = "The Forbidden header field can appear in protocol documentation."
+    blocked_doc = "403 Forbidden\nAccess denied"
+
+    assert detect_blocked_or_limited_text(normal_doc).blocked is False
+    blocked = detect_blocked_or_limited_text(blocked_doc)
+    assert blocked.blocked is True
+    assert blocked.failure_stage == "skipped_access_denied"
 
 
 def test_click_row_action_accepts_arbitrary_control_label():

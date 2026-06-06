@@ -38,15 +38,16 @@ def test_task_router_classifies_search_results_table_cards_and_repeated_items():
     assert "repeated_items" not in repeated.profile.preferred_intents
 
 
-def test_task_router_classifies_russian_cards_as_catalog_profile():
+def test_task_router_keeps_cyrillic_structural_requests_on_restricted_generic_profile():
     route = TaskRouter().route(
         "Открой маркетплейс, найди ssd и выгрузи карточки товаров: название, цену и ссылку."
     )
 
-    assert route.task_type == "catalog_or_card_extraction"
+    assert route.task_type != "catalog_or_card_extraction"
     assert "card_items" in route.profile.preferred_runtime_intents
     assert "product_cards" not in route.profile.preferred_runtime_intents
-    assert route.item_type == "item"
+    assert route.profile.full_vocabulary_was_used is False
+    assert len(route.profile.allowed_actions) < 30
 
 
 def test_task_router_ignores_domain_words_for_routing():

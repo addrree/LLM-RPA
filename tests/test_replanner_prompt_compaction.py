@@ -57,3 +57,31 @@ def test_replanner_compacts_nested_rows_tables_and_drops_bbox_noise():
     assert len(compact["tables"][0]["rows"]) == 10
     assert len(str(compact)) < 60000
 
+
+def test_replanner_compacts_execution_result_extracted_snapshot():
+    snapshot = PageSnapshot(
+        url="https://example.org",
+        title="Example",
+        screenshot_path="artifacts/screenshots/example.png",
+        page_text_excerpt="x" * 8000,
+        page_text="y" * 50000,
+        visible_links=[{"text": str(index), "href": f"https://example.org/{index}"} for index in range(200)],
+        timestamp=datetime.now(timezone.utc),
+    )
+    execution_result = {
+        "status": "success",
+        "extracted_data": {
+            "page_snapshot": snapshot.model_dump(mode="json"),
+            "description": "A useful extracted description.",
+            "huge_text": "z" * 100000,
+        },
+        "logs": [{"message": "noise"} for _ in range(500)],
+    }
+
+    compact = Replanner._compact_execution_result_for_prompt(execution_result)
+
+    assert "logs" not in compact
+    assert compact["extracted_data"]["description"] == "A useful extracted description."
+    assert len(compact["extracted_data"]["page_snapshot"]["page_text"]) < 6100
+    assert len(compact["extracted_data"]["huge_text"]) < 900
+    assert len(str(compact)) < 20000

@@ -809,4 +809,15 @@ class PlanValidator:
                 fields = step.args.get("fields")
                 if isinstance(fields, dict):
                     nested_fields.update(str(name) for name in fields.keys())
+            if step.action == "extract_by_intent":
+                intent = normalize_intent_alias(step.args.get("intent", ""))
+                fields = step.args.get("fields")
+                if intent in {"field_schema", "anchor_object", "card_items", "table_rows"} and isinstance(fields, dict):
+                    nested_fields.update(str(name) for name in fields.keys())
+                columns = step.args.get("columns")
+                if intent == "table_rows" and isinstance(columns, list):
+                    nested_fields.update(str(name) for name in columns)
+                headers = step.args.get("headers")
+                if intent == "table_rows" and isinstance(headers, list):
+                    nested_fields.update(str(name) for name in headers)
         return nested_fields

@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 from app.observer.page_observer import PageObserver
 from app.interaction.action_grounder import ActionGrounder
 from app.interaction.page_candidates import PageCandidateExtractor
+from app.planner.action_vocab import casefold_with_mojibake_repairs, is_broad_semantic_click_target
 
 
 class StructuredExtractionError(ValueError):
@@ -45,7 +46,9 @@ CAPTCHA_MARKERS = (
 
 ACCESS_DENIED_MARKERS = (
     "access denied",
-    "forbidden",
+    "403 forbidden",
+    "forbidden access",
+    "request forbidden",
     "not authorized",
     "unauthorized",
     "permission denied",
@@ -219,6 +222,21 @@ class ActionHandlers:
                 message=f"first result link not found for target: {request.get('target_text')!r}",
                 details={"target_text": request.get("target_text"), "reason": "no_result_like_link_found"},
             )
+        if self._should_prefer_search_result_target(page=page, request=request):
+            opened_result = await self._click_search_result_matching_target(page, args, runtime_state)
+            if opened_result:
+                self._mark_used_skill(runtime_state, "semantic_click")
+                args["_executor_note"] = (
+                    f"click_by_semantic_target target={request.get('target_text')!r}; "
+                    "strategy=search_result_target_fallback"
+                )
+                return opened_result
+        if is_broad_semantic_click_target(request.get("target_text")):
+            raise StructuredExtractionError(
+                code="target_too_broad",
+                message=f"semantic click target is too broad: {request.get('target_text')!r}",
+                details={"target_text": request.get("target_text"), "role": request.get("role")},
+            )
         result = None
         last_error = None
         fallback_clicked_text = None
@@ -315,18 +333,142 @@ class ActionHandlers:
 
     @staticmethod
     def _looks_like_first_result_navigation_request(request: dict[str, Any]) -> bool:
-        text = " ".join(str(request.get(key, "") or "") for key in ("target_text", "role", "scope")).casefold()
-        if not any(token in text for token in ("result", "results", "item", "link")):
+        text = " ".join(str(request.get(key, "") or "") for key in ("target_text", "scope")).casefold()
+        if not any(token in text for token in ("result", "results", "item", "link", "результат", "ссылка")):
             return False
-        return any(token in text for token in ("first", "top", "best", "relevant", "1st"))
+        return any(token in text for token in ("first", "top", "best", "relevant", "1st", "перв", "релевант"))
+
+    @classmethod
+    def _should_prefer_search_result_target(cls, *, page, request: dict[str, Any]) -> bool:
+        target = str(request.get("target_text") or "").strip()
+        if not target or len(target) < 2:
+            return False
+        if cls._looks_like_search_ui_link(title=target, href=""):
+            return False
+        role = str(request.get("role") or "").strip().casefold()
+        if role and role not in {"link", "button", "item", "result"}:
+            return False
+        url = str(getattr(page, "url", "") or "")
+        title = ""
+        try:
+            title_value = getattr(page, "title", None)
+            if isinstance(title_value, str):
+                title = title_value
+        except Exception:
+            title = ""
+        return cls._looks_like_search_results_context(url=url, title=title)
+
+    @staticmethod
+    def _looks_like_search_results_context(*, url: str, title: str = "") -> bool:
+        folded_title = str(title or "").casefold()
+        if any(token in folded_title for token in ("search results", "results for", "результаты поиска")):
+            return True
+        try:
+            parsed = urlparse(str(url or ""))
+        except Exception:
+            return False
+        path = parsed.path.casefold()
+        query = parse_qs(parsed.query)
+        if any(key.casefold() in {"q", "query", "search", "s", "keyword", "keywords", "term"} for key in query):
+            return True
+        return any(part in path for part in ("/search", "/find", "/results"))
+
+    async def _click_search_result_matching_target(self, page, args: dict, runtime_state=None) -> str:
+        target = str(args.get("target_text") or args.get("text") or args.get("target") or "").strip()
+        if not target:
+            return ""
+        delegated = {
+            "intent": "search_results",
+            "output_key": "search_results",
+            "limit": int(args.get("limit", 10) or 10),
+        }
+        items = await self._collect_search_results_generic(page=page, args=delegated, runtime_state=runtime_state)
+        ranked: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            current = dict(item)
+            current["_target_score"] = self._search_result_target_score(current, target=target)
+            current["_target_rank"] = index
+            ranked.append(current)
+        ranked.sort(key=lambda item: (-float(item.get("_target_score", 0)), int(item.get("_target_rank", 9999))))
+        for item in ranked:
+            if float(item.get("_target_score", 0)) <= 0:
+                continue
+            href = str(item.get("href") or item.get("link") or "").strip()
+            selector = str(item.get("selector") or "").strip()
+            if href:
+                await page.goto(href, wait_until="domcontentloaded", timeout=int(args.get("navigation_timeout_ms", 20000)))
+                await self._wait_after_possible_navigation(page)
+                await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="after_search_result_target_navigation")
+                if runtime_state is not None:
+                    runtime_state["last_opened_result"] = item
+                return str(item.get("title") or item.get("text") or href).strip()
+            if selector:
+                await page.locator(selector).first.click(no_wait_after=True)
+                await self._wait_after_possible_navigation(page)
+                await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="after_search_result_target_click")
+                if runtime_state is not None:
+                    runtime_state["last_opened_result"] = item
+                return str(item.get("title") or item.get("text") or selector).strip()
+        return ""
+
+    @classmethod
+    def _search_result_target_score(cls, item: dict[str, Any], *, target: str) -> float:
+        target_norm = cls._normalize_result_match_text(target)
+        if not target_norm:
+            return 0.0
+        title = str(item.get("title") or item.get("text") or "")
+        href = str(item.get("href") or item.get("link") or "")
+        description = str(item.get("description") or item.get("snippet") or "")
+        title_norm = cls._normalize_result_match_text(title)
+        haystack = cls._normalize_result_match_text(f"{title} {description} {href}")
+        score = float(item.get("score", 0) or 0)
+        if title_norm == target_norm:
+            score += 12.0
+        elif title_norm.startswith(f"{target_norm} "):
+            score += 7.0
+        elif target_norm in title_norm:
+            score += 4.0
+        elif target_norm in haystack:
+            score += 2.0
+        else:
+            return 0.0
+        if re.search(rf"\b{re.escape(target_norm)}\s+(?:api|guide|overview|documentation|docs|reference)\b", title_norm):
+            score += 3.0
+        if target_norm and target_norm in cls._normalized_href_segments(href):
+            score += 4.0
+        simple_target = not re.search(r"[\s().:#/]", target_norm)
+        if simple_target:
+            if re.search(r"\(\)|\b(?:constructor|method|property|attribute|event|function|syntax|parameters?)\b", title_norm):
+                score -= 6.0
+            score -= min(max(len([part for part in urlparse(href).path.split("/") if part]) - 3, 0), 8) * 0.5
+        return score
+
+    @staticmethod
+    def _normalized_href_segments(href: str) -> set[str]:
+        try:
+            path = urlparse(str(href or "")).path
+        except Exception:
+            path = str(href or "")
+        segments = set()
+        for part in path.split("/"):
+            cleaned = re.sub(r"[-_]+", " ", part).strip()
+            if cleaned:
+                segments.add(re.sub(r"\s+", " ", cleaned.casefold()))
+        return segments
 
     async def _click_first_result_like_link(self, page, args: dict, runtime_state=None) -> str:
         delegated = {
-            "intent": "card_items",
-            "output_key": "items",
+            "intent": "search_results",
+            "output_key": "search_results",
             "limit": int(args.get("limit", 5) or 5),
         }
-        items = await self._collect_card_items_generic(page=page, args=delegated, runtime_state=runtime_state)
+        items = []
+        if isinstance(runtime_state, dict) and isinstance(runtime_state.get("last_search_results"), list):
+            items = [item for item in runtime_state.get("last_search_results", []) if isinstance(item, dict)]
+        if not items:
+            items = await self._collect_search_results_generic(page=page, args=delegated, runtime_state=runtime_state)
         for item in items:
             if not isinstance(item, dict):
                 continue
@@ -1162,12 +1304,23 @@ class ActionHandlers:
             return page.url
         if intent in {"page_title", "title"}:
             return await page.title()
+        if intent in {"text_block", "page_summary", "section_summary", "first_paragraph"}:
+            result = await self._extract_text_block_summary(page=page, args=args, runtime_state=runtime_state)
+            args["_executor_note"] = (
+                f"extract_by_intent intent=text_block status={result.get('status')}; "
+                f"found_fields={result.get('found_fields', [])}"
+            )
+            return result
         if intent == "field_schema":
             result = await self._extract_fields_by_schema(page=page, args=args, runtime_state=runtime_state)
             args["_executor_note"] = (
                 f"extract_by_intent intent=field_schema status={result.get('status')}; "
                 f"found_fields={result.get('found_fields', [])}"
             )
+            return result
+        if intent in {"search_results", "search_result", "results"}:
+            result = await self._collect_search_results_generic(page=page, args=args, runtime_state=runtime_state)
+            args["_executor_note"] = f"extract_by_intent intent=search_results selected_count={len(result)}"
             return result
         if intent in {"row_fields", "row_details", "structured_row_details"}:
             row = (runtime_state or {}).get("last_row_by_condition")
@@ -1186,13 +1339,19 @@ class ActionHandlers:
         if intent in {"visible_links", "extract_visible_links", "links"}:
             return await self.extract_visible_links(page, args, runtime_state)
         if intent in {"card_items", "cards"}:
-            result = await self._collect_card_items_generic(page=page, args=args, runtime_state=runtime_state)
+            requested_fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
+            collection_args = dict(args)
+            if requested_fields:
+                collection_args["_defer_projection"] = True
+            result = await self._collect_card_items_generic(page=page, args=collection_args, runtime_state=runtime_state)
             result, filter_note = self._apply_confident_item_filter(
                 items=result,
                 args=args,
                 runtime_state=runtime_state,
                 output_key=str(args.get("output_key", "") or "items"),
             )
+            if requested_fields:
+                result = [self._project_item_to_schema(item=item, fields=requested_fields) for item in result]
             args["_executor_note"] = f"extract_by_intent intent=card_items selected_count={len(result)}"
             self._append_executor_note(args, filter_note)
             return result
@@ -1232,6 +1391,8 @@ class ActionHandlers:
             delegated.setdefault("anchor_text", args.get("target") or args.get("anchor"))
             delegated.setdefault("value_type", args.get("value_type", "number"))
             return await self.extract_value_near_anchor(page, delegated, runtime_state)
+        if intent in {"anchor_object", "label_value_object"}:
+            return await self._extract_anchor_object(page=page, args=args, runtime_state=runtime_state)
         if intent in {"row_by_condition", "table_row", "find_row", "structured_row"}:
             delegated = dict(args)
             delegated.setdefault("condition", args.get("target") or args.get("anchor") or args.get("condition"))
@@ -1252,6 +1413,206 @@ class ActionHandlers:
             details={"intent": intent, "reason": "unsupported_intent"},
         )
 
+    async def _extract_text_block_summary(self, *, page, args: dict, runtime_state=None) -> dict[str, Any]:
+        fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
+        requested = [str(field).strip() for field in fields if str(field).strip()]
+        if not requested:
+            requested = ["title", "description"]
+        payload = await page.evaluate(
+            """
+            ({ requested }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const visible = (el) => {
+                if (!el) return false;
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== "hidden" && style.display !== "none"
+                  && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const ignored = (el) => !!el.closest(
+                'nav,header,footer,aside,[role="navigation"],[aria-hidden="true"],'
+                + '[class*="nav" i],[class*="menu" i],[class*="sidebar" i],[class*="footer" i],'
+                + '[class*="cookie" i],[class*="banner" i],[id*="cookie" i],[id*="banner" i]'
+              );
+              const sentence = (text) => {
+                const value = norm(text);
+                const match = value.match(/^(.{40,}?\\.(?:\\s|$))/);
+                return norm(match ? match[1] : value);
+              };
+              const meaningful = (text) => {
+                const value = norm(text);
+                if (value.length < 35 || value.length > 900) return false;
+                if (/^(search|menu|navigation|next|previous|login|sign in|read more)$/i.test(value)) return false;
+                return /[.!?]|\\s/.test(value);
+              };
+              const roots = Array.from(document.querySelectorAll(
+                'main,article,[role="main"],#content,.content,section'
+              )).filter((node) => visible(node) && !ignored(node));
+              if (!roots.length && document.body) roots.push(document.body);
+              let best = null;
+              for (const root of roots) {
+                const headingNode = root.querySelector('h1,h2,[role="heading"]');
+                const heading = norm(headingNode?.innerText || headingNode?.textContent || document.title || "");
+                const paragraphs = Array.from(root.querySelectorAll('p, [class*="summary" i], [class*="description" i]'))
+                  .filter((node) => visible(node) && !ignored(node))
+                  .map((node) => norm(node.innerText || node.textContent || ""))
+                  .filter(meaningful);
+                let description = paragraphs[0] || "";
+                if (!description) {
+                  const blocks = Array.from(root.querySelectorAll('section,div,li'))
+                    .filter((node) => visible(node) && !ignored(node))
+                    .map((node) => norm(node.innerText || node.textContent || ""))
+                    .filter(meaningful)
+                    .sort((a, b) => a.length - b.length);
+                  description = blocks[0] || "";
+                }
+                const score = (heading ? 30 : 0) + (description ? Math.min(description.length, 500) : 0)
+                  - (root.matches('body') ? 80 : 0);
+                if (!best || score > best.score) {
+                  best = { heading, description, score };
+                }
+              }
+              const title = norm(best?.heading || document.title || "");
+              const description = sentence(best?.description || "");
+              const out = {
+                title,
+                heading: title,
+                page_title: document.title || title,
+                description,
+                summary: description,
+                snippet: description,
+                first_sentence: sentence(description),
+                paragraph: description,
+                current_url: window.location.href,
+                final_url: window.location.href
+              };
+              const projected = {};
+              for (const field of requested || []) {
+                const key = String(field || "").trim();
+                if (!key) continue;
+                const lower = key.toLowerCase();
+                if (lower.includes("title") || lower.includes("heading") || lower.includes("name")) projected[key] = title;
+                else if (lower.includes("url")) projected[key] = window.location.href;
+                else if (lower.includes("sentence")) projected[key] = out.first_sentence;
+                else if (lower.includes("paragraph")) projected[key] = out.paragraph;
+                else if (lower.includes("description") || lower.includes("summary") || lower.includes("snippet")) projected[key] = description;
+                else projected[key] = out[key] || description || title;
+              }
+              return { ...out, projected };
+            }
+            """,
+            {"requested": requested},
+        )
+        data = dict(payload or {}) if isinstance(payload, dict) else {}
+        projected = data.get("projected") if isinstance(data.get("projected"), dict) else {}
+        result: dict[str, Any] = {}
+        for field in requested:
+            value = projected.get(field)
+            if value not in (None, "", [], {}):
+                result[field] = value
+        for key in ("title", "heading", "description", "summary", "snippet", "first_sentence", "paragraph", "current_url", "final_url"):
+            if key in requested and key not in result and data.get(key) not in (None, "", [], {}):
+                result[key] = data[key]
+        found = [field for field in requested if result.get(field) not in (None, "", [], {})]
+        description_like = any(field for field in requested if self._field_is_description_like(field))
+        if description_like and not any(result.get(field) for field in requested if self._field_is_description_like(field)):
+            try:
+                source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
+            except Exception:
+                source_text = ""
+            fallback = self._text_block_from_source_text(
+                source_text=source_text,
+                title=str(data.get("title") or data.get("page_title") or ""),
+            )
+            description = fallback.get("description")
+            if description:
+                for field in requested:
+                    lower = field.casefold()
+                    if self._field_is_description_like(field):
+                        result[field] = fallback.get("first_sentence") if "sentence" in lower else description
+                    elif any(token in lower for token in ("title", "heading", "name")) and fallback.get("title"):
+                        result[field] = fallback["title"]
+                    elif "url" in lower and data.get("current_url"):
+                        result[field] = data["current_url"]
+                found = [field for field in requested if result.get(field) not in (None, "", [], {})]
+        if description_like and not any(result.get(field) for field in requested if self._field_is_description_like(field)):
+            raise StructuredExtractionError(
+                code="description_not_found",
+                message="No meaningful description/paragraph text block was found.",
+                details={"requested_fields": requested},
+            )
+        result["status"] = "success" if len(found) == len(requested) else ("partial_success" if found else "not_found")
+        result["found_fields"] = found
+        result["missing_fields"] = [field for field in requested if field not in found]
+        self._mark_used_skill(runtime_state, "text_block_extraction")
+        return result
+
+    @staticmethod
+    def _field_is_description_like(field: str) -> bool:
+        normalized = str(field or "").strip().casefold()
+        return any(token in normalized for token in ("description", "summary", "snippet", "sentence", "paragraph", "overview"))
+
+    @classmethod
+    def _text_block_from_source_text(cls, *, source_text: str, title: str = "") -> dict[str, str]:
+        lines = [cls._normalize_line(line) for line in str(source_text or "").splitlines()]
+        lines = [line for line in lines if line]
+        if not lines:
+            return {}
+        ui_exact = {
+            "skip to main content",
+            "skip to search",
+            "search",
+            "menu",
+            "tools",
+            "about",
+            "blog",
+            "all",
+            "learn",
+            "next",
+            "previous",
+            "sign in",
+            "login",
+            "theme",
+            "light",
+            "dark",
+        }
+        heading = cls._normalize_line(title)
+        for line in lines:
+            folded = line.casefold()
+            if line.casefold() in ui_exact or len(line) < 4:
+                continue
+            if 4 <= len(line) <= 180 and not re.search(r"[.!?]", line):
+                heading = heading or line
+                break
+        candidates: list[str] = []
+        for line in lines:
+            folded = line.casefold()
+            if folded in ui_exact:
+                continue
+            if len(line) < 50 or len(line) > 900:
+                continue
+            if line == heading:
+                continue
+            if re.fullmatch(r"[\w\s/|+-]{1,80}", line) and not re.search(r"[.!?]", line):
+                continue
+            if not re.search(r"[.!?]", line):
+                continue
+            if folded.startswith(("note: this page", "was this page helpful", "this page was last modified")):
+                continue
+            candidates.append(line)
+        if not candidates:
+            return {"title": heading} if heading else {}
+        description = candidates[0]
+        sentence_match = re.match(r"^(.{40,}?[.!?])(?:\s|$)", description)
+        first_sentence = cls._normalize_line(sentence_match.group(1) if sentence_match else description)
+        return {
+            "title": heading,
+            "description": description,
+            "summary": description,
+            "snippet": description,
+            "paragraph": description,
+            "first_sentence": first_sentence,
+        }
 
     async def _extract_fields_by_schema(self, *, page, args: dict, runtime_state=None) -> dict[str, Any]:
         fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
@@ -1278,7 +1639,23 @@ class ActionHandlers:
         href_values = await self._extract_href_values(page)
         page_title = await page.title()
         page_description = await self._extract_page_description(page)
+        text_block_summary: dict[str, Any] | None = None
         payload: dict[str, Any] = {}
+
+        table_payload = self._field_schema_table_row_from_source_text(
+            fields=fields,
+            source_text=source_text,
+            runtime_state=runtime_state,
+        )
+        if table_payload:
+            return table_payload
+        visible_summary_payload = await self._field_schema_visible_object_summary(
+            page=page,
+            fields=fields,
+            runtime_state=runtime_state,
+        )
+        if visible_summary_payload:
+            return visible_summary_payload
 
         for field_name, rule in fields.items():
             field = str(field_name or "").strip()
@@ -1288,18 +1665,35 @@ class ActionHandlers:
             field_type = str(rule_dict.get("type", "text") or "text").strip().casefold()
             anchors = [str(item).strip() for item in rule_dict.get("anchors", []) if str(item).strip()] if isinstance(rule_dict.get("anchors"), list) else []
             value = None
+            field_hint = casefold_with_mojibake_repairs(field)
             if field_type in {"current_url", "final_url", "url"}:
                 value = getattr(page, "url", "")
             elif field_type in {"page_title", "title"}:
                 value = page_title
             elif field_type in {"meta_description", "description", "summary", "snippet"}:
-                value = page_description or self._text_field_candidate(region_text=region_text, anchors=anchors)
+                if text_block_summary is None:
+                    try:
+                        text_block_summary = await self._extract_text_block_summary(
+                            page=page,
+                            args={"fields": {field: {"type": "description"}}},
+                            runtime_state=runtime_state,
+                        )
+                    except Exception:
+                        text_block_summary = {}
+                value = (
+                    text_block_summary.get(field)
+                    or text_block_summary.get("description")
+                    or page_description
+                    or self._text_field_candidate(region_text=region_text, anchors=anchors)
+                )
             elif field_type in {"email", "phone", "integer", "count", "number", "decimal", "float"}:
                 value = self._extract_typed_scalar_candidate(
                     value_type=field_type,
                     text=region_text,
                     href_values=href_values,
                 )
+            elif field_type in {"address", "postal_address"} or any(token in field_hint for token in ("address", "адрес", "почтов")):
+                value = self._extract_address_candidate(region_text=region_text, anchors=anchors)
             else:
                 value = self._text_field_candidate(region_text=region_text, anchors=anchors)
             if value not in (None, "", [], {}):
@@ -1311,6 +1705,166 @@ class ActionHandlers:
         payload["found_fields"] = found
         payload["missing_fields"] = [field for field in requested if field not in found]
         return payload
+
+    async def _field_schema_visible_object_summary(self, *, page, fields: dict[str, Any], runtime_state=None) -> dict[str, Any]:
+        goal = str((runtime_state or {}).get("user_goal", "") or "")
+        if not self._goal_requests_visible_object_summary(goal=goal, fields=fields):
+            return {}
+        links = []
+        if isinstance(runtime_state, dict) and isinstance(runtime_state.get("last_visible_links"), list):
+            links = [dict(item) for item in runtime_state.get("last_visible_links", []) if isinstance(item, dict)]
+        if not links:
+            try:
+                links = await self._collect_visible_links_generic(page=page, limit=80)
+            except Exception:
+                links = []
+        return self._visible_object_summary_from_links(goal=goal, fields=fields, links=links)
+
+    @classmethod
+    def _goal_requests_visible_object_summary(cls, *, goal: str, fields: dict[str, Any]) -> bool:
+        combined = " ".join([str(goal or ""), *[str(field or "") for field in fields.keys()]])
+        text = casefold_with_mojibake_repairs(combined)
+        wants_visible = any(token in text for token in ("visual", "visible", "central", "center", "large", "block", "blocks", "видим", "визуаль", "централь", "крупн", "блок"))
+        wants_count = any(token in text for token in ("count", "number", "total", "колич", "числ", "посч"))
+        wants_names = any(token in text for token in ("name", "names", "language", "languages", "назван", "язык"))
+        wants_listable = any(token in text for token in ("link", "links", "block", "blocks", "item", "items", "язык", "блок"))
+        return wants_visible and wants_count and (wants_names or wants_listable)
+
+    @classmethod
+    def _visible_object_summary_from_links(
+        cls,
+        *,
+        goal: str,
+        fields: dict[str, Any],
+        links: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        requested = [str(field).strip() for field in fields if str(field).strip()]
+        if not requested:
+            return {}
+        candidates = cls._visible_object_candidates_for_goal(goal=goal, links=links)
+        if not candidates:
+            return {}
+        names = [str(item.get("name") or item.get("text") or "").strip() for item in candidates if str(item.get("name") or item.get("text") or "").strip()]
+        count = len(names)
+        payload: dict[str, Any] = {
+            "count": count,
+            "names": names,
+            "items": candidates,
+            "visible_count": count,
+            "visible_names": names,
+        }
+        for field in requested:
+            normalized = casefold_with_mojibake_repairs(field)
+            if any(token in normalized for token in ("count", "number", "total", "колич", "числ")):
+                payload[field] = count
+            elif any(token in normalized for token in ("name", "names", "language", "languages", "назван", "язык")):
+                payload[field] = names
+            elif any(token in normalized for token in ("item", "items", "block", "blocks", "link", "links", "блок", "ссылк")):
+                payload[field] = candidates
+        found = [field for field in requested if payload.get(field) not in (None, "", [], {})]
+        payload["status"] = "success" if len(found) == len(requested) else ("partial_success" if found else "not_found")
+        payload["found_fields"] = found
+        payload["missing_fields"] = [field for field in requested if field not in found]
+        return payload
+
+    @classmethod
+    def _visible_object_candidates_for_goal(cls, *, goal: str, links: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        text = casefold_with_mojibake_repairs(goal)
+        wants_language_blocks = any(token in text for token in ("language", "languages", "язык"))
+        ranked: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+        for index, link in enumerate(links):
+            raw_text = " ".join(str(link.get("text", "") or "").split()).strip()
+            if not raw_text:
+                continue
+            name = cls._visible_object_name_from_text(raw_text)
+            if not name:
+                continue
+            score = cls._visible_object_candidate_score(link=link, raw_text=raw_text, name=name, wants_language_blocks=wants_language_blocks)
+            if score <= 0:
+                continue
+            dedupe_key = name.casefold()
+            if dedupe_key in seen_names:
+                continue
+            seen_names.add(dedupe_key)
+            current = dict(link)
+            current["name"] = name
+            current["text"] = raw_text
+            current["_score"] = score
+            current["_rank"] = index
+            ranked.append(current)
+        ranked.sort(key=lambda item: (-float(item.get("_score", 0)), int(item.get("_rank", 9999))))
+        best = ranked[:50]
+        if wants_language_blocks:
+            best = [item for item in best if cls._text_has_count_unit(str(item.get("text") or ""))] or best
+        if len(best) > 15:
+            top_score = float(best[0].get("_score", 0) or 0)
+            best = [item for item in best if float(item.get("_score", 0) or 0) >= top_score - 1.5][:15]
+        return [
+            {key: value for key, value in item.items() if key not in {"_score", "_rank"}}
+            for item in best
+        ]
+
+    @staticmethod
+    def _visible_object_name_from_text(text: str) -> str:
+        raw = " ".join(str(text or "").split()).strip()
+        if not raw:
+            return ""
+        value = re.sub(
+            r"\s+[0-9][0-9\s,.\u00A0\u202F+]*(?:\s*(?:articles?|items?|results?|rows?|стат(?:ей|ьи|ья)?|artikel|artículos?|artigos?|voci|haseł|記事|条目|條目))?.*$",
+            "",
+            raw,
+            flags=re.IGNORECASE,
+        ).strip(" :;,.")
+        return value if 1 <= len(value) <= 80 else ""
+
+    @classmethod
+    def _visible_object_candidate_score(cls, *, link: dict[str, Any], raw_text: str, name: str, wants_language_blocks: bool) -> float:
+        text = str(raw_text or "")
+        score = 0.0
+        if cls._text_has_count_unit(text):
+            score += 5.0
+        if re.search(r"\d", text):
+            score += 1.0
+        if wants_language_blocks and cls._text_has_count_unit(text):
+            score += 2.0
+        bbox = link.get("bbox") if isinstance(link.get("bbox"), dict) else {}
+        viewport = link.get("viewport") if isinstance(link.get("viewport"), dict) else {}
+        try:
+            vw = float(viewport.get("width") or 0)
+            vh = float(viewport.get("height") or 0)
+            cx = float(bbox.get("center_x") or 0)
+            cy = float(bbox.get("center_y") or 0)
+            width = float(bbox.get("width") or 0)
+            height = float(bbox.get("height") or 0)
+        except (TypeError, ValueError):
+            vw = vh = cx = cy = width = height = 0.0
+        if vw > 0 and vh > 0 and width > 0 and height > 0:
+            center_distance = abs((cx / vw) - 0.5) + abs((cy / vh) - 0.35)
+            score += max(0.0, 2.5 - center_distance * 4.0)
+            if 0.05 <= cy / vh <= 0.75:
+                score += 1.0
+            if height >= 24 or width >= 80:
+                score += 0.5
+        selector = str(link.get("selector", "") or "").casefold()
+        href = str(link.get("href", "") or "")
+        if any(token in selector for token in ("footer", "app-badge", "other-project", "privacy", "donate")):
+            score -= 5.0
+        if any(token in href.casefold() for token in ("donate", "privacy", "itunes", "play.google", "wikimediafoundation")):
+            score -= 3.0
+        if name.casefold() in {"search", "menu", "google play store", "apple app store"}:
+            score -= 5.0
+        return score
+
+    @staticmethod
+    def _text_has_count_unit(text: str) -> bool:
+        return bool(
+            re.search(
+                r"[0-9][0-9\s,.\u00A0\u202F+]*\s*(?:articles?|items?|results?|rows?|стат(?:ей|ьи|ья)?|artikel|artículos?|artigos?|voci|haseł|記事|条目|條目)",
+                str(text or ""),
+                flags=re.IGNORECASE,
+            )
+        )
 
     @staticmethod
     async def _extract_page_description(page) -> str:
@@ -1442,12 +1996,95 @@ class ActionHandlers:
                     return lines[index + 1].strip()
         return ""
 
+    @classmethod
+    def _extract_address_candidate(cls, *, region_text: str, anchors: list[str]) -> str:
+        lines = [line.strip() for line in str(region_text or "").splitlines() if line.strip()]
+        if not lines:
+            return ""
+        folded_anchors = [casefold_with_mojibake_repairs(anchor) for anchor in anchors if str(anchor or "").strip()]
+        address_label = re.compile(r"\baddress\b|адрес|почтов", flags=re.IGNORECASE)
+        for index, line in enumerate(lines):
+            folded = casefold_with_mojibake_repairs(line)
+            if folded_anchors and not any(anchor in folded for anchor in folded_anchors):
+                continue
+            inline = cls._address_from_labeled_line(line)
+            if inline:
+                return inline
+            for offset in range(1, 4):
+                if index + offset < len(lines) and cls._looks_like_address_line(lines[index + offset]):
+                    return lines[index + offset].strip()
+        for index, line in enumerate(lines):
+            if not address_label.search(line):
+                continue
+            inline = cls._address_from_labeled_line(line)
+            if inline:
+                return inline
+            for offset in range(1, 4):
+                if index + offset < len(lines) and cls._looks_like_address_line(lines[index + offset]):
+                    return lines[index + offset].strip()
+        for line in lines:
+            if cls._looks_like_address_line(line):
+                return line.strip()
+        return ""
+
+    @staticmethod
+    def _address_from_labeled_line(line: str) -> str:
+        parts = re.split(r"[:\u2013\u2014-]", str(line or ""), maxsplit=1)
+        if len(parts) > 1 and ActionHandlers._looks_like_address_line(parts[1]):
+            return parts[1].strip()
+        return ""
+
+    @staticmethod
+    def _looks_like_address_line(line: str) -> bool:
+        text = " ".join(str(line or "").split()).strip()
+        if len(text) < 12 or len(text) > 240:
+            return False
+        has_postal_code = bool(re.search(r"\b\d{5,6}\b", text))
+        has_street_marker = bool(
+            re.search(
+                r"\b(street|st\\.?|road|rd\\.?|avenue|ave\\.?|boulevard|blvd\\.?|lane|ln\\.?|drive|dr\\.?)\b|"
+                r"\b(ул\\.?|улица|проспект|пр\\.?|наб\\.?|набережная|пер\\.?|переулок|д\\.?|дом|корпус)\b",
+                text,
+                flags=re.IGNORECASE,
+            )
+        )
+        has_city_or_country = bool(re.search(r"\b(россия|russia|санкт|петербург|москва|moscow|city)\b", text, flags=re.IGNORECASE))
+        comma_parts = len([part for part in text.split(",") if part.strip()])
+        return (has_postal_code and (has_street_marker or has_city_or_country or comma_parts >= 3)) or (
+            has_street_marker and has_city_or_country and comma_parts >= 2
+        )
+
     async def find_row_by_condition(self, page, args, runtime_state=None):
-        rows = await self._collect_row_candidates_generic(page=page, limit=int(args.get("limit", 120)))
-        condition = args.get("condition")
+        limit = int(args.get("limit", 120))
+        table_rows = await self._extract_table_rows_as_dicts(page=page, limit=limit)
+        generic_rows = await self._collect_row_candidates_generic(page=page, limit=limit)
+        rows = [*table_rows, *generic_rows]
+        condition = self._normalize_row_action_condition(args.get("condition"))
+        if condition != args.get("condition"):
+            args["condition"] = condition
         term_groups = self._condition_term_groups(condition)
         if not term_groups:
-            raise ValueError("find_row_by_condition requires non-empty condition terms")
+            raise StructuredExtractionError(
+                code="missing_row_condition",
+                message="find_row_by_condition requires non-empty condition terms",
+                details={"condition": condition},
+            )
+        field_condition = self._condition_field_operator_value(condition)
+        if field_condition:
+            matches = self._filter_structured_rows_by_condition(rows=table_rows or rows, condition=condition)
+            if not matches:
+                raise StructuredExtractionError(
+                    code="row_not_found",
+                    message=f"No row matched field condition={condition!r}",
+                    details={"condition": condition, "rows_checked": len(table_rows or rows)},
+                )
+            payload = self._build_row_payload(matches[0])
+            if runtime_state is not None:
+                runtime_state["last_row_ref"] = payload
+                runtime_state["last_row_by_condition"] = payload
+                self._mark_used_skill(runtime_state, "row_or_item_action")
+            args["_executor_note"] = f"find_row_by_condition matched field_condition={condition!r}; selector={payload.get('selector')!r}"
+            return payload
         matched_payloads: list[dict[str, Any]] = []
         missing_groups: list[list[str]] = []
 
@@ -1455,7 +2092,10 @@ class ActionHandlers:
             matched_payload = None
             row = self._best_matching_row_by_terms(rows=rows, terms=terms)
             if row is not None:
-                matched_payload = self._build_row_payload(row)
+                if self._row_candidate_is_too_broad(row=row, terms=terms):
+                    row = None
+                else:
+                    matched_payload = self._build_row_payload(row)
             if matched_payload is None:
                 missing_groups.append(terms)
             else:
@@ -1493,6 +2133,12 @@ class ActionHandlers:
         terms = term_groups[0]
         row = self._best_matching_row_by_terms(rows=rows, terms=terms)
         if row is not None:
+            if self._row_candidate_is_too_broad(row=row, terms=terms):
+                raise StructuredExtractionError(
+                    code="row_not_found",
+                    message="Only broad ancestor containers matched the row condition.",
+                    details={"terms": terms, "rows_checked": len(rows), "reason": "broad_container_match"},
+                )
             payload = self._build_row_payload(row)
             if runtime_state is not None:
                 runtime_state["last_row_ref"] = payload
@@ -1540,6 +2186,19 @@ class ActionHandlers:
         return score
 
     @staticmethod
+    def _row_candidate_is_too_broad(*, row: dict[str, Any], terms: list[str]) -> bool:
+        text = str(row.get("text", "") or "")
+        if len(text) < 1200:
+            return False
+        tag = str(row.get("tag", "") or "").casefold()
+        role = str(row.get("role", "") or "").casefold()
+        cells = row.get("cells") if isinstance(row.get("cells"), list) else []
+        if cells or tag in {"tr", "li"} or role in {"row", "listitem"}:
+            return False
+        folded = text.casefold()
+        return all(str(term or "").casefold() in folded for term in terms if str(term or "").strip())
+
+    @staticmethod
     def _row_action_control_matches(*, haystack: str, target_words: list[str]) -> bool:
         text = str(haystack or "").casefold()
         for word in target_words:
@@ -1550,10 +2209,63 @@ class ActionHandlers:
                 return True
         return False
 
+    @classmethod
+    def _normalize_row_action_condition(cls, condition: Any) -> Any:
+        if isinstance(condition, dict):
+            normalized = dict(condition)
+            for key in ("value", "contains", "text", "target_text", "label", "name"):
+                value = normalized.get(key)
+                if not isinstance(value, str):
+                    continue
+                row_text = cls._row_text_from_action_phrase(value)
+                if not row_text or row_text == value:
+                    continue
+                if key in {"contains", "text", "target_text", "label", "name"} and not str(normalized.get("field", "") or "").strip():
+                    return {"field": None, "operator": "contains", "value": row_text}
+                normalized[key] = row_text
+                normalized.setdefault("operator", "contains")
+                return normalized
+            return condition
+        if isinstance(condition, str):
+            row_text = cls._row_text_from_action_phrase(condition)
+            if row_text and row_text != condition.strip():
+                return {"field": None, "operator": "contains", "value": row_text}
+        return condition
+
+    @staticmethod
+    def _row_text_from_action_phrase(value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip(" :;,.\"'")
+        if not text:
+            return ""
+        row_subject = r"(?:table\s+row|list\s+item|row|item|record)"
+        relation = (
+            r"(?:named|called|labeled|labelled|with\s+text|containing\s+text|"
+            r"containing|contains|whose\s+text\s+(?:is|contains))"
+        )
+        patterns = [
+            rf"\b(?:for|inside|within|in)\s+(?:the\s+)?{row_subject}\s+{relation}\s+(.+)$",
+            rf"\b{row_subject}\s+{relation}\s+(.+)$",
+            rf"\b(?:for|inside|within|in)\s+(?:the\s+)?{row_subject}\s+(.+)$",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            candidate = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.\"'")
+            candidate = re.split(
+                r"\s+(?:then|afterwards)\b|\s+and\s+(?:return|extract|show)\b|[.;]",
+                candidate,
+                maxsplit=1,
+                flags=re.IGNORECASE,
+            )[0].strip(" :;,.\"'")
+            return candidate
+        return text
+
     async def click_row_action(self, page, args, runtime_state=None):
         row_ref = args.get("row_ref") or (runtime_state or {}).get("last_row_ref")
         if not isinstance(row_ref, dict) or not row_ref.get("selector"):
-            row_ref = await self.find_row_by_condition(page, {"condition": args.get("condition"), "limit": args.get("limit", 120)}, runtime_state)
+            condition = self._normalize_row_action_condition(args.get("condition"))
+            row_ref = await self.find_row_by_condition(page, {"condition": condition, "limit": args.get("limit", 120)}, runtime_state)
         selector = str(row_ref.get("selector", "")).strip()
         if not selector:
             raise ValueError("click_row_action requires resolved row selector")
@@ -1562,7 +2274,8 @@ class ActionHandlers:
         action_name = str(args.get("action_name") or args.get("target_text") or "").strip().lower()
         if not action_name and not explicit_candidates and not explicit_selector:
             action_name = "open"
-        row = page.locator(selector).first
+        row_context = self._row_context_for_ref(page=page, row_ref=row_ref)
+        row = await self._row_locator_for_ref(row_context=row_context, selector=selector, row_ref=row_ref)
         if action_name in {"open", "select", "click", "choose"} and not explicit_candidates and not explicit_selector:
             await row.click()
         else:
@@ -1571,7 +2284,11 @@ class ActionHandlers:
             else:
                 target_words = []
             target_words.extend(word for word in re.split(r"[_\-\s]+", action_name) if word)
-            locator = row.locator(explicit_selector or "button,a,[role='button'],input,[title],[aria-label]")
+            default_action_selector = (
+                "button,a,[role='button'],input,[title],[aria-label],"
+                "[class*='close' i],[class*='delete' i],[class*='remove' i]"
+            )
+            locator = row.locator(explicit_selector or default_action_selector)
             count = await locator.count()
             selected = locator.first if explicit_selector and count else None
             if selected is None:
@@ -1585,19 +2302,210 @@ class ActionHandlers:
                         await item.get_attribute("id") or "",
                     ]
                     haystack = " ".join(text_parts).casefold()
-                    if self._row_action_control_matches(haystack=haystack, target_words=target_words):
+                    delete_like = action_name in {"delete", "remove", "close"}
+                    if self._row_action_control_matches(haystack=haystack, target_words=target_words) or (
+                        delete_like and any(token in haystack for token in ("×", "close", "delete", "remove"))
+                    ):
                         selected = item
                         break
             if selected is None:
+                if await self._retry_row_action_in_runnable_example(
+                    page=page,
+                    args=args,
+                    runtime_state=runtime_state,
+                    row_ref=row_ref,
+                    action_name=action_name,
+                ):
+                    retry_args = dict(args)
+                    retry_args.pop("row_ref", None)
+                    retry_args["_runnable_example_retry_done"] = True
+                    if runtime_state is not None:
+                        runtime_state.pop("last_row_ref", None)
+                    return await self.click_row_action(page, retry_args, runtime_state)
                 raise StructuredExtractionError(
                     code="row_action_target_not_found",
                     message=f"No row action control found for action_name={action_name!r}",
                     details={"action_name": action_name, "row_selector": selector},
                 )
-            await selected.click()
+            await self._click_row_action_control(selected)
         self._mark_used_skill(runtime_state, "row_or_item_action")
         args["_executor_note"] = f"click_row_action action_name={action_name!r}; row_selector={selector!r}"
         return {"clicked": True, "action_name": action_name, "row_ref": row_ref}
+
+    async def _retry_row_action_in_runnable_example(
+        self,
+        *,
+        page,
+        args: dict[str, Any],
+        runtime_state,
+        row_ref: dict[str, Any],
+        action_name: str,
+    ) -> bool:
+        if bool(args.get("_runnable_example_retry_done")):
+            return False
+        if str(args.get("action_selector", "") or "").strip():
+            return False
+        if isinstance(args.get("target_candidates"), list) and args.get("target_candidates"):
+            return False
+        condition_text = ""
+        condition = self._normalize_row_action_condition(args.get("condition"))
+        if isinstance(condition, dict):
+            condition_text = str(condition.get("value") or condition.get("contains") or "").strip()
+        if not condition_text:
+            condition_text = str(row_ref.get("text") or "").strip()
+        href = await self._find_runnable_example_link_for_context(
+            page=page,
+            context_text=condition_text,
+            action_name=action_name,
+        )
+        if not href:
+            return False
+        await page.goto(href, wait_until="domcontentloaded", timeout=int(args.get("navigation_timeout_ms", 20000)))
+        await self._wait_after_possible_navigation(page)
+        await self._raise_if_page_blocked_or_limited(page, runtime_state=runtime_state, stage="after_runnable_example_navigation")
+        if runtime_state is not None:
+            runtime_state["last_runnable_example_url"] = href
+        return True
+
+    async def _find_runnable_example_link_for_context(self, *, page, context_text: str, action_name: str) -> str:
+        try:
+            payload = await page.evaluate(
+                """
+                ({ contextText, actionName }) => {
+                  const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+                  const lower = (value) => norm(value).toLowerCase();
+                  const isVisible = (el) => {
+                    const style = window.getComputedStyle(el);
+                    const rect = el.getBoundingClientRect();
+                    return style && style.visibility !== "hidden" && style.display !== "none"
+                      && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+                  };
+                  const ignored = (el) => !!el.closest('nav,header,footer,aside,[role="navigation"],[aria-hidden="true"]');
+                  const samePageJump = (href) => {
+                    try {
+                      const url = new URL(href, document.baseURI);
+                      return url.origin === location.origin && url.pathname === location.pathname && !!url.hash;
+                    } catch {
+                      return false;
+                    }
+                  };
+                  const badLabel = (text, href) => {
+                    const haystack = `${text} ${href}`.toLowerCase();
+                    return /\\b(login|sign in|signup|register|pricing|upgrade|certificate|certified|course|academy|advert|privacy|terms|download app|share)\\b/.test(haystack);
+                  };
+                  const runnableTokens = [
+                    "try", "demo", "example", "run", "live", "preview",
+                    "playground", "sandbox", "editor", "open in", "launch"
+                  ];
+                  const actionTokens = lower(actionName).split(/[^a-z0-9]+/).filter(Boolean);
+                  const wantedContext = lower(contextText);
+                  const orderedAnchors = [];
+                  const seenAnchors = new Set();
+                  for (const selector of [
+                    'main a[href], article a[href], [role="main"] a[href], #main a[href], #maincontent a[href], .content a[href], section a[href]',
+                    'a[href]'
+                  ]) {
+                    for (const anchor of Array.from(document.querySelectorAll(selector))) {
+                      if (seenAnchors.has(anchor)) continue;
+                      seenAnchors.add(anchor);
+                      orderedAnchors.push(anchor);
+                      if (orderedAnchors.length >= 1200) break;
+                    }
+                    if (orderedAnchors.length >= 1200) break;
+                  }
+                  const candidates = [];
+                  for (const anchor of orderedAnchors) {
+                    if (!isVisible(anchor) || ignored(anchor)) continue;
+                    const href = anchor.href || anchor.getAttribute("href") || "";
+                    if (!href || /^javascript:/i.test(href) || samePageJump(href)) continue;
+                    const text = norm(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "");
+                    if (!text || badLabel(text, href)) continue;
+                    const haystack = `${text} ${href}`.toLowerCase();
+                    let score = 0;
+                    for (const token of runnableTokens) {
+                      if (haystack.includes(token)) score += token === "try" || token === "demo" || token === "run" ? 4 : 3;
+                    }
+                    const container = anchor.closest('main,article,section,[role="main"],div[class*="example" i],div[class*="demo" i],div[class*="preview" i],div[class*="try" i]') || anchor.parentElement || anchor;
+                    const containerText = lower(container.innerText || container.textContent || "");
+                    if (wantedContext && containerText.includes(wantedContext)) score += 3;
+                    if (actionTokens.some((token) => token && haystack.includes(token))) score += 1;
+                    if (anchor.closest('main,article,section,[role="main"]')) score += 1;
+                    if (anchor.closest('[class*="example" i],[class*="demo" i],[class*="preview" i],[class*="try" i]')) score += 2;
+                    if (text.length > 80) score -= 1;
+                    if (score >= 4) candidates.push({ href, text, score });
+                  }
+                  candidates.sort((a, b) => b.score - a.score);
+                  return candidates[0] || null;
+                }
+                """,
+                {"contextText": str(context_text or ""), "actionName": str(action_name or "")},
+            )
+        except Exception:
+            return ""
+        if not isinstance(payload, dict):
+            return ""
+        return str(payload.get("href") or "").strip()
+
+    @classmethod
+    async def _click_row_action_control(cls, selected) -> None:
+        try:
+            await selected.click()
+            return
+        except Exception as click_error:
+            if not cls._row_action_click_can_use_programmatic_fallback(str(click_error)):
+                raise
+            last_error = click_error
+        try:
+            await selected.click(force=True, timeout=5000)
+            return
+        except TypeError:
+            pass
+        except Exception as force_error:
+            last_error = force_error
+        if hasattr(selected, "evaluate"):
+            try:
+                await selected.evaluate("(el) => el.click()")
+                return
+            except Exception as evaluate_error:
+                last_error = evaluate_error
+        raise last_error
+
+    @staticmethod
+    def _row_action_click_can_use_programmatic_fallback(message: str) -> bool:
+        text = str(message or "").casefold()
+        return any(
+            marker in text
+            for marker in (
+                "outside of the viewport",
+                "not visible",
+                "not stable",
+                "intercepts pointer events",
+                "element is detached",
+                "timeout",
+            )
+        )
+
+    @staticmethod
+    def _row_context_for_ref(*, page, row_ref: dict[str, Any]):
+        frame_index = row_ref.get("frame_index")
+        if isinstance(frame_index, int):
+            frames = getattr(page, "frames", None)
+            if isinstance(frames, list) and 0 <= frame_index < len(frames):
+                return frames[frame_index]
+        return page
+
+    @staticmethod
+    async def _row_locator_for_ref(*, row_context, selector: str, row_ref: dict[str, Any]):
+        locator = row_context.locator(selector)
+        text = str(row_ref.get("text", "") or "").strip()
+        if text and hasattr(locator, "filter"):
+            try:
+                filtered = locator.filter(has_text=text)
+                if await filtered.count() > 0:
+                    return filtered.first
+            except Exception:
+                pass
+        return locator.first
 
     async def visual_observe(self, page, args, runtime_state=None):
         snapshot = await self.observe_page(page, args, runtime_state)
@@ -1609,6 +2517,12 @@ class ActionHandlers:
 
     async def visual_extract_object_count(self, page, args, runtime_state=None):
         target = str(args.get("object", args.get("shape", args.get("target", "")))).strip().lower()
+        if not target or target in {"__unspecified__", "count"}:
+            raise StructuredExtractionError(
+                code="visual_target_not_specified",
+                message="visual object count requires a generic target such as link, button, item, or visible object type.",
+                details={"target": target},
+            )
         summary = (runtime_state or {}).get("last_visual_summary")
         if not isinstance(summary, dict):
             summary = await self._extract_svg_summary(page=page)
@@ -2323,7 +3237,7 @@ class ActionHandlers:
         if value_type == "email":
             return r"([A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,63})"
         if value_type == "phone":
-            return r"(\+?\d[\d\-\(\)\s\.]{6,}\d)"
+            return r"(\+?\d[\d\-\u2010-\u2015\(\)\s\.]{6,}\d)"
         if value_type == "url":
             return r"(https?://[^\s<>'\"]+)"
         return None
@@ -2378,11 +3292,23 @@ class ActionHandlers:
               return Array.from(document.querySelectorAll("a[href]"))
                 .filter(isVisible)
                 .slice(0, limit)
-                .map((el) => ({
-                  text: norm(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
-                  href: el.href || el.getAttribute("href") || "",
-                  selector: cssPath(el)
-                }))
+                .map((el) => {
+                  const rect = el.getBoundingClientRect();
+                  return {
+                    text: norm(el.innerText || el.textContent || el.getAttribute("aria-label") || el.getAttribute("title") || ""),
+                    href: el.href || el.getAttribute("href") || "",
+                    selector: cssPath(el),
+                    bbox: {
+                      x: rect.x,
+                      y: rect.y,
+                      width: rect.width,
+                      height: rect.height,
+                      center_x: rect.x + rect.width / 2,
+                      center_y: rect.y + rect.height / 2
+                    },
+                    viewport: { width: window.innerWidth, height: window.innerHeight }
+                  };
+                })
                 .filter((item) => item.text && item.href);
             }
             """,
@@ -2413,6 +3339,30 @@ class ActionHandlers:
                 const style = window.getComputedStyle(el);
                 const rect = el.getBoundingClientRect();
                 return style && style.visibility !== "hidden" && style.display !== "none" && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const deepQueryAll = (selector, root = document, out = [], seen = new Set()) => {
+                let nodes = [];
+                try {
+                  nodes = Array.from(root.querySelectorAll(selector));
+                } catch (_) {
+                  nodes = [];
+                }
+                for (const node of nodes) {
+                  if (!seen.has(node)) {
+                    seen.add(node);
+                    out.push(node);
+                  }
+                }
+                let all = [];
+                try {
+                  all = Array.from(root.querySelectorAll("*"));
+                } catch (_) {
+                  all = [];
+                }
+                for (const node of all) {
+                  if (node.shadowRoot) deepQueryAll(selector, node.shadowRoot, out, seen);
+                }
+                return out;
               };
               const inIgnoredRegion = (el) => !!el.closest('nav, header, footer, aside, [role="navigation"], [aria-hidden="true"], .breadcrumbs, .breadcrumb, .a11y-menu, [class*="footer" i], [class*="menu" i]');
               const cssEscape = (value) => {
@@ -2475,7 +3425,7 @@ class ActionHandlers:
               };
               const seen = new Set();
               const results = [];
-              const resultContainers = Array.from(document.querySelectorAll('main li, [role="main"] li, main article, [role="main"] article, main section, [role="main"] section, [class*="result" i], [class*="search-result" i], [class*="item" i]')).filter((node) => isVisible(node) && !inIgnoredRegion(node));
+              const resultContainers = deepQueryAll('main li, [role="main"] li, main article, [role="main"] article, main section, [role="main"] section, [class*="result" i], [class*="search-result" i], [class*="item" i]').filter((node) => isVisible(node) && !inIgnoredRegion(node));
               for (const node of resultContainers) {
                 const text = norm(node.innerText || node.textContent || "");
                 if (!text || text.length < 20 || text.length > 1800) continue;
@@ -2510,7 +3460,7 @@ class ActionHandlers:
                 if (results.length >= limit) break;
               }
               if (results.length >= limit) return results;
-              const anchors = Array.from(document.querySelectorAll('main a[href], [role="main"] a[href], article a[href], section a[href], [class*="result" i] a[href], [class*="search" i] a[href]')).filter((anchor) => isVisible(anchor) && !inIgnoredRegion(anchor));
+              const anchors = deepQueryAll('main a[href], [role="main"] a[href], article a[href], section a[href], [class*="result" i] a[href], [class*="search" i] a[href], a[href]').filter((anchor) => isVisible(anchor) && !inIgnoredRegion(anchor));
               for (const anchor of anchors) {
                 const href = anchor.href || anchor.getAttribute("href") || "";
                 const title = norm(anchor.innerText || anchor.textContent || anchor.getAttribute("aria-label") || anchor.getAttribute("title") || "");
@@ -2518,7 +3468,7 @@ class ActionHandlers:
                 if (samePageJump(href)) continue;
                 if (uiLabel(title)) continue;
                 if (seen.has(href)) continue;
-                const container = anchor.closest('article,li,section,div[class*="result" i],div[class*="item" i],div[class*="card" i],div[class*="search" i]') || anchor.parentElement || anchor;
+                const container = anchor.closest('article,li,section,div[class*="result" i],div[class*="item" i],div[class*="card" i],div[class*="search" i],div') || anchor.parentElement || anchor;
                 if (inIgnoredRegion(container)) continue;
                 const selector = cssPath(anchor);
                 const resultishSelector = /\\b(result|search|item|card)\\b/i.test(selector) || !!anchor.closest('article,[role="listitem"],[class*="result" i],[class*="search" i]');
@@ -2543,6 +3493,277 @@ class ActionHandlers:
             {"limit": max(limit, 1)},
         )
         return [dict(item) for item in payload or [] if isinstance(item, dict)]
+
+    async def _collect_search_results_generic(self, *, page, args: dict, runtime_state=None) -> list[dict[str, Any]]:
+        limit = int(args.get("limit", 10) or 10)
+        await self._settle_page_for_read(page)
+        items = await self._collect_result_like_items_generic(page=page, limit=max(limit, 1))
+        if not items and await self._submit_search_query_from_current_url(page=page, runtime_state=runtime_state):
+            await self._settle_page_for_read(page)
+            items = await self._collect_result_like_items_generic(page=page, limit=max(limit, 1))
+        if not items:
+            try:
+                source_text = await self._load_source_text(page=page, runtime_state=runtime_state, force_refresh=True)
+            except Exception:
+                source_text = ""
+            try:
+                links = await self.extract_visible_links(page, {"limit": 80}, runtime_state)
+            except Exception:
+                links = []
+            items = self._collect_result_like_items_from_text(
+                source_text=source_text,
+                links=[dict(item) for item in links if isinstance(item, dict)] if isinstance(links, list) else [],
+                limit=max(limit, 1),
+            )
+        ranked: list[dict[str, Any]] = []
+        for index, item in enumerate(items):
+            current = dict(item)
+            title = str(current.get("title") or current.get("text") or "").strip()
+            href = str(current.get("href") or current.get("link") or "").strip()
+            description = str(current.get("description") or current.get("snippet") or "").strip()
+            if not title or not href:
+                continue
+            if self._looks_like_search_ui_link(title=title, href=href):
+                continue
+            current["rank"] = index + 1
+            current["score"] = self._search_result_score(current, query=self._search_query_from_url(str(getattr(page, "url", "") or "")))
+            ranked.append(current)
+        ranked.sort(key=lambda item: (-float(item.get("score", 0)), int(item.get("rank", 9999))))
+        result = ranked[: max(limit, 1)]
+        if runtime_state is not None:
+            runtime_state["last_search_results"] = result
+            if not result:
+                runtime_state["search_result_diagnostics"] = {
+                    "reason": "no_result_like_link_found",
+                    "candidate_count": len(items),
+                }
+        if result:
+            self._mark_used_skill(runtime_state, "search_result_extraction")
+        return result
+
+    async def _submit_search_query_from_current_url(self, *, page, runtime_state=None) -> bool:
+        query = self._search_query_from_url(str(getattr(page, "url", "") or ""))
+        if not query:
+            return False
+        flag = f"search_query_submitted:{str(getattr(page, 'url', '') or '')}:{query}"
+        if isinstance(runtime_state, dict):
+            submitted = runtime_state.setdefault("submitted_search_queries", [])
+            if flag in submitted:
+                return False
+        selectors = [
+            "main input[type='search']",
+            "main input[name='q']",
+            "main input[name='query']",
+            "input[type='search']",
+            "input[role='searchbox']",
+            "input[name='q']",
+            "input[name='query']",
+            "input[name='search']",
+            "input[placeholder*='Search' i]",
+            "input[aria-label*='Search' i]",
+        ]
+        for selector in selectors:
+            try:
+                locator = page.locator(selector).first
+                if await locator.count() <= 0:
+                    continue
+                await locator.fill(query)
+                await locator.press("Enter")
+                await self._wait_after_possible_navigation(page)
+                if isinstance(runtime_state, dict):
+                    runtime_state["submitted_search_queries"].append(flag)
+                return True
+            except Exception:
+                continue
+        return False
+
+    @staticmethod
+    def _search_query_from_url(url: str) -> str:
+        try:
+            parsed = urlparse(str(url or ""))
+            params = parse_qs(parsed.query)
+        except Exception:
+            return ""
+        for key in ("q", "query", "search", "s", "keyword", "keywords", "term"):
+            values = params.get(key)
+            if values:
+                value = str(values[0] or "").strip()
+                if value:
+                    return value
+        return ""
+
+    @staticmethod
+    def _looks_like_search_ui_link(*, title: str, href: str) -> bool:
+        label = re.sub(r"\s+", " ", str(title or "").strip().casefold())
+        if not label:
+            return True
+        blocked_labels = {
+            "search",
+            "next",
+            "previous",
+            "prev",
+            "login",
+            "sign in",
+            "menu",
+            "filters",
+            "filter",
+            "settings",
+            "pagination",
+            "home",
+        }
+        if label in blocked_labels:
+            return True
+        try:
+            path = str(href or "").casefold()
+        except Exception:
+            path = ""
+        return any(token in path for token in ("page=", "pagination", "#"))
+
+    @staticmethod
+    def _search_result_score(item: dict[str, Any], *, query: str = "") -> float:
+        score = 0.0
+        if item.get("href") or item.get("link"):
+            score += 2.0
+        if item.get("description") or item.get("snippet"):
+            score += 1.0
+        if item.get("selector"):
+            selector = str(item.get("selector", "")).casefold()
+            if any(token in selector for token in ("result", "article", "li", "item", "card")):
+                score += 1.0
+        title_len = len(str(item.get("title") or item.get("text") or ""))
+        if 6 <= title_len <= 160:
+            score += 0.5
+        query_norm = ActionHandlers._normalize_result_match_text(query)
+        if query_norm:
+            title_norm = ActionHandlers._normalize_result_match_text(str(item.get("title") or item.get("text") or ""))
+            href = str(item.get("href") or item.get("link") or "")
+            haystack = ActionHandlers._normalize_result_match_text(f"{title_norm} {item.get('description') or item.get('snippet') or ''} {href}")
+            if title_norm == query_norm:
+                score += 9.0
+            elif title_norm.startswith(f"{query_norm} "):
+                score += 6.0
+            elif query_norm in title_norm:
+                score += 3.0
+            elif query_norm in haystack:
+                score += 1.0
+            if query_norm in ActionHandlers._normalized_href_segments(href):
+                score += 3.0
+            simple_query = not re.search(r"[\s().:#/]", query_norm)
+            if simple_query and query_norm in haystack and not title_norm.startswith(query_norm):
+                if re.search(r"\b(?:writing|server|servers|client|clients|tutorial|guide|how to|example|examples|constructor|method|property|event|syntax)\b", title_norm):
+                    score -= 4.0
+        return score
+
+    async def _extract_anchor_object(self, *, page, args: dict, runtime_state=None) -> dict[str, Any]:
+        fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
+        requested = [str(field).strip() for field in fields if str(field).strip()]
+        if not requested:
+            requested = ["name", "count"]
+        anchors = [
+            str(item).strip()
+            for item in args.get("anchor_candidates", [])
+            if str(item).strip()
+        ] if isinstance(args.get("anchor_candidates"), list) else []
+        for key in ("anchor_text", "anchor", "target", "label"):
+            value = str(args.get(key, "") or "").strip()
+            if value:
+                anchors.append(value)
+        payload = await page.evaluate(
+            """
+            ({ anchors, limit }) => {
+              const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const isVisible = (el) => {
+                const style = window.getComputedStyle(el);
+                const rect = el.getBoundingClientRect();
+                return style && style.visibility !== "hidden" && style.display !== "none"
+                  && Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+              };
+              const ignored = (el) => !!el.closest('nav,header,footer,aside,[role="navigation"],[aria-hidden="true"]');
+              const numberPattern = /[0-9][0-9\\s.,\\u00A0\\u202F+]*(?:\\s*(?:articles?|items?|results?|rows?))?/i;
+              const cssEscape = (value) => {
+                if (window.CSS && CSS.escape) return CSS.escape(value);
+                return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+              };
+              const cssPath = (el) => {
+                if (!el || !el.tagName) return "";
+                if (el.id) return `#${cssEscape(el.id)}`;
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.body && parts.length < 6) {
+                  const tag = cur.tagName.toLowerCase();
+                  let part = tag;
+                  const cls = Array.from(cur.classList || []).slice(0, 2).map(cssEscape);
+                  if (cls.length) part += "." + cls.join(".");
+                  const parent = cur.parentElement;
+                  if (parent) {
+                    const siblings = Array.from(parent.children).filter((sib) => sib.tagName === cur.tagName);
+                    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(cur) + 1})`;
+                  }
+                  parts.unshift(part);
+                  cur = parent;
+                }
+                return parts.join(" > ");
+              };
+              const wanted = (anchors || []).map((item) => norm(item).toLowerCase()).filter(Boolean);
+              const candidates = Array.from(document.querySelectorAll('main a, main li, main div, article a, article li, article div, [role="main"] a, [role="main"] li, [role="main"] div, body a, body li'))
+                .filter((node) => isVisible(node));
+              const rows = [];
+              const seen = new Set();
+              for (const node of candidates) {
+                const text = norm(node.innerText || node.textContent || "");
+                if (!text || text.length < 3 || text.length > 500) continue;
+                if (wanted.length && !wanted.some((anchor) => text.toLowerCase().includes(anchor))) continue;
+                if (ignored(node) && !wanted.length) continue;
+                const numberMatch = text.match(numberPattern);
+                const heading = norm(node.querySelector?.('h1,h2,h3,h4,[role="heading"],a')?.innerText || node.querySelector?.('a')?.textContent || "");
+                let label = heading || text.replace(numberPattern, "").trim();
+                if (numberPattern.test(label)) label = norm(label.replace(numberPattern, "").trim());
+                label = norm(label.split(/\\n/)[0] || label);
+                if (!label || label.length > 160) {
+                  const lines = text.split(/\\s{2,}|\\n+/).map(norm).filter(Boolean);
+                  label = lines.find((line) => !numberPattern.test(line) && line.length >= 2 && line.length <= 160) || label;
+                }
+                const value = norm(numberMatch ? numberMatch[0] : "");
+                if (!label || !value) continue;
+                const href = node.href || node.querySelector?.('a[href]')?.href || "";
+                const key = `${label}|${value}|${href}`;
+                if (seen.has(key)) continue;
+                seen.add(key);
+                rows.push({ label, name: label, title: label, value, count: value, number: value, href, link: href, selector: cssPath(node), raw_text: text });
+                if (rows.length >= limit) break;
+              }
+              return rows;
+            }
+            """,
+            {"anchors": anchors, "limit": int(args.get("limit", 20) or 20)},
+        )
+        rows = [dict(item) for item in payload or [] if isinstance(item, dict)]
+        if not rows:
+            raise StructuredExtractionError(
+                code="anchor_object_not_found",
+                message="No label/value object was found near the requested anchor.",
+                details={"anchors": anchors, "requested_fields": requested},
+            )
+        item = rows[0]
+        result: dict[str, Any] = {}
+        for field in requested:
+            normalized = field.casefold()
+            if any(token in normalized for token in ("name", "title", "label", "language")):
+                result[field] = item.get("label") or item.get("name") or item.get("title")
+            elif any(token in normalized for token in ("count", "number", "total", "value")):
+                result[field] = item.get("count") or item.get("value") or item.get("number")
+            elif any(token in normalized for token in ("href", "url", "link")):
+                result[field] = item.get("href") or item.get("link")
+            else:
+                result[field] = item.get(field) or item.get("value") or item.get("label")
+        result["status"] = "success"
+        result["found_fields"] = [field for field in requested if result.get(field) not in (None, "", [], {})]
+        result["missing_fields"] = [field for field in requested if field not in result["found_fields"]]
+        result["raw_item"] = item
+        if runtime_state is not None:
+            runtime_state["last_anchor_objects"] = rows
+        self._mark_used_skill(runtime_state, "anchor_object_extraction")
+        return result
 
     @classmethod
     def _collect_result_like_items_from_text(
@@ -2653,6 +3874,38 @@ class ActionHandlers:
         return re.sub(r"\s+", " ", str(value or "").strip().casefold())
 
 
+    @staticmethod
+    def _merge_card_item_candidates(
+        primary: list[dict[str, Any]],
+        secondary: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        merged: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for item in [*primary, *secondary]:
+            if not isinstance(item, dict):
+                continue
+            title = str(item.get("title") or item.get("name") or item.get("text") or "").strip()
+            description = str(item.get("description") or item.get("snippet") or "").strip()
+            href = str(item.get("href") or item.get("link") or "").strip()
+            key = href or f"{title}|{description}"
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            current = dict(item)
+            if title:
+                current.setdefault("title", title)
+                current.setdefault("name", title)
+                current.setdefault("text", title)
+            if description:
+                current.setdefault("description", description)
+                current.setdefault("snippet", description)
+            if href:
+                current.setdefault("href", href)
+                current.setdefault("link", href)
+            merged.append(current)
+        return merged
+
+
 
 
 
@@ -2665,6 +3918,7 @@ class ActionHandlers:
 
     async def _collect_card_items_generic(self, *, page, args: dict, runtime_state=None) -> list[dict[str, Any]]:
         limit = int(args.get("limit", 20))
+        collection_limit = max(limit * 4, limit, 80)
         numeric_value_required = bool(args.get("numeric_value_required", False))
         payload = await page.evaluate(
             """
@@ -2688,6 +3942,13 @@ class ActionHandlers:
                   return ownClasses.some((name) => peerClasses.includes(name));
                 });
                 return peers.length >= 2;
+              };
+              const hasNestedRepeatedChildren = (node) => {
+                const nested = Array.from(node.querySelectorAll(':scope > article, :scope > li, :scope > [role="listitem"], :scope > div[class*="card" i], :scope > div[class*="item" i], :scope > div[class*="listing" i], :scope > div[class*="tile" i]'))
+                  .filter((child) => isVisible(child) && !inIgnoredRegion(child));
+                if (nested.length < 2) return false;
+                const withLinksOrHeadings = nested.filter((child) => child.querySelector('a[href],h1,h2,h3,h4,[role="heading"]'));
+                return withLinksOrHeadings.length >= 2;
               };
               const cssEscape = (value) => {
                 if (window.CSS && CSS.escape) return CSS.escape(value);
@@ -2742,9 +4003,10 @@ class ActionHandlers:
               const seen = new Set();
               const cards = [];
               for (const node of candidates) {
+                if (hasNestedRepeatedChildren(node) && !node.matches('article,li,[role="listitem"],[class*="card" i],[class*="item" i],[class*="listing" i],[class*="tile" i]')) continue;
                 const raw = String(node.innerText || node.textContent || "");
                 const text = norm(raw);
-                if (!text || text.length < 18 || text.length > 2200) continue;
+                if (!text || text.length < 18 || text.length > 1800) continue;
                 if (numericValueRequired && !numericPattern.test(text)) continue;
                 const lines = raw.split(/\\n+/).map(norm).filter(Boolean);
                 if (lines.length < 2 && !node.querySelector('a[href]')) continue;
@@ -2775,12 +4037,27 @@ class ActionHandlers:
               return cards;
             }
             """,
-            {"limit": max(limit, 1), "numericValueRequired": numeric_value_required},
+            {"limit": max(collection_limit, 1), "numericValueRequired": numeric_value_required},
         )
         cards = [dict(item) for item in payload or [] if isinstance(item, dict)]
+        try:
+            link_cards = await self._collect_result_like_items_generic(page=page, limit=max(limit * 4, limit, 80))
+        except Exception:
+            link_cards = []
+        if link_cards:
+            prioritize_link_cards = any(args.get(key) for key in ("condition", "filter", "where", "target"))
+            cards = (
+                self._merge_card_item_candidates(link_cards, cards)
+                if prioritize_link_cards
+                else self._merge_card_item_candidates(cards, link_cards)
+            )
         if not cards:
             cards = await self._collect_result_like_items_generic(page=page, limit=limit)
+        if not cards:
+            rows = await self._collect_row_candidates_generic(page=page, limit=max(limit * 3, limit, 20))
+            cards = self._card_items_from_row_candidates(rows=rows, limit=limit, numeric_value_required=numeric_value_required)
         cards = self._remove_shared_item_descriptions(cards)
+        cards = self._rank_module_like_items_if_requested(cards=cards, args=args, runtime_state=runtime_state)
         if cards:
             self._mark_used_skill(runtime_state, "row_list_extraction")
         if numeric_value_required:
@@ -2796,9 +4073,165 @@ class ActionHandlers:
                 elif cards and runtime_state is not None:
                     runtime_state["partial_success_reason"] = "numeric_filter_not_applied"
         fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
-        if fields:
+        if fields and not bool(args.get("_defer_projection")):
             cards = [self._project_item_to_schema(item=item, fields=fields) for item in cards]
         return cards[: max(limit, 1)]
+
+    @classmethod
+    def _rank_module_like_items_if_requested(
+        cls,
+        *,
+        cards: list[dict[str, Any]],
+        args: dict[str, Any],
+        runtime_state=None,
+    ) -> list[dict[str, Any]]:
+        if not cards:
+            return cards
+        fields = args.get("fields") if isinstance(args.get("fields"), dict) else {}
+        goal = str((runtime_state or {}).get("user_goal", "") or "")
+        combined = " ".join(
+            [
+                goal,
+                str(args.get("output_key", "") or ""),
+                str(args.get("target", "") or ""),
+                *[str(field or "") for field in fields.keys()],
+            ]
+        )
+        text = casefold_with_mojibake_repairs(combined)
+        if not any(token in text for token in ("module", "modules", "модул")):
+            return cards
+        ranked: list[dict[str, Any]] = []
+        for index, item in enumerate(cards):
+            if not isinstance(item, dict):
+                continue
+            current = cls._normalize_module_like_item(dict(item))
+            score = cls._module_like_item_score(current)
+            current["_module_score"] = score
+            current["_module_rank"] = index
+            ranked.append(current)
+        strong = [item for item in ranked if float(item.get("_module_score", 0)) >= 3.0]
+        if len(strong) >= 3:
+            ranked = strong
+        ranked.sort(key=lambda item: (-float(item.get("_module_score", 0)), int(item.get("_module_rank", 9999))))
+        return [
+            {key: value for key, value in item.items() if key not in {"_module_score", "_module_rank"}}
+            for item in ranked
+        ]
+
+    @classmethod
+    def _normalize_module_like_item(cls, item: dict[str, Any]) -> dict[str, Any]:
+        current = dict(item)
+        for source_key in ("title", "name", "text", "raw_text"):
+            source = str(current.get(source_key) or "").strip()
+            module_name, description = cls._split_module_name_description(source)
+            if not module_name:
+                continue
+            current["title"] = module_name
+            current["name"] = module_name
+            current["text"] = module_name
+            if description and not str(current.get("description") or "").strip():
+                current["description"] = description
+                current["snippet"] = description
+            elif description and cls._module_like_item_score({"title": module_name, "description": description}) > cls._module_like_item_score(current):
+                current["description"] = description
+                current["snippet"] = description
+            return current
+        return current
+
+    @staticmethod
+    def _split_module_name_description(value: str) -> tuple[str, str]:
+        text = " ".join(str(value or "").split()).strip()
+        if not text:
+            return "", ""
+        match = re.match(r"^([a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?)\s+(?:[\u2013\u2014-])\s+(.{3,240})$", text)
+        if not match:
+            return "", ""
+        return match.group(1).strip(), match.group(2).strip()
+
+    @classmethod
+    def _module_like_item_score(cls, item: dict[str, Any]) -> float:
+        title = str(item.get("title") or item.get("name") or item.get("text") or "").strip()
+        description = str(item.get("description") or item.get("snippet") or "").strip()
+        raw_text = str(item.get("raw_text") or "").strip()
+        href = str(item.get("href") or item.get("link") or "").strip()
+        if not title:
+            return -10.0
+        folded_title = title.casefold()
+        score = 0.0
+        if re.fullmatch(r"[a-z_][a-z0-9_]*(?:\.[a-z_][a-z0-9_]*)?", title):
+            score += 5.0
+        elif re.fullmatch(r"[a-z_][a-z0-9_.-]{1,40}", title):
+            score += 3.0
+        if description and description != title and 8 <= len(description) <= 220:
+            score += 2.0
+        if href and re.search(rf"/{re.escape(title)}(?:\.|/|$)", href, flags=re.IGNORECASE):
+            score += 1.0
+        if raw_text and len(raw_text) <= 260:
+            score += 0.5
+        if raw_text and len(raw_text) >= 700:
+            score -= 3.0
+        if re.search(r"\b(?:introduction|overview|tutorial|guide|reference|index|contents?|notes?)\b", folded_title):
+            score -= 3.0
+        if " " in title and not re.search(r"[._-]", title):
+            score -= 1.0
+        if title[:1].isupper() and any(char.islower() for char in title[1:]) and " " in title:
+            score -= 1.0
+        return score
+
+    @classmethod
+    def _card_items_from_row_candidates(
+        cls,
+        *,
+        rows: list[dict[str, Any]],
+        limit: int,
+        numeric_value_required: bool = False,
+    ) -> list[dict[str, Any]]:
+        cards: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        numeric_pattern = re.compile(r"[-+]?\d[\d\s.,]*")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            text = cls._clean_row_candidate_item_text(str(row.get("text") or ""))
+            if not text or len(text) > 320:
+                continue
+            if numeric_value_required and not numeric_pattern.search(text):
+                continue
+            lines = [cls._clean_row_candidate_item_text(part) for part in str(row.get("text") or "").splitlines()]
+            lines = [line for line in lines if line]
+            title = lines[0] if lines else text
+            if len(title) > 220:
+                title = text[:220].strip()
+            key = title.casefold()
+            if not key or key in seen:
+                continue
+            seen.add(key)
+            item = {
+                "title": title,
+                "name": title,
+                "text": title,
+                "description": "",
+                "snippet": "",
+                "href": "",
+                "link": "",
+                "selector": row.get("selector", ""),
+                "raw_text": text,
+            }
+            if isinstance(row.get("frame_index"), int):
+                item["frame_index"] = row["frame_index"]
+            if row.get("frame_url"):
+                item["frame_url"] = row["frame_url"]
+            cards.append(item)
+            if len(cards) >= max(limit, 1):
+                break
+        return cards
+
+    @staticmethod
+    def _clean_row_candidate_item_text(value: str) -> str:
+        text = re.sub(r"\s+", " ", str(value or "")).strip()
+        text = re.sub(r"\s*(?:[×✕✖✗]|Г—)\s*$", "", text).strip()
+        text = re.sub(r"\s+\b(?:close|delete|remove|dismiss)\b\s*$", "", text, flags=re.IGNORECASE).strip()
+        return text
 
     @staticmethod
     def _remove_shared_item_descriptions(items: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2866,7 +4299,27 @@ class ActionHandlers:
 
 
     async def _collect_row_candidates_generic(self, *, page, limit: int) -> list[dict[str, Any]]:
-        payload = await page.evaluate(
+        rows = await self._collect_row_candidates_from_context(context=page, limit=limit)
+        frames = getattr(page, "frames", None)
+        if isinstance(frames, list) and len(rows) < limit:
+            main_frame = getattr(page, "main_frame", None)
+            for index, frame in enumerate(frames):
+                if frame is main_frame:
+                    continue
+                remaining = max(limit - len(rows), 1)
+                frame_rows = await self._collect_row_candidates_from_context(
+                    context=frame,
+                    limit=remaining,
+                    frame_index=index,
+                )
+                rows.extend(frame_rows)
+                if len(rows) >= limit:
+                    break
+        return rows[:limit]
+
+    async def _collect_row_candidates_from_context(self, *, context, limit: int, frame_index: int | None = None) -> list[dict[str, Any]]:
+        try:
+            payload = await context.evaluate(
             """
             ({ limit }) => {
               const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
@@ -2930,8 +4383,17 @@ class ActionHandlers:
             }
             """,
             {"limit": max(limit, 1)},
-        )
-        return [dict(item) for item in payload or [] if isinstance(item, dict)]
+            )
+        except Exception:
+            return []
+        rows = [dict(item) for item in payload or [] if isinstance(item, dict)]
+        if frame_index is not None:
+            frame_url = str(getattr(context, "url", "") or "")
+            for row in rows:
+                row["frame_index"] = frame_index
+                if frame_url:
+                    row["frame_url"] = frame_url
+        return rows
 
     async def _extract_svg_summary(self, *, page) -> dict[str, Any]:
         payload = await page.evaluate(
@@ -3128,6 +4590,13 @@ class ActionHandlers:
 
     @classmethod
     def _filter_structured_rows_by_condition(cls, *, rows: list[dict[str, Any]], condition: Any) -> list[dict[str, Any]]:
+        field_condition = cls._condition_field_operator_value(condition)
+        if field_condition:
+            field, operator, value = field_condition
+            return [
+                row for row in rows
+                if cls._row_matches_field_condition(row=row, field=field, operator=operator, value=value)
+            ]
         term_groups = cls._condition_term_groups(condition)
         if not term_groups:
             return rows
@@ -3144,6 +4613,72 @@ class ActionHandlers:
             if any(all(term.casefold() in haystack for term in terms) for terms in term_groups):
                 matched.append(row)
         return matched
+
+    @staticmethod
+    def _condition_field_operator_value(condition: Any) -> tuple[str, str, str] | None:
+        if not isinstance(condition, dict):
+            return None
+        field = str(condition.get("field") or "").strip()
+        value = condition.get("value")
+        if value is None and "contains" in condition:
+            value = condition.get("contains")
+            operator = "contains"
+        else:
+            operator = str(condition.get("operator") or condition.get("match") or "contains").strip().casefold()
+        if not field and value is not None and "value" in condition:
+            return None
+        if not field or value is None:
+            metadata_keys = {"field", "operator", "mode", "match", "case_sensitive", "all", "contains", "value"}
+            data_items = [
+                (str(key).strip(), raw_value)
+                for key, raw_value in condition.items()
+                if str(key).casefold() not in metadata_keys and raw_value not in (None, "", [], {})
+            ]
+            if len(data_items) != 1:
+                return None
+            field, value = data_items[0]
+            operator = "contains"
+        text_value = str(value).strip()
+        if not text_value:
+            return None
+        return field, operator, text_value
+
+    @classmethod
+    def _row_matches_field_condition(cls, *, row: dict[str, Any], field: str, operator: str, value: str) -> bool:
+        cell = cls._value_for_row_field(row=row, field=field)
+        if cell is None:
+            return False
+        haystack = str(cell).casefold()
+        needle = str(value).casefold()
+        if operator in {"equals", "eq", "=", "==", "exact"}:
+            return haystack.strip() == needle.strip()
+        if operator in {"starts_with", "prefix"}:
+            return haystack.strip().startswith(needle.strip())
+        if operator in {"ends_with", "suffix"}:
+            return haystack.strip().endswith(needle.strip())
+        return needle in haystack
+
+    @classmethod
+    def _value_for_row_field(cls, *, row: dict[str, Any], field: str) -> Any:
+        wanted = cls._normalize_header_match_key(field)
+        if not wanted:
+            return None
+        direct_keys = [field, field.casefold(), cls._header_alias(field)]
+        for key in direct_keys:
+            if key in row and row.get(key) not in (None, ""):
+                return row.get(key)
+        fields_by_header = row.get("fields_by_header") if isinstance(row.get("fields_by_header"), dict) else {}
+        for header, value in fields_by_header.items():
+            normalized = cls._normalize_header_match_key(str(header))
+            if normalized and (wanted == normalized or wanted in normalized or normalized in wanted):
+                return value
+        headers = [str(header or "") for header in row.get("headers", []) or []]
+        cells = list(row.get("cells", []) or [])
+        for idx, header in enumerate(headers):
+            normalized = cls._normalize_header_match_key(header)
+            if normalized and (wanted == normalized or wanted in normalized or normalized in wanted):
+                return cells[idx] if idx < len(cells) else None
+        return None
 
     @staticmethod
     def _extract_numeric_upper_bound(*, args: dict, runtime_state=None) -> float | None:
@@ -3224,6 +4759,10 @@ class ActionHandlers:
             "fields_by_header": fields_by_header,
             "links": row.get("links", []),
         }
+        if isinstance(row.get("frame_index"), int):
+            payload["frame_index"] = row["frame_index"]
+        if str(row.get("frame_url", "") or "").strip():
+            payload["frame_url"] = str(row.get("frame_url")).strip()
         payload.update(aliases)
         return payload
 
@@ -3290,6 +4829,123 @@ class ActionHandlers:
             if header not in headers:
                 headers.append(header)
         return headers
+
+    @classmethod
+    def _field_schema_table_row_from_source_text(
+        cls,
+        *,
+        fields: dict[str, Any],
+        source_text: str,
+        runtime_state=None,
+    ) -> dict[str, Any]:
+        if not isinstance(fields, dict) or not fields:
+            return {}
+        goal = str((runtime_state or {}).get("user_goal", "") or "")
+        condition = cls._table_field_condition_from_goal(goal)
+        if not condition:
+            return {}
+        field_name, expected_value = condition
+        rows = cls._table_like_rows_from_source_text(source_text)
+        if not rows:
+            return {}
+        requested_fields = [str(field).strip() for field in fields if str(field).strip()]
+        requested_keys = [cls._normalize_header_match_key(field) for field in requested_fields]
+        condition_key = cls._normalize_header_match_key(field_name)
+        header_index = -1
+        header_cells: list[str] = []
+        for index, cells in enumerate(rows):
+            normalized = [cls._normalize_header_match_key(cell) for cell in cells]
+            if condition_key and not any(condition_key == cell or condition_key in cell or cell in condition_key for cell in normalized):
+                continue
+            requested_matches = sum(
+                1
+                for wanted in requested_keys
+                if wanted and any(wanted == cell or wanted in cell or cell in wanted for cell in normalized)
+            )
+            if requested_matches >= 1:
+                header_index = index
+                header_cells = cells
+                break
+        if header_index < 0 or not header_cells:
+            return {}
+        normalized_headers = [cls._normalize_header_match_key(header) for header in header_cells]
+        condition_idx = next(
+            (
+                idx
+                for idx, header in enumerate(normalized_headers)
+                if condition_key and header and (condition_key == header or condition_key in header or header in condition_key)
+            ),
+            None,
+        )
+        if condition_idx is None:
+            return {}
+        matched_cells: list[str] = []
+        for cells in rows[header_index + 1:]:
+            if len(cells) <= condition_idx:
+                continue
+            if str(expected_value).casefold() in str(cells[condition_idx]).casefold():
+                matched_cells = cells
+                break
+        if not matched_cells:
+            return {}
+        row_payload = cls._build_row_payload(
+            {
+                "headers": header_cells,
+                "cells": matched_cells,
+                "text": " ".join(matched_cells),
+                "row_id": "source_text_table_row",
+            }
+        )
+        payload: dict[str, Any] = {}
+        for field in requested_fields:
+            value = cls._value_for_row_field(row=row_payload, field=field)
+            if value not in (None, "", [], {}):
+                payload[field] = value
+        for header, value in row_payload.get("fields_by_header", {}).items():
+            if value not in (None, "", [], {}):
+                payload.setdefault(header, value)
+                alias = cls._header_alias(header)
+                if alias:
+                    payload.setdefault(alias, value)
+        found = [field for field in requested_fields if field in payload and payload[field] not in (None, "", [], {})]
+        payload["status"] = "success" if found else "not_found"
+        payload["found_fields"] = found
+        payload["missing_fields"] = [field for field in requested_fields if field not in found]
+        return payload if found else {}
+
+    @staticmethod
+    def _table_field_condition_from_goal(goal: str) -> tuple[str, str] | None:
+        text = str(goal or "")
+        patterns = [
+            r"(?:where|when|if|где|если)\s+([A-Za-zА-Яа-яЁё0-9 _-]{2,60}?)\s+(?:contains|includes|has|содержит|включает)\s+([A-Za-zА-Яа-яЁё0-9 _.,+-]{1,80})",
+            r"([A-Za-zА-Яа-яЁё0-9 _-]{2,60}?)\s+(?:contains|includes|has|содержит|включает)\s+([A-Za-zА-Яа-яЁё0-9 _.,+-]{1,80})",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            field = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.\"'")
+            value = re.sub(r"\s+", " ", match.group(2)).strip(" :;,.\"'")
+            value = re.split(r"\s+(?:верни|return|and return)\b", value, maxsplit=1, flags=re.IGNORECASE)[0].strip(" :;,.\"'")
+            if field and value:
+                return field, value
+        return None
+
+    @classmethod
+    def _table_like_rows_from_source_text(cls, source_text: str) -> list[list[str]]:
+        rows: list[list[str]] = []
+        for line in str(source_text or "").splitlines():
+            normalized = cls._normalize_line(line)
+            if not normalized:
+                continue
+            if "\t" in line:
+                cells = [cls._normalize_line(cell) for cell in line.split("\t")]
+            else:
+                cells = [cls._normalize_line(cell) for cell in re.split(r"\s{2,}", normalized)]
+            cells = [cell for cell in cells if cell]
+            if len(cells) >= 2:
+                rows.append(cells)
+        return rows
 
     @classmethod
     def _filter_table_rows_by_requested_headers(
@@ -3789,9 +5445,34 @@ class ActionHandlers:
             """
             ({ limit }) => {
               const norm = (value) => String(value || "").replace(/\\s+/g, " ").trim();
+              const cssEscape = (value) => {
+                if (window.CSS && CSS.escape) return CSS.escape(value);
+                return String(value).replace(/[^a-zA-Z0-9_-]/g, "\\\\$&");
+              };
+              const cssPath = (el) => {
+                if (!el || !el.tagName) return "";
+                if (el.id) return `#${cssEscape(el.id)}`;
+                const parts = [];
+                let cur = el;
+                while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.body && parts.length < 6) {
+                  const tag = cur.tagName.toLowerCase();
+                  let part = tag;
+                  const cls = Array.from(cur.classList || []).slice(0, 2).map(cssEscape);
+                  if (cls.length) part += "." + cls.join(".");
+                  const parent = cur.parentElement;
+                  if (parent) {
+                    const siblings = Array.from(parent.children).filter((sib) => sib.tagName === cur.tagName);
+                    if (siblings.length > 1) part += `:nth-of-type(${siblings.indexOf(cur) + 1})`;
+                  }
+                  parts.unshift(part);
+                  cur = parent;
+                }
+                return parts.join(" > ");
+              };
               const tables = Array.from(document.querySelectorAll("table"));
               const results = [];
-              for (const table of tables) {
+              for (let tableIndex = 0; tableIndex < tables.length; tableIndex++) {
+                const table = tables[tableIndex];
                 const allRows = Array.from(table.querySelectorAll("tr"));
                 let headers = [];
                 const headerRow = allRows.find((tr) => tr.querySelectorAll("th").length >= 2);
@@ -3806,7 +5487,10 @@ class ActionHandlers:
                     headers,
                     cells,
                     text: cells.join(" "),
-                    row_id: `table_row_${results.length + 1}`
+                    row_id: `table_${tableIndex + 1}_row_${allRows.indexOf(tr) + 1}`,
+                    table_index: tableIndex,
+                    row_index: allRows.indexOf(tr),
+                    selector: cssPath(tr)
                   });
                   if (results.length >= limit) return results;
                 }

@@ -54,6 +54,35 @@ def _visual_count_plan() -> TaskSpec:
     )
 
 
+def _cards_plan() -> TaskSpec:
+    return TaskSpec.model_validate(
+        {
+            "goal": "Extract cards with title and description.",
+            "start_url": "https://cards.sample.test/",
+            "allowed_domains": ["cards.sample.test"],
+            "constraints": {"max_steps": 5, "max_replans": 1, "timeout_sec": 20},
+            "expected_result": {
+                "description": "Cards",
+                "required_fields": ["cards"],
+            },
+            "steps": [
+                {"step_id": 1, "action": "open_url", "args": {"url": "https://cards.sample.test/" }},
+                {
+                    "step_id": 2,
+                    "action": "extract_by_intent",
+                    "args": {
+                        "intent": "card_items",
+                        "output_key": "cards",
+                        "fields": {"title": {"type": "text"}, "description": {"type": "text"}},
+                    },
+                    "save_as": "cards",
+                },
+                {"step_id": 3, "action": "finish", "args": {}},
+            ],
+        }
+    )
+
+
 def test_verifier_preprocessing_accepts_nested_metadata_required_fields():
     result = ExecutionResult(
         status="success",
@@ -93,6 +122,44 @@ def test_verifier_preprocessing_reports_partial_metadata_without_rejecting():
     assert verdict.verdict == "uncertain"
     assert verdict.task_completed is False
     assert "missing: description, url" in verdict.issues[0]
+
+
+def test_verifier_rejects_countish_value_in_name_field():
+    result = ExecutionResult(
+        status="success",
+        extracted_data={"metadata": {"language_name": "2,103,000 articles"}},
+        logs=[StepLog(step_id=2, action="extract_by_intent", status="success")],
+    )
+
+    verdict = LLMVerifier(_FailIfCalledClient()).verify(
+        _metadata_plan(required_fields=["language_name"]),
+        result,
+    )
+
+    assert verdict.verdict == "reject"
+    assert "count/value" in verdict.issues[0]
+
+
+def test_verifier_rejects_raw_only_card_collection_projection():
+    result = ExecutionResult(
+        status="success",
+        extracted_data={
+            "cards": [
+                {
+                    "title": None,
+                    "description": None,
+                    "raw_text": "Large aggregate region with many unrelated cards.",
+                    "selector": "main",
+                }
+            ]
+        },
+        logs=[StepLog(step_id=2, action="extract_by_intent", status="success")],
+    )
+
+    verdict = LLMVerifier(_FailIfCalledClient()).verify(_cards_plan(), result)
+
+    assert verdict.verdict == "reject"
+    assert "raw container text" in verdict.issues[0]
 
 
 def test_verifier_preprocessing_accepts_populated_count_fields_without_llm():

@@ -27,8 +27,11 @@ SUPPORTED_RUNTIME_INTENTS = {
     "current_url",
     "page_title",
     "value_near_anchor",
+    "anchor_object",
     "card_items",
+    "search_results",
     "table_rows",
+    "text_block",
     "field_schema",
 }
 
@@ -157,7 +160,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_structured_items",
             "extract_items",
         ],
-        preferred_intents=_runtime_intents("field_schema", "value_near_anchor"),
+        preferred_intents=_runtime_intents("field_schema", "text_block", "value_near_anchor", "anchor_object", "card_items", "table_rows"),
         conceptual_intents=["entity_metadata"],
         expected_output_type="object",
         required_skill_groups=["semantic_form_fill", "entity_metadata_extraction"],
@@ -173,7 +176,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_structured_items",
             "extract_items",
         ],
-        preferred_intents=_runtime_intents("card_items"),
+        preferred_intents=_runtime_intents("search_results", "text_block", "card_items", "field_schema"),
         conceptual_intents=["result_list"],
         expected_output_type="list",
         required_skill_groups=["semantic_form_fill", "result_list_extraction"],
@@ -189,7 +192,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_items",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents("table_rows"),
+        preferred_intents=_runtime_intents("table_rows", "field_schema"),
         conceptual_intents=["table_rows"],
         expected_output_type="table",
         required_skill_groups=["table_extraction"],
@@ -235,7 +238,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_text",
             "extract_html",
         ],
-        preferred_intents=_runtime_intents("value_near_anchor"),
+        preferred_intents=_runtime_intents("value_near_anchor", "anchor_object"),
         conceptual_intents=["direct_value"],
         expected_output_type="value",
         required_skill_groups=["anchor_value_extraction"],
@@ -250,7 +253,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "extract_by_intent",
             "extract_visible_links",
         ],
-        preferred_intents=_runtime_intents("current_url", "page_title", "field_schema"),
+        preferred_intents=_runtime_intents("current_url", "page_title", "text_block", "field_schema"),
         conceptual_intents=["semantic_navigation"],
         expected_output_type="navigation",
         required_skill_groups=["semantic_navigation"],
@@ -266,7 +269,7 @@ PROFILES: dict[str, PlanningProfile] = {
             "click_by_semantic_target",
             "wait_for",
         ],
-        preferred_intents=_runtime_intents("table_rows", "card_items"),
+        preferred_intents=_runtime_intents("table_rows", "card_items", "field_schema"),
         conceptual_intents=["row_action"],
         expected_output_type="action",
         required_skill_groups=["row_selection", "semantic_action"],
@@ -311,8 +314,11 @@ PROFILES: dict[str, PlanningProfile] = {
         ],
         preferred_intents=_runtime_intents(
             "value_near_anchor",
+            "anchor_object",
             "card_items",
+            "search_results",
             "table_rows",
+            "text_block",
             "field_schema",
         ),
         conceptual_intents=["generic_web_task"],
@@ -343,21 +349,18 @@ class TaskRouter:
                 scores[family_route] += 0.35
                 signals.append(f"benchmark_family:{benchmark_family}")
 
-        search_required = self._has_any(text, ["search", "find", "query", "look up", "lookup", "найди", "поиск", "искать"])
-        has_extract = self._has_any(text, ["extract", "export", "return", "collect", "get", "выгрузи", "извлеки", "верни", "получи", "собери"])
-        list_output = self._has_any(text, ["list", "results", "top", "all", "links", "items", "rows", "список", "результат", "ссылк", "все", "топ"])
-        has_table = self._has_word_any(text, ["table", "tables", "row", "rows", "column", "columns", "cell", "cells"]) or self._has_any(text, ["таблиц", "строк", "колон", "ячей"])
-        cards_like = self._has_any(
-            text,
-            ["card", "cards", "catalog", "listing", "listings", "карточ", "каталог", "витрин"],
-        )
-        has_visual = self._has_any(text, ["visual", "screenshot", "image", "canvas", "coordinate", "x=", "y=", "визуал", "скрин", "изображ", "координат"])
+        search_required = self._has_any(text, ["search", "find", "query", "look up", "lookup"])
+        has_extract = self._has_any(text, ["extract", "export", "return", "collect", "get"])
+        list_output = self._has_any(text, ["list", "results", "top", "all", "links", "items", "rows"])
+        has_table = self._has_word_any(text, ["table", "tables", "row", "rows", "column", "columns", "cell", "cells"])
+        cards_like = self._has_any(text, ["card", "cards", "catalog", "listing", "listings"])
+        has_visual = self._has_any(text, ["visual", "screenshot", "image", "canvas", "coordinate", "x=", "y="])
         has_row_action = (
             has_table
             and not has_extract
-            and self._has_any(text, ["click", "select", "delete", "star", "choose", "нажм", "выбери", "удали"])
+            and self._has_any(text, ["click", "select", "delete", "remove", "star", "choose"])
         )
-        navigation_required = self._has_any(text, ["click", "open link", "navigate", "go to", "follow", "press", "нажм", "перейд", "клик", "открой ссыл"])
+        navigation_required = self._has_any(text, ["click", "open link", "navigate", "go to", "follow", "press"])
         result_navigation_request = (
             self._has_any(
                 text,
@@ -373,11 +376,11 @@ class TaskRouter:
                     "best result",
                 ],
             )
-            and self._has_any(text, ["result", "results", "item", "link", "результат"])
+            and self._has_any(text, ["result", "results", "item", "link"])
         )
         navigation_required = navigation_required or result_navigation_request
-        has_form = search_required or self._has_any(text, ["fill", "enter", "type", "input", "submit", "заполни", "введи", "форма"])
-        has_anchor_value = self._has_any(text, ["near", "next to", "beside", "anchor", "label", "value", "рядом", "возле", "значени", "метк"])
+        has_form = search_required or self._has_any(text, ["fill", "enter", "type", "input", "submit"])
+        has_anchor_value = self._has_any(text, ["near", "next to", "beside", "anchor", "label", "value"])
         schema_field_hints = infer_schema_required_fields(text)
         has_metadata_fields = len(schema_field_hints) >= 2
         object_output = has_metadata_fields and not list_output and not has_table and not cards_like and not navigation_required
@@ -385,35 +388,12 @@ class TaskRouter:
             search_required
             and navigation_required
             and has_extract
-            and (list_output or self._has_any(text, ["result", "results", "СЂРµР·СѓР»СЊС‚Р°С‚"]))
+            and (list_output or self._has_any(text, ["result", "results"]))
         )
         condition_filtering = self._has_any(
             text,
-            ["where", "whose", "contains", "containing", "filter", "condition", "matching", "в заголов", "котор", "содерж"],
+            ["where", "whose", "contains", "containing", "filter", "condition", "matching"],
         )
-        # Keep a normalized Cyrillic pass because some legacy token literals above are mojibake.
-        search_required = search_required or self._has_any(text, ["найди", "поиск", "искать"])
-        has_extract = has_extract or self._has_any(text, ["выгрузи", "извлеки", "верни", "получи", "собери"])
-        list_output = list_output or self._has_any(text, ["список", "результат", "ссылк", "все", "топ"])
-        has_table = has_table or self._has_any(text, ["таблиц", "строк", "колон", "ячей"])
-        cards_like = cards_like or self._has_any(text, ["карточ", "каталог", "витрин"])
-        has_visual = has_visual or self._has_any(text, ["визуал", "скрин", "изображ", "координат"])
-        has_row_action = has_row_action or (
-            has_table
-            and not has_extract
-            and self._has_any(text, ["нажм", "выбери", "удали"])
-        )
-        navigation_required = navigation_required or self._has_any(text, ["нажм", "перейд", "клик", "открой ссыл"])
-        has_form = has_form or search_required or self._has_any(text, ["заполни", "введи", "форма"])
-        has_anchor_value = has_anchor_value or self._has_any(text, ["рядом", "возле", "значени", "метк"])
-        object_output = has_metadata_fields and not list_output and not has_table and not cards_like and not navigation_required
-        search_navigation_then_extraction = search_navigation_then_extraction or (
-            search_required
-            and navigation_required
-            and has_extract
-            and (list_output or self._has_any(text, ["result", "results", "СЂРµР·СѓР»СЊС‚Р°С‚"]))
-        )
-        condition_filtering = condition_filtering or self._has_any(text, ["в заголов", "котор", "содерж"])
 
         if has_visual:
             scores["visual_or_spatial_task"] += 0.85
@@ -427,7 +407,7 @@ class TaskRouter:
         if cards_like:
             scores["catalog_or_card_extraction"] += 0.74
             signals.append("card_or_catalog_shape")
-        if search_required and (list_output or self._has_any(text, ["result", "results", "результат"])):
+        if search_required and (list_output or self._has_any(text, ["result", "results"])):
             scores["search_results_extraction"] += 0.78
             signals.append("search_results_shape")
         if list_output and has_extract and not has_table and not cards_like:

@@ -217,7 +217,7 @@ def parse_args():
     parser = argparse.ArgumentParser(description="Run LLM-RPA MVP pipeline")
     parser.add_argument(
         "--goal",
-        default="Open https://www.wikipedia.org, extract the h1 text, take screenshot and finish.",
+        default="Open https://example.org, extract the h1 text, take screenshot and finish.",
         help="User goal in natural language",
     )
     parser.add_argument(

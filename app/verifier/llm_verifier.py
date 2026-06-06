@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from copy import deepcopy
 
 from app.schemas.execution import ExecutionResult, LLMArtifact
@@ -73,6 +74,12 @@ class LLMVerifier:
         )
         deterministic_issues = self._validate_structured_compare_contract(result.extracted_data)
         deterministic_issues.extend(
+            self._validate_semantic_content_presence(
+                required_fields=semantic_required_fields,
+                extracted_data=verifier_extracted_data,
+            )
+        )
+        deterministic_issues.extend(
             self._validate_semantic_value_quality(
                 required_fields=semantic_required_fields,
                 extracted_data=verifier_extracted_data,
@@ -84,6 +91,12 @@ class LLMVerifier:
                 required_fields=semantic_required_fields,
                 extracted_data=result.extracted_data,
                 benchmark_context=benchmark_context or {},
+            )
+        )
+        deterministic_issues.extend(
+            self._validate_collection_projection_quality(
+                plan=plan,
+                extracted_data=verifier_extracted_data,
             )
         )
         deterministic_issues.extend(
@@ -100,7 +113,7 @@ class LLMVerifier:
                 confidence=0.0,
                 verdict="reject",
                 issues=deterministic_issues,
-                summary="Verifier rejected due to invalid structured comparison contract.",
+                summary="Verifier rejected due to deterministic contract issues.",
             )
 
         fast_path_verdict = self._deterministic_fast_path_verdict(
@@ -233,6 +246,34 @@ class LLMVerifier:
         return []
 
     @staticmethod
+    def _validate_semantic_content_presence(*, required_fields: list[str], extracted_data: dict) -> list[str]:
+        required = [str(field).strip() for field in required_fields if str(field).strip()]
+        if not required or not isinstance(extracted_data, dict):
+            return []
+        technical = {
+            "page_snapshot",
+            "screenshot_path",
+            "screenshot",
+            "artifact_screenshot",
+            "final_url",
+            "current_url",
+            "url",
+            "page_title",
+            "current_title",
+            "title",
+        }
+        content_required = [field for field in required if field not in technical]
+        if not content_required:
+            return []
+        present_content = [
+            field for field in content_required
+            if LLMVerifier._has_meaningful_value(LLMVerifier._first_meaningful_value_for_aliases((field.casefold(),), extracted_data))
+        ]
+        if present_content:
+            return []
+        return ["Semantic required fields are missing; URL/title/page_snapshot alone are not content success."]
+
+    @staticmethod
     def _validate_semantic_value_quality(*, required_fields: list[str], extracted_data: dict, goal: str) -> list[str]:
         if not isinstance(extracted_data, dict):
             return []
@@ -269,6 +310,27 @@ class LLMVerifier:
                 issues.append(
                     f"Field '{field}' looks like broad page prose, not a concrete extracted value."
                 )
+            field_hint = field.casefold()
+            if (
+                ("name" in field_hint or "title" in field_hint)
+                and LLMVerifier._looks_like_countish_value(text)
+            ):
+                issues.append(
+                    f"Field '{field}' looks like a count/value, not a name/title."
+                )
+            if ("count" in field_hint or "number" in field_hint or field_hint.endswith("_total")) and not LLMVerifier._looks_like_countish_value(text):
+                issues.append(
+                    f"Field '{field}' must look like a numeric/count value."
+                )
+            if "email" in field_hint and not LLMVerifier._looks_like_email(text):
+                issues.append(f"Field '{field}' must look like an email address.")
+            if ("phone" in field_hint or "tel" == field_hint) and not LLMVerifier._looks_like_phone(text):
+                issues.append(f"Field '{field}' must look like a phone number.")
+            if (
+                ("url" in field_hint or field_hint in {"href", "link", "final_url", "current_url"})
+                and not LLMVerifier._looks_like_url_or_path(text)
+            ):
+                issues.append(f"Field '{field}' must look like a URL or path.")
             if negative_like_goal and field in {"value", "status"} and len(text) >= 80 and LLMVerifier._looks_like_sentence_prose(text):
                 issues.append(
                     f"Negative/ambiguous goal requires explicit uncertainty semantics; field '{field}' contains broad prose."
@@ -280,6 +342,106 @@ class LLMVerifier:
         token_count = len([token for token in text.split() if token])
         punctuation_count = sum(text.count(mark) for mark in [".", ";", ":"])
         return token_count >= 14 and punctuation_count >= 1
+
+    @staticmethod
+    def _looks_like_countish_value(text: str) -> bool:
+        compact = str(text or "").strip().casefold()
+        if not re.search(r"\d", compact):
+            return False
+        unit_tokens = ("article", "articles", "item", "items", "result", "results", "row", "rows", "count", "total")
+        if any(token in compact for token in unit_tokens):
+            return True
+        alnum_chars = [char for char in compact if char.isalnum()]
+        digit_chars = [char for char in alnum_chars if char.isdigit()]
+        return bool(alnum_chars) and len(digit_chars) / len(alnum_chars) >= 0.45
+
+    @staticmethod
+    def _looks_like_email(text: str) -> bool:
+        return bool(re.search(r"^[^@\s]+@[^@\s]+\.[^@\s]+$", str(text or "").strip()))
+
+    @staticmethod
+    def _looks_like_phone(text: str) -> bool:
+        value = str(text or "").strip()
+        digits = re.sub(r"\D+", "", value)
+        return len(digits) >= 7 and bool(re.search(r"^\+?[\d\s().-]+$", value))
+
+    @staticmethod
+    def _looks_like_url_or_path(text: str) -> bool:
+        value = str(text or "").strip()
+        return bool(re.match(r"^(https?://|/|#|mailto:|tel:)", value))
+
+    @classmethod
+    def _validate_collection_projection_quality(
+        cls,
+        *,
+        plan: TaskSpec,
+        extracted_data: dict,
+    ) -> list[str]:
+        if not isinstance(extracted_data, dict):
+            return []
+        collection_keys: set[str] = set()
+        expected_fields_by_key: dict[str, set[str]] = {}
+        for step in plan.steps:
+            action = str(step.action or "").strip()
+            args = step.args if isinstance(step.args, dict) else {}
+            intent = str(args.get("intent", "") or "").strip().casefold()
+            is_collection_step = action in {"extract_items", "extract_structured_items"} or (
+                action == "extract_by_intent" and intent in {"card_items", "cards", "table_rows", "rows"}
+            )
+            if not is_collection_step:
+                continue
+            output_key = str(args.get("output_key", "") or step.save_as or "").strip()
+            if not output_key:
+                continue
+            collection_keys.add(output_key)
+            fields = args.get("fields")
+            if isinstance(fields, dict):
+                expected = {str(field).strip() for field in fields if str(field).strip()}
+                if expected:
+                    expected_fields_by_key.setdefault(output_key, set()).update(expected)
+
+        issues: list[str] = []
+        technical_item_fields = {
+            "raw_text",
+            "selector",
+            "dom_path",
+            "bbox",
+            "confidence",
+            "source",
+            "match_scope",
+        }
+        semantic_fallback_fields = {
+            "title",
+            "name",
+            "description",
+            "summary",
+            "snippet",
+            "href",
+            "url",
+            "link",
+        }
+        for key in sorted(collection_keys):
+            value = extracted_data.get(key)
+            if not isinstance(value, list) or not value or not all(isinstance(item, dict) for item in value):
+                continue
+            expected_fields = expected_fields_by_key.get(key) or semantic_fallback_fields
+            has_projected_value = any(
+                any(cls._has_meaningful_value(item.get(field)) for field in expected_fields)
+                for item in value
+            )
+            has_nontechnical_value = any(
+                any(
+                    str(field).strip().casefold() not in technical_item_fields
+                    and cls._has_meaningful_value(item_value)
+                    for field, item_value in item.items()
+                )
+                for item in value
+            )
+            if not has_projected_value or not has_nontechnical_value:
+                issues.append(
+                    f"Collection '{key}' did not populate meaningful projected item fields; raw container text alone is insufficient."
+                )
+        return issues
 
     @staticmethod
     def _validate_single_value_key_alignment(
@@ -408,6 +570,14 @@ class LLMVerifier:
                     summary="Verifier saw partial success for required fields.",
                 )
 
+        anchor_object_verdict = cls._deterministic_anchor_object_fast_path(
+            normalized_required=normalized_required,
+            result=result,
+            extracted_data=extracted_data,
+        )
+        if anchor_object_verdict is not None:
+            return anchor_object_verdict
+
         count_fields = [field for field in normalized_required if field == "count" or field.endswith("_count")]
         if count_fields and len(count_fields) == len(normalized_required):
             missing_or_invalid = [
@@ -474,6 +644,125 @@ class LLMVerifier:
                 summary="Deterministic verifier accepted repeated structured extraction without LLM call.",
             )
         return None
+
+    @classmethod
+    def _deterministic_anchor_object_fast_path(
+        cls,
+        *,
+        normalized_required: list[str],
+        result: ExecutionResult,
+        extracted_data: dict,
+    ) -> VerificationVerdict | None:
+        label_fields: list[str] = []
+        count_fields: list[str] = []
+        for field in normalized_required:
+            field_hint = str(field or "").strip().casefold()
+            if any(token in field_hint for token in ("name", "title", "label", "language")):
+                label_fields.append(field)
+            elif any(token in field_hint for token in ("count", "number", "total", "value", "article")):
+                count_fields.append(field)
+        if not label_fields or not count_fields:
+            return cls._deterministic_anchor_parent_fast_path(
+                normalized_required=normalized_required,
+                result=result,
+                extracted_data=extracted_data,
+            )
+
+        recognized = set(label_fields) | set(count_fields)
+        for field in normalized_required:
+            if field in recognized:
+                continue
+            value = cls._value_for_required_field(field, result, extracted_data)
+            if cls._has_meaningful_value(value) and cls._looks_like_url_or_path(str(value)):
+                continue
+            return None
+
+        missing: list[str] = []
+        invalid: list[str] = []
+        for field in label_fields:
+            value = cls._value_for_required_field(field, result, extracted_data)
+            text = str(value or "").strip()
+            if not text:
+                missing.append(field)
+            elif cls._looks_like_countish_value(text) or len(text) > 160:
+                invalid.append(field)
+        for field in count_fields:
+            value = cls._value_for_required_field(field, result, extracted_data)
+            text = str(value or "").strip()
+            if not text:
+                missing.append(field)
+            elif not cls._looks_like_countish_value(text):
+                invalid.append(field)
+        if missing:
+            return VerificationVerdict(
+                task_completed=False,
+                confidence=0.58,
+                verdict="uncertain",
+                issues=["Partial anchor object fields satisfied; missing: " + ", ".join(missing)],
+                summary="Verifier saw partial anchor object extraction.",
+            )
+        if invalid:
+            return None
+        return VerificationVerdict(
+            task_completed=True,
+            confidence=0.93,
+            verdict="accept",
+            issues=[],
+            summary="Deterministic verifier accepted populated anchor object fields.",
+        )
+
+    @classmethod
+    def _deterministic_anchor_parent_fast_path(
+        cls,
+        *,
+        normalized_required: list[str],
+        result: ExecutionResult,
+        extracted_data: dict,
+    ) -> VerificationVerdict | None:
+        if not normalized_required:
+            return None
+        saw_anchor_parent = False
+        for field in normalized_required:
+            value = cls._value_for_required_field(field, result, extracted_data)
+            if isinstance(value, dict) and cls._dict_has_anchor_object_shape(value):
+                saw_anchor_parent = True
+                continue
+            if cls._has_meaningful_value(value) and cls._looks_like_url_or_path(str(value)):
+                continue
+            return None
+        if not saw_anchor_parent:
+            return None
+        return VerificationVerdict(
+            task_completed=True,
+            confidence=0.93,
+            verdict="accept",
+            issues=[],
+            summary="Deterministic verifier accepted populated nested anchor object.",
+        )
+
+    @classmethod
+    def _dict_has_anchor_object_shape(cls, value: dict) -> bool:
+        if not isinstance(value, dict):
+            return False
+        label_values: list[str] = []
+        count_values: list[str] = []
+        for key, item in value.items():
+            key_hint = str(key or "").strip().casefold()
+            text = str(item or "").strip() if item is not None else ""
+            if not text:
+                continue
+            if any(token in key_hint for token in ("name", "title", "label", "language")):
+                label_values.append(text)
+            elif any(token in key_hint for token in ("count", "number", "total", "value", "article")):
+                count_values.append(text)
+        has_label = any(text and not cls._looks_like_countish_value(text) and len(text) <= 160 for text in label_values)
+        has_count = any(cls._looks_like_countish_value(text) for text in count_values)
+        if has_label and has_count:
+            return True
+        for item in value.values():
+            if isinstance(item, dict) and cls._dict_has_anchor_object_shape(item):
+                return True
+        return False
 
     @classmethod
     def _normalized_extracted_data_for_verifier(

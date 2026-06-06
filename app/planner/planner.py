@@ -4,8 +4,12 @@ from typing import Any
 from urllib.parse import urlparse
 
 from app.planner.action_vocab import (
+    anchor_object_args_for_goal,
     canonical_structured_intent,
     coalesce_field_schema_steps,
+    default_output_key_for_intent,
+    repair_anchor_object_plan_steps,
+    repair_collection_plan_steps,
     looks_like_css_selector,
     normalize_plan_action_aliases,
     normalize_required_field_aliases,
@@ -452,14 +456,56 @@ class Planner:
         if not isinstance(required, list):
             return payload
 
+        def register_field_parent(mapping: dict[str, str], field_name: object, parent: str) -> None:
+            raw = str(field_name or "").strip()
+            if not raw:
+                return
+            mapping[raw] = parent
+            for alias in normalize_required_field_aliases([raw]):
+                if alias:
+                    mapping[alias] = parent
+
+        structured_field_to_parent: dict[str, str] = {}
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            save_as = str(step.get("save_as", "") or "").strip()
+            if not save_as:
+                continue
+            action = str(step.get("action", "") or "").strip()
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            fields = args.get("fields")
+            if action in {"extract_items", "extract_structured_items"} and isinstance(fields, dict):
+                for field_name in fields.keys():
+                    register_field_parent(structured_field_to_parent, field_name, save_as)
+            if action == "extract_by_intent":
+                intent = normalize_intent_alias(args.get("intent", ""))
+                if intent in {"field_schema", "anchor_object", "text_block", "card_items", "table_rows"}:
+                    if isinstance(fields, dict):
+                        for field_name in fields.keys():
+                            register_field_parent(structured_field_to_parent, field_name, save_as)
+                    for key in ("columns", "headers", "required_headers"):
+                        values = args.get(key)
+                        if isinstance(values, list):
+                            for field_name in values:
+                                register_field_parent(structured_field_to_parent, field_name, save_as)
+
         business_produced = sorted(
             str(field).strip()
             for field in produced
             if str(field).strip() and str(field).strip() not in {"page_snapshot", "clicked_text", "final_url", "page_title"}
         )
         required_clean = [str(field).strip() for field in required if str(field).strip()]
+        mapped_required: list[str] = []
+        for field in required_clean:
+            aliases = [field, *normalize_required_field_aliases([field])]
+            mapped = next((structured_field_to_parent[alias] for alias in aliases if alias in structured_field_to_parent), field)
+            if mapped in produced and mapped not in mapped_required:
+                mapped_required.append(mapped)
         filtered = [str(field).strip() for field in required if str(field).strip() in produced]
-        if business_produced and any(field not in produced for field in required_clean):
+        if mapped_required:
+            expected["required_fields"] = mapped_required
+        elif business_produced and any(field not in produced for field in required_clean):
             expected["required_fields"] = business_produced
         elif filtered:
             expected["required_fields"] = filtered
@@ -544,6 +590,188 @@ class Planner:
         if len(candidates) == 1:
             return candidates[0]
         return "items"
+
+    @staticmethod
+    def _intent_for_malformed_extract_items(*, args: dict[str, Any], output_key: str) -> str:
+        explicit = canonical_structured_intent(str(args.get("intent", "") or args.get("item_type", "") or ""))
+        if explicit:
+            return explicit
+        if any(args.get(key) for key in ("columns", "headers", "required_headers")):
+            return "table_rows"
+        output_hint = str(output_key or "").strip().casefold()
+        if output_hint in {"search_results", "results", "search_result"}:
+            return "search_results"
+        fields = args.get("fields")
+        field_names = {str(name).strip().casefold() for name in fields.keys()} if isinstance(fields, dict) else set()
+        cardish_fields = {"title", "name", "description", "summary", "snippet", "href", "url", "link"}
+        if field_names.intersection(cardish_fields):
+            return "card_items"
+        if output_hint in {"rows", "table_rows", "table"}:
+            return "table_rows"
+        if output_hint in {"cards", "items", "results", "listings", "catalog_items", "remaining_items", "list_items"}:
+            return "card_items"
+        return "card_items"
+
+    @staticmethod
+    def _condition_from_action_args(args: dict[str, Any]) -> dict[str, Any]:
+        for key in ("condition", "conditions", "where", "filter"):
+            value = args.get(key)
+            if value:
+                return value if isinstance(value, dict) else {"contains": value}
+        for key in ("target_text", "text", "label", "value", "query", "name"):
+            value = str(args.get(key, "") or "").strip()
+            if value:
+                return {"contains": value}
+        return {}
+
+    @staticmethod
+    def _row_condition_for_goal(goal: str) -> dict[str, Any]:
+        text = str(goal or "").strip()
+        quoted = re.findall(r'["“”«»]([^"“”«»]{1,120})["“”«»]', text)
+        if quoted:
+            return {"field": None, "operator": "contains", "value": quoted[0].strip()}
+        for pattern in (
+            r"(?:удали|удалить|убери|выбери|нажми|кликни)\s+(?:строку|элемент|пункт|запись)(?:\s+списка)?\s+с\s+текстом\s+(.{1,120}?)(?:,|\.|$)",
+            r"(?:строку|элемент|пункт|запись)(?:\s+списка)?\s+(?:с\s+текстом|содержащ(?:ую|ий|ее))\s+(.{1,120}?)(?:,|\.|$)",
+        ):
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if match:
+                value = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.\"'")
+                if value:
+                    return {"field": None, "operator": "contains", "value": value}
+        patterns = [
+            r"\b(?:row|item|record|list item|table row)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
+            r"\b(?:delete|remove|archive|select|choose|click)\s+(?:the\s+)?(?:row|item|record|list item|table row)\s+(?:named|called|labeled|labelled|with text|containing|contains)\s+(.{1,120}?)(?:,|\.|\bthen\b|$)",
+            r"(?:удали|удалить|убери|выбери|нажми|кликни)\s+(?:строку|элемент|пункт|запись)(?:\s+списка)?\s+с\s+текстом\s+(.{1,120}?)(?:,|\.|$)",
+            r"(?:строку|элемент|пункт|запись)(?:\s+списка)?\s+(?:с\s+текстом|содержащ(?:ую|ий|ее))\s+(.{1,120}?)(?:,|\.|$)",
+        ]
+        for pattern in patterns:
+            match = re.search(pattern, text, flags=re.IGNORECASE)
+            if not match:
+                continue
+            value = re.sub(r"\s+", " ", match.group(1)).strip(" :;,.\"'")
+            if value:
+                return {"field": None, "operator": "contains", "value": value}
+        return {}
+
+    @staticmethod
+    def _strengthen_weak_wait_args(args: dict[str, Any]) -> None:
+        if not str(args.get("text", "") or "").strip():
+            return
+        if any(str(args.get(key, "") or "").strip() for key in ("selector", "url_contains", "scope_selector")):
+            return
+        if args.get("exact") is True:
+            return
+        args.pop("text", None)
+        args["selector"] = "main h1, article h1, h1"
+
+    @staticmethod
+    def _has_wait_condition(args: dict[str, Any]) -> bool:
+        return any(str(args.get(key, "") or "").strip() for key in ("selector", "url_contains", "text", "scope_selector"))
+
+    @staticmethod
+    def _ensure_visual_count_target(step: dict[str, Any], required_fields: list[str]) -> None:
+        args = step.get("args")
+        if not isinstance(args, dict):
+            return
+        if str(args.get("object", args.get("shape", args.get("target", ""))) or "").strip():
+            return
+        candidate = (
+            str(args.get("output_key", "") or "").strip()
+            or str(step.get("save_as", "") or "").strip()
+            or next((str(field).strip() for field in required_fields if str(field).strip()), "")
+            or "item"
+        )
+        args["target"] = candidate
+
+    @staticmethod
+    def _requires_anchor_object(*, required_fields: list[str], goal: str) -> bool:
+        if anchor_object_args_for_goal(goal, required_fields):
+            return True
+        normalized = [str(field).strip().casefold() for field in required_fields if str(field).strip()]
+        if len(normalized) < 2:
+            return False
+        has_label = any(any(token in field for token in ("name", "title", "label", "language")) for field in normalized)
+        has_value = any(any(token in field for token in ("count", "number", "total", "value")) for field in normalized)
+        if not (has_label and has_value):
+            return False
+        folded_goal = str(goal or "").casefold()
+        return any(token in folded_goal for token in ("near", "next to", "beside", "рядом", "возле", "около"))
+
+    @staticmethod
+    def _goal_requests_remaining_items(goal: str) -> bool:
+        folded = str(goal or "").casefold()
+        return any(
+            token in folded
+            for token in (
+                "remaining",
+                "left",
+                "after action",
+                "after deleting",
+                "оставшиеся",
+                "после действия",
+                "после удаления",
+            )
+        )
+
+    @classmethod
+    def _ensure_search_result_navigation_step(cls, steps: list[dict], *, required_fields: list[str]) -> list[dict]:
+        if not cls._needs_search_result_navigation_step(steps=steps, required_fields=required_fields):
+            return steps
+        insert_index = next((idx + 1 for idx, step in enumerate(steps) if step.get("action") == "open_url"), 0)
+        repaired = list(steps)
+        repaired.insert(
+            insert_index,
+            {
+                "step_id": 0,
+                "action": "click_by_semantic_target",
+                "args": {"target_text": "first relevant result", "role": "link"},
+            },
+        )
+        return repaired
+
+    @classmethod
+    def _needs_search_result_navigation_step(cls, *, steps: list[dict], required_fields: list[str]) -> bool:
+        if any(step.get("action") == "click_by_semantic_target" for step in steps if isinstance(step, dict)):
+            return False
+        if not any(
+            cls._url_looks_like_search_context((step.get("args") or {}).get("url"))
+            for step in steps
+            if isinstance(step, dict) and step.get("action") == "open_url" and isinstance(step.get("args"), dict)
+        ):
+            return False
+        technical_fields = {"page_snapshot", "final_url", "page_title", "visible_links", "links", "search_results", "results"}
+        business_fields = [field for field in required_fields if str(field or "").strip() not in technical_fields]
+        if not business_fields:
+            return False
+        for step in steps:
+            if not isinstance(step, dict):
+                continue
+            args = step.get("args") if isinstance(step.get("args"), dict) else {}
+            intent = normalize_intent_alias(args.get("intent", ""))
+            save_as = str(step.get("save_as", "") or args.get("output_key", "") or "").strip().casefold()
+            if intent in {"search_results", "visible_links", "links"} or save_as in {"search_results", "visible_links", "links"}:
+                return False
+        return any(
+            step.get("action") in {"observe_page", "extract_text", "extract_by_intent", "extract_value_near_anchor"}
+            for step in steps
+            if isinstance(step, dict)
+        )
+
+    @staticmethod
+    def _url_looks_like_search_context(value: object) -> bool:
+        url = str(value or "").strip()
+        if not url:
+            return False
+        try:
+            parsed = urlparse(url)
+        except Exception:
+            return False
+        path = parsed.path.casefold()
+        query = parsed.query.casefold()
+        if any(part in path for part in ("/search", "/find", "/results")):
+            return True
+        return bool(re.search(r"(?:^|&)(?:q|query|search|s|keyword|keywords|term)=", query))
 
     @classmethod
     def _normalize_plan_envelope(
@@ -635,7 +863,42 @@ class Planner:
             action = str(current.get("action", action)).strip()
             if not isinstance(current.get("step_id"), int):
                 current["step_id"] = index
-            if action == "extract_structured_items" and "pattern" not in current["args"]:
+            if action == "extract_items":
+                missing_item_contract = (
+                    not str(current["args"].get("container_selector", "") or "").strip()
+                    or not isinstance(current["args"].get("fields"), dict)
+                    or not isinstance(current["args"].get("limit"), int)
+                    or current["args"].get("limit", 0) <= 0
+                )
+                if missing_item_contract:
+                    output_key = current["args"].get("output_key") or current.get("save_as") or cls._infer_collection_output_key(
+                        user_goal=user_goal,
+                        args=current["args"],
+                        required_fields=required_fields,
+                    )
+                    structural_intent = cls._intent_for_malformed_extract_items(
+                        args=current["args"],
+                        output_key=str(output_key or ""),
+                    )
+                    if structural_intent:
+                        preserved_args = current["args"]
+                        action = "extract_by_intent"
+                        current["action"] = action
+                        current["args"] = {
+                            "intent": structural_intent,
+                            "output_key": output_key or default_output_key_for_intent(structural_intent),
+                            "limit": preserved_args.get("limit") if isinstance(preserved_args.get("limit"), int) and preserved_args.get("limit") > 0 else 20,
+                            **({"fields": preserved_args.get("fields")} if isinstance(preserved_args.get("fields"), dict) and preserved_args.get("fields") else {}),
+                            **({"columns": preserved_args.get("columns")} if isinstance(preserved_args.get("columns"), list) and preserved_args.get("columns") else {}),
+                            **({"headers": preserved_args.get("headers")} if isinstance(preserved_args.get("headers"), list) and preserved_args.get("headers") else {}),
+                            **({"condition": preserved_args.get("condition")} if preserved_args.get("condition") else {}),
+                            **({"filter": preserved_args.get("filter")} if preserved_args.get("filter") else {}),
+                            **({"where": preserved_args.get("where")} if preserved_args.get("where") else {}),
+                        }
+                        if not str(current.get("save_as", "") or "").strip():
+                            current["save_as"] = str(current["args"]["output_key"])
+
+            if action == "extract_structured_items" and not str(current["args"].get("pattern", "") or "").strip():
                 allowed_actions = set()
                 if isinstance(benchmark_context, dict) and isinstance(benchmark_context.get("allowed_actions"), list):
                     allowed_actions = {str(item).strip() for item in benchmark_context.get("allowed_actions", [])}
@@ -650,14 +913,19 @@ class Planner:
                     canonical_structured_intent(explicit_structured_intent)
                     or semantic_intent_for_structured_step(current)
                 )
+                output_key = current["args"].get("output_key") or cls._infer_collection_output_key(
+                    user_goal=user_goal,
+                    args=current["args"],
+                    required_fields=required_fields,
+                )
+                if not structured_intent and extract_by_intent_allowed:
+                    structured_intent = cls._intent_for_malformed_extract_items(
+                        args=current["args"],
+                        output_key=str(output_key or ""),
+                    )
                 if structured_intent and extract_by_intent_allowed:
                     action = "extract_by_intent"
                     current["action"] = action
-                    output_key = current["args"].get("output_key") or cls._infer_collection_output_key(
-                        user_goal=user_goal,
-                        args=current["args"],
-                        required_fields=required_fields,
-                    )
                     current["args"] = {
                         "intent": structured_intent,
                         **({"fields": current["args"].get("fields")} if isinstance(current["args"].get("fields"), dict) else {}),
@@ -715,10 +983,6 @@ class Planner:
                     }
                     if output_key and not str(current.get("save_as", "") or "").strip():
                         current["save_as"] = str(output_key)
-                elif "pattern" in current["args"] and (
-                    not isinstance(current["args"].get("limit"), int) or current["args"].get("limit") <= 0
-                ):
-                    current["args"]["limit"] = 20
                 elif visible_links_allowed:
                     action = "extract_visible_links"
                     current["action"] = action
@@ -755,6 +1019,15 @@ class Planner:
                 current["args"]["intent"] = "row_fields"
             if action == "extract_by_intent" and str(current["args"].get("intent", "") or "").strip():
                 current["args"]["intent"] = normalize_intent_alias(current["args"].get("intent"))
+                if (
+                    current["args"]["intent"] in {"field_schema", "value_near_anchor"}
+                    and cls._requires_anchor_object(required_fields=required_fields, goal=user_goal)
+                ):
+                    current["args"]["intent"] = "anchor_object"
+                    current["args"].setdefault(
+                        "fields",
+                        {field: {"type": "text"} for field in required_fields},
+                    )
             if action == "extract_text":
                 save_as = str(current.get("save_as", "") or "").strip()
                 selector_hint = str(current["args"].get("selector", "") or "").strip().casefold()
@@ -763,6 +1036,20 @@ class Planner:
                     action = "extract_by_intent"
                     current["action"] = action
                     current["args"] = {"intent": "page_title"}
+            if action == "wait_for":
+                cls._strengthen_weak_wait_args(current["args"])
+                if not cls._has_wait_condition(current["args"]):
+                    continue
+            if action == "find_row_by_condition" and not current["args"].get("condition"):
+                condition = cls._row_condition_for_goal(user_goal) or cls._condition_from_action_args(current["args"])
+                if condition:
+                    current["args"]["condition"] = condition
+            if action == "click_row_action" and not (current["args"].get("row_ref") or current["args"].get("condition")):
+                condition = cls._row_condition_for_goal(user_goal) or cls._condition_from_action_args(current["args"])
+                if condition:
+                    current["args"]["condition"] = condition
+            if action == "visual_extract_object_count":
+                cls._ensure_visual_count_target(current, required_fields)
             if action == "click_by_semantic_target":
                 if "target_text" not in current["args"] and current["args"].get("text") is not None:
                     current["args"]["target_text"] = current["args"].pop("text")
@@ -852,6 +1139,42 @@ class Planner:
             goal=user_goal,
             required_fields=required_fields,
         )
+        normalized_steps, required_fields = repair_anchor_object_plan_steps(
+            normalized_steps,
+            goal=user_goal,
+            required_fields=required_fields,
+        )
+        normalized_steps, required_fields = repair_collection_plan_steps(
+            normalized_steps,
+            goal=user_goal,
+            required_fields=required_fields,
+        )
+        normalized_steps = cls._ensure_search_result_navigation_step(
+            normalized_steps,
+            required_fields=required_fields,
+        )
+
+        if cls._goal_requests_remaining_items(user_goal):
+            has_row_action_step = any(step.get("action") == "click_row_action" for step in normalized_steps)
+            has_remaining_extraction = any(
+                str(step.get("save_as", "") or step.get("args", {}).get("output_key", "")).strip() == "remaining_items"
+                for step in normalized_steps
+                if isinstance(step.get("args"), dict)
+            )
+            if has_row_action_step and not has_remaining_extraction:
+                insert_index = next(
+                    (idx + 1 for idx, step in enumerate(normalized_steps) if step.get("action") == "click_row_action"),
+                    len(normalized_steps),
+                )
+                normalized_steps.insert(
+                    insert_index,
+                    {
+                        "step_id": 0,
+                        "action": "extract_by_intent",
+                        "args": {"intent": "card_items", "output_key": "remaining_items", "limit": 50},
+                        "save_as": "remaining_items",
+                    },
+                )
 
         produced_fields = {
             str(step.get("save_as", "") or "").strip()
